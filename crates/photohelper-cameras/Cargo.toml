@@ -1,0 +1,15 @@
+[package]
+name = "photohelper-cameras"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Camera profile registry (Canon R8 first; extensible)"
+
+[lints]
+workspace = true
+
+[dependencies]
+photohelper-core = { path = "../photohelper-core" }

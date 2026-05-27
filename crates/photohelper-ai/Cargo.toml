@@ -1,0 +1,23 @@
+[package]
+name = "photohelper-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "AI inference (ONNX Runtime / tract) for culling + improvement"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Compile-time gates land alongside the inference wiring in later sessions:
+#   ai-culling      = ["dep:ort"]    # NIMA / ARNIQA / face-mesh / MobileCLIP
+#   ai-denoise      = ["dep:ort"]    # SCUNet
+#   ai-sharpen      = ["dep:ort"]    # Real-ESRGAN
+#   tract-fallback  = ["dep:tract"]  # pure-Rust runtime
+
+[dependencies]
+photohelper-core = { path = "../photohelper-core" }

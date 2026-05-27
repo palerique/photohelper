@@ -1,0 +1,18 @@
+[package]
+name = "photohelper-raw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "RAW (CR3 / CR2 / …) decode pipeline via LibRaw"
+
+[lints]
+# Override workspace-level `unsafe_code = "forbid"` — libraw FFI requires
+# `unsafe` blocks (scoped to one module). The lint stays `deny` at file scope
+# via `#![deny(unsafe_op_in_unsafe_fn)]` once we wire libraw.
+workspace = true
+
+[dependencies]
+photohelper-core = { path = "../photohelper-core" }

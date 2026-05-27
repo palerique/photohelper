@@ -1,0 +1,15 @@
+[package]
+name = "photohelper-sidecar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "XMP sidecar I/O (Lightroom-compatible crs: + photohelper ph: namespace)"
+
+[lints]
+workspace = true
+
+[dependencies]
+photohelper-core = { path = "../photohelper-core" }

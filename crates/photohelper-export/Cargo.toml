@@ -1,0 +1,15 @@
+[package]
+name = "photohelper-export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Resize, watermark, and JPEG encode (mozjpeg + cosmic-text + tiny-skia)"
+
+[lints]
+workspace = true
+
+[dependencies]
+photohelper-core = { path = "../photohelper-core" }

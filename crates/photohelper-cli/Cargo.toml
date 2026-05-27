@@ -1,0 +1,19 @@
+[package]
+name = "photohelper-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "photohelper command-line entrypoint"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "photohelper"
+path = "src/main.rs"
+
+[dependencies]
+photohelper-core = { path = "../photohelper-core" }

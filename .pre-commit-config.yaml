@@ -1,0 +1,59 @@
+# photohelper — git hook configuration.
+#
+# Runner: prek (https://github.com/j178/prek), a drop-in pre-commit
+# replacement. Install:  just install-hooks
+#
+# Hook bodies call the `just` recipes so there is a single source of truth for
+# each gate (the recipe bodies live in justfile, derived from stacks/rust.md).
+
+default_stages: [pre-commit]
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  # --- Baseline hygiene ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+        exclude: ^\.github/workflows/   # GH Actions syntax trips strict YAML
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=256"]
+
+  # --- Repo-local: protocol enforcement (stack-agnostic) ---
+  - repo: local
+    hooks:
+      # State verification on every push (authoritative).
+      - id: verify-state
+        name: verify-state.sh
+        entry: ./scripts/verify-state.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+  # --- Repo-local: Rust quality gates (see stacks/rust.md) ---
+  - repo: local
+    hooks:
+      - id: fmt-check
+        name: format check (rust)
+        entry: just fmt-check
+        language: system
+        files: \.rs$
+        pass_filenames: false
+
+      - id: lint
+        name: lint (clippy, zero warnings)
+        entry: just lint
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: test
+        name: test (cargo test)
+        entry: just test
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

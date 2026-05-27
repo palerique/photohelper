@@ -1,0 +1,18 @@
+# Rust
+/target
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs / scratch
+*.log
+.scratch/
+
+# photohelper runtime caches
+.photohelper/
