@@ -56,3 +56,9 @@ thiserror.workspace = true
 # (per plan §1b: "module-scope, NOT cfg(test)") so it gates the
 # production build, not just the test profile.
 static_assertions.workspace = true
+
+[build-dependencies]
+# `sha2` verifies the vendored LibRaw tarball's SHA-256 at build time
+# (Acceptance criterion 7). Pure-Rust crypto — no system openssl
+# dependency at build time.
+sha2.workspace = true

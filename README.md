@@ -17,10 +17,18 @@ and Windows.
 ## Quickstart (contributors)
 
 ```bash
-# prerequisites: Rust 1.85.0 (rust-toolchain.toml pins this) + just + prek
-# on macOS: brew install rustup just prek
-#           rustup set profile minimal && rustup install 1.85.0 --component rustfmt --component clippy
+# prerequisites: Rust 1.88.0 (rust-toolchain.toml pins this) + just + prek
+#                + system C/C++ toolchain + pkg-config + GNU make
+#                (LibRaw 0.22.1 is vendored under crates/photohelper-raw/vendor/
+#                 and built via autoconf the first time `cargo build` runs)
+#
+# on macOS: brew install rustup just prek pkgconf  # pkgconf provides pkg-config
+#           xcode-select --install                  # if you don't have Xcode CLT yet
+#           rustup set profile minimal && rustup install 1.88.0 --component rustfmt --component clippy
 #           cargo install cargo-audit --locked
+#
+# on Debian/Ubuntu: sudo apt install build-essential pkg-config rustup just prek
+# on Fedora:        sudo dnf install make gcc-c++ pkgconf-pkg-config rustup just prek
 
 just install-hooks      # one-time: install pre-commit + pre-push hooks
 just build              # cargo build --release --all-features --workspace

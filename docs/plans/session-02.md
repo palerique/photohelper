@@ -465,14 +465,27 @@ pub enum RawDecodeCause {
 
 - **Strategy locked at plan-review v3** (per R2-T4) and **version escalated
   at plan-v3.2** (post-Deliverable-0 per `docs/analysis/ANL-001-libraw-cr3-preflight.md`):
-  vendor LibRaw **=0.22.1** at `crates/photohelper-raw/vendor/libraw-0.22.1/`.
+  vendor LibRaw **=0.22.1** at `crates/photohelper-raw/vendor/libraw-0.22.1.tar.gz`.
   Plan-v3.1 targeted `=0.21.4`; Deliverable 0 escalated to `=0.22.1` because
   the 0.22.1 release ships TALOS-2026 fixes + two CR3-parser hardenings
   that did NOT backport to 0.21.5b (LibRaw 0.21.x is effectively EOL post-
   2025-12-25).
-- `crates/photohelper-raw/build.rs` invokes `cmake` (via the `cmake`
-  crate) to compile vendored LibRaw as a static library; links the result
-  into `photohelper-raw`.
+- **Plan-v3.3 amendment (per Deliverable 2 commit)**: `build.rs` invokes
+  `./configure && make` (autoconf), NOT `cmake`. LibRaw 0.22.1's tarball
+  ships only the autoconf scripts (`configure`, `Makefile.am`); the cmake
+  build rules live in a separate `LibRaw/LibRaw-cmake` upstream repo per
+  the bundled `README.cmake`. Vendoring a second repo for cmake rules
+  would double the §6(a) tarball-shipping surface, so the autoconf path
+  is the right call. System prerequisite: `pkg-config` (or `pkgconf`
+  shim) — documented in `README.md` § Quickstart.
+- `crates/photohelper-raw/build.rs` invokes `./configure
+  --disable-shared --enable-static --disable-jpeg --disable-lcms
+  --disable-openmp --disable-examples` then `make -j` against the
+  vendored tarball extracted to `OUT_DIR`; links the resulting
+  `lib/.libs/libraw.a` statically into `photohelper-raw` via
+  `cargo:rustc-link-lib=static=raw`. C++ standard library (`c++` on
+  macOS, `stdc++` on Linux) and `z` (zlib, LibRaw's default
+  configure-time link) are added as additional link directives.
 - **SHA-256 verification**: tarball SHA-256 recorded at
   `crates/photohelper-raw/vendor/libraw-0.22.1.tar.gz.sha256` and verified
   by `build.rs` at the start of the build. Tampered tarball → build fails

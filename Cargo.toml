@@ -54,6 +54,10 @@ time = { version = "0.3.47", features = ["macros"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 fs4 = { version = "1", features = ["sync"] }
 
+# Build-script crypto (used by photohelper-raw's build.rs to verify the
+# vendored LibRaw tarball's SHA-256 — Acceptance criterion 7).
+sha2 = "0.10"
+
 # Dev-deps used across crates
 assert_cmd = "2"
 predicates = "3"
