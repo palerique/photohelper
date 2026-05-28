@@ -57,6 +57,20 @@ just clean-catalog --catalog /path/to/your.db --yes
 Original photo files are never touched — only the `.photohelper/` derived
 metadata is removed.
 
+### List ingested photos
+
+```bash
+just list-catalog "$HOME/Pictures/tests"               # pretty table, first 50 rows
+just list-catalog "$HOME/Pictures/tests" --count       # just the row count
+just list-catalog "$HOME/Pictures/tests" --by-camera   # aggregate
+just list-catalog "$HOME/Pictures/tests" --paths-only  # pipe-friendly
+just list-catalog "$HOME/Pictures/tests" --limit 0 --sort path
+```
+
+Read-only against the SQLite catalog at `<ingest-dir>/.photohelper/catalog.db`.
+Pass `--catalog <db-path>` instead of a directory for a custom location.
+Run `just list-catalog --help` for the full flag list.
+
 ## Roadmap (per the bootstrap plan)
 
 - **v0.1 (AI-first MVP)** — Canon R8 (CR3) ingest, AI culling (NIMA/ARNIQA
