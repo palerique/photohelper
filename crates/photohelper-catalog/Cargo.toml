@@ -16,8 +16,11 @@ photohelper-core = { path = "../photohelper-core" }
 rusqlite.workspace = true
 fs4.workspace = true
 tracing.workspace = true
-thiserror.workspace = true
-time.workspace = true
+# `thiserror` + `time` dropped in session 02 D4 — neither is consumed
+# by photohelper-catalog today (the catalog's error variants live on
+# `photohelper-core::Error`, and Unix-seconds work uses `std::time`).
+# Re-add when the catalog acquires its own derive(Error) or `time`-crate
+# parsing surface.
 
 [dev-dependencies]
 tempfile.workspace = true

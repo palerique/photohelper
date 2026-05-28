@@ -19,6 +19,7 @@ path = "src/main.rs"
 photohelper-core = { path = "../photohelper-core" }
 photohelper-cameras = { path = "../photohelper-cameras" }
 photohelper-catalog = { path = "../photohelper-catalog" }
+photohelper-raw = { path = "../photohelper-raw" }
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -26,7 +27,6 @@ tracing-subscriber.workspace = true
 walkdir.workspace = true
 rayon.workspace = true
 num_cpus.workspace = true
-kamadak-exif.workspace = true
 rusqlite.workspace = true
 time.workspace = true
 

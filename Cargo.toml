@@ -44,15 +44,40 @@ rayon = "1"
 blake3 = "1"
 base64 = "0.22"
 
-# EXIF reading (default; DN-006 fallback may swap to LibRaw in session 02)
-kamadak-exif = "0.6"
+# EXIF reading: LibRaw via `photohelper-raw::exif::read_cr3` is the v0.1
+# sole producer (closes DN-006/DN-011: kamadak-exif failed on 370/370
+# real Canon R8 CR3s). The kamadak-exif crate is no longer a workspace
+# dep; the `unused_crate_dependencies` lint below catches any
+# accidental re-introduction.
 
 # Time
 time = { version = "0.3.47", features = ["macros"] }
 
-# Persistence
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Persistence — `rusqlite 0.34` (was 0.32 through session 01 → TD-002).
+# Bumped voluntarily ahead of TD-002's 2026-08-01 calendar trigger
+# because session 02 is already in catalog-touching territory and the
+# bundled SQLite version under 0.32 was ~14 months stale. API surface
+# verified for our call sites (open / execute / query_row /
+# Transaction::Immediate / params!).
+#
+# v0.40 attempted (the plan's original target) but its bundled
+# `libsqlite3-sys 0.38.x` uses `cfg_select!` which requires MSRV 1.92
+# (we're on 1.88 per `rust-toolchain.toml`). Falling back to 0.34
+# (last MSRV-1.88-compatible release on the recent line). TD-002
+# remains open with a revised target: bump to latest rusqlite on the
+# next MSRV bump.
+rusqlite = { version = "0.34", features = ["bundled"] }
 fs4 = { version = "1", features = ["sync"] }
+
+# Build-script crypto (used by photohelper-raw's build.rs to verify the
+# vendored LibRaw tarball's SHA-256 — Acceptance criterion 7).
+sha2 = "0.10"
+# C/C++ compiler driver used by photohelper-raw's build.rs to compile
+# `cpp/photohelper_libraw_shim.c` (the minimal C-ABI wrapper that exposes
+# stable typed-pointer + numeric-return accessors over LibRaw's larger
+# struct types — avoids fragile #[repr(C)] mirroring of libraw_iparams_t /
+# libraw_image_sizes_t / libraw_imgother_t in Rust).
+cc = "1"
 
 # Dev-deps used across crates
 assert_cmd = "2"
@@ -78,6 +103,10 @@ debug = "limited"
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
+# Catch any new workspace.dependencies entry that's declared but not
+# actually consumed by the crate — guards against re-introducing
+# kamadak-exif (per plan §4a R2-T8 atomic-commit shape).
+unused_crate_dependencies = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -85,6 +114,11 @@ unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
 indexing_slicing = "warn"
+# Defense-in-depth for `photohelper-raw`'s FFI module: every `unsafe`
+# block must carry a `// SAFETY:` comment justifying why the contract is
+# upheld. Workspace-level so the moment any new crate ever opts in to
+# `unsafe_code = allow`, the SAFETY-comment requirement comes for free.
+undocumented_unsafe_blocks = "deny"
 # Pedantic-class style preferences relaxed at workspace level — the
 # meaningful production-correctness gates above (unwrap/expect/panic/
 # indexing) are what `CLAUDE.md § Rust-specific gates` actually requires.

@@ -20,13 +20,15 @@ workspace = true
 blake3.workspace = true
 base64.workspace = true
 thiserror.workspace = true
-time.workspace = true
+# `time` crate dropped in session 02 D4 (unused — the only `time::`
+# references in this crate are `std::time::UNIX_EPOCH`, not the `time`
+# crate); the new `unused_crate_dependencies` workspace lint caught it.
 
 [dev-dependencies]
 tempfile.workspace = true
-# R2-T15: `trybuild` is declared but unused in this session (plan row 6
-# compile-fail test for `PhotoId::from_db_bytes` visibility deferred to
-# session 02 per DN-008). Kept as a placeholder dep; deletion vs. wire-up
-# decision lands in session 02.
-trybuild.workspace = true
+# `trybuild` removed in session 02 (Deliverable 4 atomic commit per
+# plan §4a item 7a + R3-T4 coordination): the dep was declared but
+# never consumed, and the new `unused_crate_dependencies` lint would
+# fire. The DN-008 row-6 compile-fail test will re-declare it in the
+# same commit that adds the test (deferred to session 03+).
 filetime.workspace = true

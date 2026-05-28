@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -19,12 +19,17 @@ use photohelper_cameras::CameraRegistry;
 use photohelper_catalog::{Catalog, UpsertOutcome};
 use photohelper_core::Error;
 use photohelper_core::model::{
-    AbsPath, CameraId, ExifMetadata, ExifOrientation, IngestOutcome, Photo, PhotoId, clamp_mtime,
+    AbsPath, CameraId, ExifMetadata, IngestOutcome, Photo, PhotoId, clamp_mtime,
 };
 
 use crate::{Cli, IngestArgs, exit_code};
 
-const RAW_EXTS: &[&str] = &["cr3", "cr2", "arw", "nef", "raf", "orf", "rw2", "dng"];
+// Narrowed to `["cr3"]` for v0.1 per plan §4a R2-T8: photohelper supports
+// exactly one RAW format (Canon CR3) until a non-Canon `CameraProfile`
+// lands (per DN-014's binding trigger). Re-expansion to the full
+// 7-format walker behavior happens in the same session that adds the
+// second profile.
+const RAW_EXTS: &[&str] = &["cr3"];
 
 /// Heartbeat interval. Overridable in tests via the
 /// `PHOTOHELPER_HEARTBEAT_INTERVAL_MS` env var so test row 48 (heartbeat
@@ -36,6 +41,46 @@ fn heartbeat_interval() -> Duration {
         return Duration::from_millis(ms.max(10));
     }
     Duration::from_secs(10)
+}
+
+/// Cooperative stop signal for the heartbeat thread. Pairs a `Mutex<bool>`
+/// with a `Condvar` so the heartbeat loop's wait can be cut short the
+/// instant `run_ingest` is ready to print the summary line — closes TD-003
+/// (the previous `AtomicBool` + `thread::sleep(granularity)` design left
+/// the heartbeat thread orphaned, racing stderr against the summary line).
+pub(crate) struct HeartbeatStop {
+    lock: Mutex<bool>,
+    cvar: Condvar,
+}
+
+impl HeartbeatStop {
+    fn new() -> Self {
+        Self {
+            lock: Mutex::new(false),
+            cvar: Condvar::new(),
+        }
+    }
+
+    /// Mark the stop flag and wake every waiter immediately.
+    fn signal(&self) {
+        let mut stopped = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        *stopped = true;
+        drop(stopped);
+        self.cvar.notify_all();
+    }
+
+    /// Wait up to `dur` for `signal()`; returns `true` if stop was observed.
+    fn wait_for_stop(&self, dur: Duration) -> bool {
+        let stopped = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        if *stopped {
+            return true;
+        }
+        let (stopped, _) = self
+            .cvar
+            .wait_timeout(stopped, dur)
+            .unwrap_or_else(|p| p.into_inner());
+        *stopped
+    }
 }
 
 /// Atomic counters mapped 1:1 to the §Observability summary line.
@@ -127,13 +172,19 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
     let registry = Arc::new(CameraRegistry::default());
     let seen_unknown = Arc::new(Mutex::new(HashSet::<(String, String)>::new()));
 
-    // Heartbeat thread: spawned (handle retained for is_finished check),
-    // never joined; reads Arc<AtomicBool> stop flag.
-    let stop_flag = Arc::new(AtomicBool::new(false));
+    // Heartbeat thread: spawned with a named handle so debuggers/profilers
+    // show "ph-heartbeat" instead of `thread<unnamed>`. The thread parks on
+    // `HeartbeatStop`'s Condvar between ticks; `signal()` wakes it the
+    // moment the walk completes so the post-walk `.join()` returns near-
+    // instantly (no granularity-cycle latency added to summary printing).
+    let stop = Arc::new(HeartbeatStop::new());
     let heartbeat_handle = {
         let stats = Arc::clone(&stats);
-        let stop = Arc::clone(&stop_flag);
-        thread::spawn(move || heartbeat_loop(&stats, &stop, heartbeat_interval()))
+        let stop = Arc::clone(&stop);
+        thread::Builder::new()
+            .name("ph-heartbeat".into())
+            .spawn(move || heartbeat_loop(&stats, &stop, heartbeat_interval()))
+            .context("spawning heartbeat thread")?
     };
 
     let walker = walkdir::WalkDir::new(input_root.as_path()).follow_links(false);
@@ -178,17 +229,13 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
              unavailable during ingest"
         );
     }
-    stop_flag.store(true, Ordering::Relaxed);
-    // The heartbeat thread observes the flag within `granularity` (≤100ms
-    // post-R2-T4) and exits cleanly. We don't .join() — that would add up
-    // to one `granularity` cycle (≤100ms) of latency to summary printing.
-    // Trade-off accepted: up to one granularity-cycle of zombie heartbeat
-    // output may appear after the summary line, tests asserting strict
-    // stderr ordering can flake, and in-process test runs that re-invoke
-    // `run_ingest` accumulate one leaked detached thread per call until
-    // process exit. Tracked as TD-003 (heartbeat-join) with a session-02
-    // binding trigger; file-TD upgrade if this becomes a problem in
-    // production once real CR3 fixtures land.
+    // TD-003 closure (DN-019 trigger fired): signal the Condvar so the
+    // heartbeat thread wakes up immediately, then join the handle so every
+    // `[heartbeat]` line is flushed to stderr BEFORE the summary line.
+    // Joining also reaps the detached thread that previously leaked once
+    // per `run_ingest` call.
+    stop.signal();
+    let _ = heartbeat_handle.join();
 
     eprintln!("{}", stats.summary_line());
 
@@ -220,13 +267,25 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
     Ok(0)
 }
 
-fn heartbeat_loop(stats: &IngestStats, stop: &AtomicBool, interval: Duration) {
+fn heartbeat_loop(stats: &IngestStats, stop: &HeartbeatStop, interval: Duration) {
     // R2-T4 fix: granularity = min(interval, 100ms). Pre-fix the granularity
     // was hardcoded to 100ms, which meant `PHOTOHELPER_HEARTBEAT_INTERVAL_MS`
     // values below 100 silently floored to 100ms because the first iteration
     // always slept `granularity` before the tick-counter check. Now sub-100ms
     // env overrides actually take effect (used by tests) while production
     // (interval=10s) still gets the 100ms responsive-to-stop-flag behavior.
+    //
+    // TD-003 closure: the wait below is a Condvar `wait_timeout`, not a
+    // blind `thread::sleep`, so `stop.signal()` cuts the wait short and the
+    // join in `run_ingest` returns near-instantly (no granularity-cycle
+    // latency added to summary printing).
+    //
+    // Tick BEFORE wait (DN-019 lesson): with a wait-first loop, a fast
+    // ingest could finish + signal `stop` before the heartbeat thread was
+    // scheduled, leaving the first `wait_for_stop` to observe the signal
+    // immediately and return without ever printing. Tick-first guarantees
+    // the operator gets at least one liveness signal per `interval` even
+    // when the run is shorter than the OS thread-startup latency.
     let granularity = interval.min(Duration::from_millis(100));
     let ticks = interval
         .as_millis()
@@ -234,8 +293,7 @@ fn heartbeat_loop(stats: &IngestStats, stop: &AtomicBool, interval: Duration) {
         .unwrap_or(1)
         .max(1) as u64;
     let mut counter: u64 = 0;
-    while !stop.load(Ordering::Relaxed) {
-        thread::sleep(granularity);
+    loop {
         counter += 1;
         if counter >= ticks {
             counter = 0;
@@ -245,6 +303,9 @@ fn heartbeat_loop(stats: &IngestStats, stop: &AtomicBool, interval: Duration) {
                 stats.ingested.load(Ordering::Relaxed),
                 stats.in_flight.load(Ordering::Relaxed),
             );
+        }
+        if stop.wait_for_stop(granularity) {
+            return;
         }
     }
 }
@@ -330,7 +391,7 @@ pub(crate) fn ingest_one(
     // with zero fields" on the same file. User's prod trace on 371 real CR3s
     // produced 740 misleading log lines. The counter still bumps in both
     // cases because the §Observability contract says no-exif rows still ingest.
-    let (exif, parse_failed) = match parse_exif(canonical.as_path()) {
+    let (exif, parse_failed) = match parse_cr3_exif(canonical.as_path()) {
         Ok(e) => (e, false),
         Err(err) => {
             tracing::warn!(
@@ -417,108 +478,28 @@ fn is_raw_extension(path: &Path) -> bool {
         .is_some_and(|e| RAW_EXTS.contains(&e.as_str()))
 }
 
-fn parse_exif(path: &Path) -> Result<ExifMetadata, Error> {
-    let file = std::fs::File::open(path).map_err(|e| Error::Io {
+/// Parse CR3 EXIF via LibRaw (closes DN-006/DN-011). The previous
+/// `parse_exif(path)` used `kamadak-exif`, which silently failed on
+/// every real Canon R8 CR3; this replacement orchestrates LibRaw's
+/// init/open/unpack/close lifecycle inside `photohelper_raw` and
+/// converts the typed `RawExif` to `photohelper-core`'s `ExifMetadata`.
+///
+/// `photohelper_raw::Error` is converted to `photohelper_core::Error::Exif`
+/// at this crate boundary so the rest of the CLI sees a single
+/// storage-agnostic error type per the R2-T7 strategy.
+fn parse_cr3_exif(path: &Path) -> Result<ExifMetadata, Error> {
+    let raw = photohelper_raw::exif::read_cr3(path).map_err(|e| Error::Exif {
         path: path.to_path_buf(),
-        op: "read-prefix",
-        source: e,
+        source: Box::new(e),
     })?;
-    let mut buf = std::io::BufReader::new(file);
-    let reader = exif::Reader::new();
-    let exif_data = match reader.read_from_container(&mut buf) {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(Error::Exif {
-                path: path.to_path_buf(),
-                source: Box::new(e),
-            });
-        }
-    };
-
-    let mut out = ExifMetadata::default();
-    for field in exif_data.fields() {
-        match field.tag {
-            exif::Tag::Make => {
-                out.make = field
-                    .display_value()
-                    .to_string()
-                    .trim_matches('"')
-                    .to_string()
-                    .into();
-            }
-            exif::Tag::Model => {
-                out.model = field
-                    .display_value()
-                    .to_string()
-                    .trim_matches('"')
-                    .to_string()
-                    .into();
-            }
-            exif::Tag::PixelXDimension => {
-                out.width = field.value.get_uint(0);
-            }
-            exif::Tag::PixelYDimension => {
-                out.height = field.value.get_uint(0);
-            }
-            exif::Tag::Orientation => {
-                if let Some(tag) = field.value.get_uint(0) {
-                    match ExifOrientation::from_tag(i64::from(tag)) {
-                        Ok(orientation) => {
-                            out.orientation = Some(orientation);
-                        }
-                        Err(photohelper_core::Error::InvalidExifOrientationTag {
-                            tag: bad_tag,
-                        }) => {
-                            // R2-T20 fix: the new variant added by R1.T11 was
-                            // being silently discarded; surface it as a WARN so
-                            // operators triaging an out-of-range orientation
-                            // see the tag value instead of "EXIF parsed clean".
-                            tracing::warn!(
-                                tag = bad_tag,
-                                path = %path.display(),
-                                "EXIF orientation tag out of 1..=8 range; treating as missing"
-                            );
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-            exif::Tag::DateTimeOriginal => {
-                // Best-effort EXIF datetime parsing: "YYYY:MM:DD HH:MM:SS"
-                let s = field.display_value().to_string();
-                if let Some(secs) = parse_exif_datetime(&s) {
-                    out.capture_time_unix_seconds = Some(secs);
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(out)
-}
-
-fn parse_exif_datetime(s: &str) -> Option<i64> {
-    // EXIF format: "YYYY:MM:DD HH:MM:SS"
-    use time::{Date, Month, PrimitiveDateTime, Time};
-    let s = s.trim_matches('"');
-    let mut parts = s.split(' ');
-    let date = parts.next()?;
-    let time_s = parts.next()?;
-    let date_parts: Vec<&str> = date.split(':').collect();
-    let time_parts: Vec<&str> = time_s.split(':').collect();
-    if date_parts.len() != 3 || time_parts.len() != 3 {
-        return None;
-    }
-    let year: i32 = date_parts.first()?.parse().ok()?;
-    let month_n: u8 = date_parts.get(1)?.parse().ok()?;
-    let day: u8 = date_parts.get(2)?.parse().ok()?;
-    let hour: u8 = time_parts.first()?.parse().ok()?;
-    let minute: u8 = time_parts.get(1)?.parse().ok()?;
-    let second: u8 = time_parts.get(2)?.parse().ok()?;
-    let month = Month::try_from(month_n).ok()?;
-    let date = Date::from_calendar_date(year, month, day).ok()?;
-    let time = Time::from_hms(hour, minute, second).ok()?;
-    let dt = PrimitiveDateTime::new(date, time).assume_utc();
-    Some(dt.unix_timestamp())
+    Ok(ExifMetadata {
+        make: Some(raw.make().to_string()),
+        model: Some(raw.model().to_string()),
+        capture_time_unix_seconds: raw.capture_time_unix_seconds(),
+        width: Some(raw.width().get()),
+        height: Some(raw.height().get()),
+        orientation: Some(raw.orientation()),
+    })
 }
 
 #[cfg(test)]

@@ -8,31 +8,112 @@
 > rolling-archive convention. The git log is the full timeline.
 
 **Last session**: 1 (`cli-skeleton-and-ingest` — 2026-05-28) —
-implementation complete; session-end Round 1 + 2 done; R1+R2
-remediation applied; harness sync from fox/eng-protocol landed.
+**SHIPPED** via PR #1, merge commit `c120819` on `main`. Full
+session-end double-review (R1 + R2) plus remediation landed inside the
+branch; harness sync from fox/eng-protocol bundled. Session 01
+post-merge two-block handoff was NOT rendered (process-gap; recorded
+here for the audit trail).
 
-**Current session**: 1 (R2 REMEDIATION APPLIED — ready for `just ci` +
-PR push).
+**Current session**: 2 (`libraw-cr3-decode`, branch
+`session-02/libraw-cr3-decode`). Plan v1 committed at `b377aed`;
+plan-review Round 1 fired and artifact landed at
+`docs/code-reviews/session-02-plan-round1.md` (16 CRITICAL + 17 HIGH
++ 14 MEDIUM + 9 LOW); R1 remediation in flight (plan v2 next).
 
-**Goal** (session 1): Land the thinnest end-to-end slice that proves
-the workspace architecture — `clap` v4 CLI with all 7 subcommands
-(`ingest`, `cull`, `develop`, `export`, `run`, `models`, `camera`),
-with `ingest` doing real work. **DONE** at commit `310f753`; R1
-remediation at `0f28627`; harness sync at `02d43d1`; R2 review at
-`docs/code-reviews/session-01-round2.md`; R2 remediation in flight.
+**Goal** (session 2): land LibRaw FFI for Canon R8 CR3 — EXIF read
+(the DN-011 critical-path remediation: kamadak-exif fails 370/370 real
+CR3s, making `--strict` effectively unusable until LibRaw lands) AND
+RAW pixel decode (the originally-scoped session-02 deliverable).
+Rewire `ingest_one` for LibRaw EXIF; flip DN-006 integration tests
+to pass on real CR3 fixtures; bundle TD-002 rusqlite 0.32 → 0.40 bump
+(voluntary; calendar trigger 2026-08-01); fold in DN-008 row subset
+(rows 6, 17, 39, 42, 43, 49) + R2-T18 WARN regressions. See
+`docs/plans/session-02.md` for the full contract.
 
-**Action**: complete the R2 remediation commit, run `just ci`,
-push `session-01/cli-skeleton-and-ingest`, open PR to `main`, wait for
-green CI, merge with merge-commit, render two-block handoff per
-`docs/session-handoff-format.md`. Per `docs/quality-assurance.md §
-Double-review protocol`: R3 fires only if R2 remediation surfaces
-CRITICAL-class regressions — `just ci` green is the gating signal.
+**Action**: **READY TO SHIP.** Every Deliverable 0-7 sub-goal landed
+on `session-02/libraw-cr3-decode` across 13 commits today. The session
+GOAL (LibRaw FFI for Canon R8 CR3 — EXIF read + RAW pixel decode) is
+fully met end-to-end: `photohelper ingest "$HOME/Pictures/tests" --strict`
+produces `walked: 371, ingested: 370, unknown-camera: 0, no-exif: 0,
+errored: 0, exit 0` against the user's 370-CR3 corpus (was
+`walked: 371, ingested: 0, no-exif: 370` pre-session-02). DN-006 +
+DN-011 + DN-018 + DN-019 closed; TD-003 + TD-008 closed; TD-002 partial.
+Deliverable 6 (test infrastructure) + Deliverable 5's 6-sub-test
+verification + Deliverable 4's per-RawExifCause dispatch table /
+ExifCompleteness deferred via TD-010 / TD-011 (next, see below) /
+inline plan-deviation notes. Next: session-end ship workflow per
+`docs/session-handoff-format.md`.
 
-**Status**: 63 tests pass after R2 remediation (heartbeat
-env-override test replaced 1-for-1 with deterministic R2-T6 version;
-no net delta); `just ci` pending re-run; smoke test on user's
-`/Users/ph/Pictures/tests` (371 real Canon R8 CR3s) surfaced 3
-production bugs (R2-T5/T12/T13) all now remediated.
+**Status**: `just ci` GREEN end-to-end on apple-silicon. 118 workspace
+tests pass; libraw.a builds in ~30s on a clean checkout. End-to-end
+acceptance: `photohelper ingest "$HOME/Pictures/tests" --strict` →
+`walked: 371, ingested: 370, unknown-camera: 0, no-exif: 0, errored: 0`,
+exit code 0. Was `walked: 371, ingested: 0, no-exif: 370` before
+session 02. Workspace state clean. 13 commits this session:
+- `bb87735` — fix(session-02): close TD-003 (heartbeat join) per DN-019 trigger
+- `e6d53fb` — chore: gitignore `.serena/` per-machine MCP state
+- `0d4a7f7` — chore(libraw): pre-flight EXIF + CVE-posture audit (Deliverable 0)
+- `440388a` — chore(session-02): photohelper-raw lint scaffolding + unsafe-isolation gate (D1a setup)
+- `a59ef66` — feat(session-02): Error + RawExifCause + RawDecodeCause enums (D1d)
+- `c42ce2f` — feat(session-02): RawExif type + accessors (D1b types slice)
+- `8b6b9e8` — feat(session-02): RawImage + Bayer-decode companion types with R2-T6 invariants (D1c)
+- `51905be` — feat(libraw): vendor LibRaw 0.22.1 + autoconf build.rs + ADR-0002 LGPL (D2)
+- `092383f` — feat(libraw): FFI + RawPath + read_cr3 EXIF extraction (D1a-exif)
+- `f8238f4` — feat(libraw): read_raw + parse_libraw_image + RawImage::new (D1a-decode; closes TD-008)
+- `7907ca8` — feat(fixtures): Git LFS CC0 R8 CR3 fixtures + sanitize-check + integration tests (D3)
+- `203f58d` — refactor(session-02): atomic kamadak-exif removal + RAW_EXTS narrow + ingest LibRaw rewire (D4; closes DN-006/DN-011)
+- `2323b6b` — chore(deps): rusqlite 0.32 → 0.34 partial bump (D5; TD-002 partial)
+- `63002e5` — chore(session-02): Deliverable 7 polish + Deliverable 6 deferred via TD-010
+
+10 plan-review commits remain on the branch from the prior phase:
+- `b377aed` — plan v1
+- `354406f` — plan-review Round 1 artifact
+- `b64425f` — SESSION-STATE.md drift cleanup
+- `5d5dc9a` — R1 remediation cross-doc fixes
+- `69b6a5b` — plan v2 (R1 remediation, closes 16 CRITICAL + 17 HIGH)
+- `c80acf3` — plan-review Round 2 artifact
+- `0e54129` — R2 remediation cross-doc filings (DN-016/017/018 + SCUNet scrub)
+- `dc41dee` — plan v3 (R2 remediation, closes 9 CRITICAL + 14 HIGH)
+- `37373f4` — plan-review Round 3 artifact
+- `dd62166` — R3 remediation plan v3.1 + TD-005/006/007 + SESSION-STATE update
+
+**Plan-review history (3 rounds; diminishing-returns observation)**:
+R1 surfaced 16 CRITICAL + 17 HIGH + 14 MEDIUM + 9 LOW; v2 closed
+most. R2 surfaced 9 CRITICAL + 14 HIGH + 12 MEDIUM + 6 LOW (mostly
+regressions inside R1 remediation); v3 closed most. R3 surfaced 7
+CRITICAL + 9 HIGH + 8 MEDIUM + 4 LOW (mostly regressions inside R2
+remediation including the R2-T1 phantom-ID anti-pattern reborn at
+R3 level — orchestrator self-criticism); v3.1 + TD-005/006/007
+addressed inline + via TD-with-binding-trigger respectively.
+
+**R4 NOT fired** — per agent consensus across R3, "R4 not required
+if R3 remediation cleanly closes R3 CRITICALs." Targeted R3
+remediation landed the audit-trail corrections (R3-T1 phantom IDs;
+R3-T2 fabricated LibRaw symbol) + critical lint coordination
+(R3-T3 panic-lint allow + cfg!(debug_assertions) gate; R3-T4
+trybuild dep coordination) + design fixes (R3-T5 SensorBitDepth
+constructor; R3-T7 assert.success contract clarification; R3-T8
+sanitize-check preview descent; R3-T11 Acceptance 8 wording) and
+filed TD-005/006/007 for the remaining design items (RawDecodeCause
+dispatch; PathBuf empty-path) — session 02 implementation will
+surface and close those in real code.
+
+**Plan amendments this window**: plan v3.1 → v3.2.
+- Deliverable 0 / 2 / Acceptance 7 / Plan revisions log: LibRaw pin
+  escalated `=0.21.4` → `=0.22.1` per Deliverable 0 pre-flight
+  (rationale in `docs/analysis/ANL-001-libraw-cr3-preflight.md` and the
+  `0d4a7f7` commit body); cross-series jump exceeded the implementer's
+  plan-granted authority so user consultation under the No-Acceptable-
+  Trade-offs Policy approved the choice. DN-018 closed.
+- Deliverable 1a § unsafe_code discipline: `src/lib.rs` removed from the
+  list of files carrying file-level `#![forbid(unsafe_code)]`. Plan v3.1
+  prescribed forbid on lib.rs but rustc disallows downgrading `forbid`
+  in submodules, which would make `ffi.rs`'s unsafe blocks fail to
+  compile no matter what attribute `ffi.rs` carries. Crate-level
+  Cargo.toml `allow` is the lib.rs baseline; `exif.rs` / `decode.rs` /
+  any future non-FFI files carry the file-level forbid; the
+  `unsafe-isolation` CI gate is the third defense layer. Folded into
+  the `440388a` scaffolding commit.
 
 ---
 
@@ -42,7 +123,7 @@ production bugs (R2-T5/T12/T13) all now remediated.
 |-----------------------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | `photohelper-cli`     | **implemented (session 01)**            | clap v4 + 7 subcommands; `ingest` real; stubs exit 69; heartbeat + summary via eprintln!.                     |
 | `photohelper-core`    | **implemented (session 01)**            | model (PhotoId, AbsPath, CameraId, KnownCamera, ExifOrientation, Aspect, ExifMetadata, IngestOutcome, Photo); error (13 variants); catalog_glue. |
-| `photohelper-raw`     | scaffolded                              | LibRaw FFI + CR3 decode land in session 02.                                                                   |
+| `photohelper-raw`     | **implemented (session 02)**            | LibRaw 0.22.1 vendored (1.6 MB tarball under `vendor/`); autoconf-driven build.rs + cc-compiled C shim (`cpp/photohelper_libraw_shim.c`) over LibRaw struct types. `exif::read_cr3(path) → RawExif` + `decode::read_raw(path) → RawImage`. Error / RawExifCause / RawDecodeCause enums + RawExif + RawImage + BayerPlane + CfaPattern + SensorLevels + SensorBitDepth + WhiteBalance + CamRgbToXyzD65Matrix all with R2-T6 invariants. Three-layer unsafe-isolation defense (workspace forbid + file-level forbid + rg gate). 3 integration tests pass against CC0 R8 CR3 fixtures. |
 | `photohelper-ai`      | scaffolded                              | ort/tract + culling/denoise models land in sessions 03+.                                                      |
 | `photohelper-sidecar` | scaffolded                              | XMP read/write (crs:/ph: namespaces) lands when `develop` is wired (~session 04).                             |
 | `photohelper-export`  | scaffolded                              | resize + watermark + mozjpeg encode land when `export` is wired (~session 05).                                |
@@ -51,14 +132,15 @@ production bugs (R2-T5/T12/T13) all now remediated.
 
 ---
 
-## R1 + R2 remediation summary
+## Prior session: 1 — shipped (R1 + R2 remediation summary)
 
-Session-end Round 1 (`docs/code-reviews/session-01-round1.md`) surfaced
-7 CRITICAL + 5 HIGH + 4 MEDIUM + 3 LOW; R1 remediation commits landed
-in `0f28627`. Session-end Round 2 (`docs/code-reviews/session-01-round2.md`)
-surfaced 13 CRITICAL + 14 HIGH + 12 MEDIUM + 7 LOW, of which several
-were regressions inside R1's own remediation commit. R2 remediation
-applied (this commit window).
+Session 01 (`cli-skeleton-and-ingest`) shipped via PR #1 merge commit
+`c120819`. Session-end Round 1 (`docs/code-reviews/session-01-round1.md`)
+surfaced 7 CRITICAL + 5 HIGH + 4 MEDIUM + 3 LOW; R1 remediation commits
+landed in `0f28627`. Session-end Round 2
+(`docs/code-reviews/session-01-round2.md`) surfaced 13 CRITICAL + 14 HIGH
++ 12 MEDIUM + 7 LOW, of which several were regressions inside R1's own
+remediation commit. R2 remediation landed at `681a3a2`.
 
 ### R1 closure (from `docs/code-reviews/session-01-round1.md`)
 
@@ -122,9 +204,17 @@ that commit for details; the R2 review verified each closure.
 ### R2 items deferred to session 02 with binding triggers
 
 - **R2-T18** (regression tests for the 4 R1.T10 WARN paths):
-  rolled into DN-008's session-02 row enumeration.
+  rolled into DN-008's session-02 row enumeration. **Session-02
+  plan-review Round 1 (`docs/code-reviews/session-02-plan-round1.md`
+  § PR1-T4) flagged that R2-T18 closure as written is 3/4 not 4/4 —
+  the heartbeat-death WARN is deferred via "if added"; remediation in
+  session 02 plan v2.**
 - **R2-T19** (replace 128KB PhotoId test with discriminating fixture):
-  see R2 commit; if deferred, captured in DN-008 with session-02 trigger.
+  **closed inline at R2 remediation `681a3a2`** — the discriminating
+  test exists at `crates/photohelper-core/src/model.rs:770`
+  (`photoid_derive_window_disjoint_distinguishes_overlap_region_changes`).
+  Per session-02 plan-review PR1-T30: the plan v1's claim to close
+  R2-T19 again is redundant.
 - **R2-T15** (`open_with_retry_delay` dead public API): deferred to
   session-02 row-13 cross-process file-lock test per DN-008.
 - **R2-T22 / R2-T23** (R1 review count drifts): cosmetic; not blocking.
@@ -137,19 +227,23 @@ closed inline above or filed as DN/TD with binding triggers.
 
 ## Continuation-session bootstrap (verbatim)
 
-Session 01 is still open (paused for context refresh — not yet merged).
-The resume path is to stay on the same branch:
+Session 02 is in flight on branch `session-02/libraw-cr3-decode`.
+Resume from a fresh context by staying on the branch:
 
 ```bash
-git switch session-01/cli-skeleton-and-ingest && just session-start
+git switch session-02/libraw-cr3-decode && just session-start
 ```
 
-Then read this file + the latest `HANDOFF_REPORT.md § Checkpoint 2`
-(the pause-state checkpoint) and proceed to the **Action when context
-restored** above (fire session-end Round 2).
+Then read this file (re-orientation), the latest
+`HANDOFF_REPORT.md` checkpoint, `docs/discovery-notes.md`, the
+session-02 plan at `docs/plans/session-02.md`, and the in-flight
+plan-review artifact at
+`docs/code-reviews/session-02-plan-round1.md`. Proceed to the **Action**
+above (complete R1 remediation → fire plan-review Round 2 → begin
+implementation).
 
-After session 01 merges, the next session's bootstrap is the canonical:
+After session 02 merges, the next session's bootstrap is the canonical:
 
 ```bash
-git switch main && git pull --ff-only origin main && git switch -c session-02/<kebab-slug> && just session-start
+git switch main && git pull --ff-only origin main && git switch -c session-03/<kebab-slug> && just session-start
 ```

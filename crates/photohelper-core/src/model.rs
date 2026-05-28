@@ -340,6 +340,20 @@ impl KnownCamera {
             _ => None,
         }
     }
+
+    /// Human-readable model name (for log lines / progress messages).
+    #[must_use]
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::CanonR8 => "Canon EOS R8",
+        }
+    }
+}
+
+impl std::fmt::Display for KnownCamera {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.display_name())
+    }
 }
 
 // =====================================================================

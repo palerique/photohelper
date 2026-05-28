@@ -20,4 +20,6 @@ default = []
 #   tract-fallback  = ["dep:tract"]  # pure-Rust runtime
 
 [dependencies]
-photohelper-core = { path = "../photohelper-core" }
+# `photohelper-core` re-added when the AI crate consumes `Photo` / `RawImage`
+# in session 03+; dropped in D4 to satisfy the new
+# `unused_crate_dependencies` workspace lint.

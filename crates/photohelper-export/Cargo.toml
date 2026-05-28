@@ -12,4 +12,6 @@ description = "Resize, watermark, and JPEG encode (mozjpeg + cosmic-text + tiny-
 workspace = true
 
 [dependencies]
-photohelper-core = { path = "../photohelper-core" }
+# `photohelper-core` re-added when the export crate consumes `Photo`
+# in session 05; dropped in D4 to satisfy the new
+# `unused_crate_dependencies` workspace lint.

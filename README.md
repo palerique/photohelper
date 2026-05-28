@@ -17,10 +17,21 @@ and Windows.
 ## Quickstart (contributors)
 
 ```bash
-# prerequisites: Rust 1.85.0 (rust-toolchain.toml pins this) + just + prek
-# on macOS: brew install rustup just prek
-#           rustup set profile minimal && rustup install 1.85.0 --component rustfmt --component clippy
+# prerequisites: Rust 1.88.0 (rust-toolchain.toml pins this) + just + prek
+#                + system C/C++ toolchain + pkg-config + GNU make
+#                (LibRaw 0.22.1 is vendored under crates/photohelper-raw/vendor/
+#                 and built via autoconf the first time `cargo build` runs)
+#
+# on macOS: brew install rustup just prek pkgconf git-lfs  # pkgconf provides pkg-config
+#           xcode-select --install                          # if you don't have Xcode CLT yet
+#           rustup set profile minimal && rustup install 1.88.0 --component rustfmt --component clippy
 #           cargo install cargo-audit --locked
+#           git lfs install                                 # one-time; required to pull CR3 fixtures
+#
+# on Debian/Ubuntu: sudo apt install build-essential pkg-config git-lfs rustup just prek
+#                   git lfs install
+# on Fedora:        sudo dnf install make gcc-c++ pkgconf-pkg-config git-lfs rustup just prek
+#                   git lfs install
 
 just install-hooks      # one-time: install pre-commit + pre-push hooks
 just build              # cargo build --release --all-features --workspace
@@ -33,7 +44,8 @@ just ci                 # everything CI runs (fmt-check, lint, test, audit, veri
 - **v0.1 (AI-first MVP)** — Canon R8 (CR3) ingest, AI culling (NIMA/ARNIQA
   quality + SCRFD/MediaPipe face & eye-state + MobileCLIP dup grouping → auto
   1-5 star rating), classical develop (demosaic, WB, exposure, tone curve),
-  SCUNet RGB denoise, JPEG export with long-edge resize + watermarks, XMP
+  AI RGB denoise (model TBD pending session-04 plan-review), JPEG export
+  with long-edge resize + watermarks, XMP
   sidecars (Lightroom-compatible `crs:` + private `ph:`).
 - **v0.5** — Canon R5 / R6 II profiles, semantic scene classification, AI
   sharpen (Real-ESRGAN ×2-then-downsample), DirectML/CUDA acceleration,
