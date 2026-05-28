@@ -120,6 +120,26 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-008 — `photohelper-raw::decode` constructors carry `#[allow(dead_code)]` until the FFI body commit consumes them
+
+- **Status**: Open
+- **Opened**: 2026-05-28 (session 2, Deliverable 1c types-only slice)
+- **Stop-gap location**: five `pub(crate)` constructors in `crates/photohelper-raw/src/decode.rs` carry `#[allow(dead_code)]`:
+  - `BayerPlane::new`
+  - `SensorBitDepth::new`
+  - `SensorLevels::new`
+  - `WhiteBalance::from_libraw_cam_mul`
+  - `CamRgbToXyzD65Matrix::from_libraw_rgb_cam`
+
+  All five are exercised end-to-end by the `#[cfg(test)] mod tests` block in the same file (both happy and sad paths per the R2-T6 invariant suite). But the `dead_code` lint runs against the `--lib` target, where `cfg(test)` is stripped — so without a non-test caller, the lint fires.
+- **Fundamental fix**: the next commit on `session-02/libraw-cr3-decode` is the Deliverable 1a body. That commit adds `ffi::parse_libraw_decode` (or equivalently-named) which calls each of the five constructors as part of `read_raw`'s pipeline. Removing every `#[allow(dead_code)]` on those constructors is part of that commit's diff; the lint then passes naturally.
+- **Binding trigger**: the next commit on `session-02/libraw-cr3-decode` MUST remove every `#[allow(dead_code, reason = "TD-008")]` attribute on the five named constructors. If the next commit lands without removing them, this TD escalates to a CRITICAL finding at session-end review.
+- **Scope estimate**: ~10 LoC (delete 5 attribute lines + their TD-008 comments) / zero risk.
+- **Consequence of inaction**: trivial in isolation — the allows are inert suppressions with no behavioral effect. But violates the policy spirit (transient suppressions that linger become permanent ones; the No-Acceptable-Trade-offs Policy exists to prevent that drift). The strict one-commit binding trigger is the discipline that keeps this TD's lifetime bounded.
+- **Related**: `docs/plans/session-02.md § Deliverable 1c` (constructor signatures + R2-T6 invariants); `docs/plans/session-02.md § Deliverable 1a` (FFI body, the consumer).
+
+---
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).
