@@ -36,6 +36,7 @@ use std::path::Path;
 
 use static_assertions::assert_impl_all;
 
+use crate::ffi::{self, RawPath};
 use crate::{Error, RawDecodeCause};
 
 /// A decoded Canon CR3 (or other Bayer-pattern RAW) ready for the
@@ -88,6 +89,44 @@ impl RawImage {
     pub fn color_matrix(&self) -> CamRgbToXyzD65Matrix {
         self.color_matrix
     }
+
+    /// Infallible constructor — every component already enforced its
+    /// invariants. Called by `ffi::parse_libraw_image` and never
+    /// directly by external code (no public path to construct
+    /// validated components from outside this crate).
+    pub(crate) fn new(
+        pixels: BayerPlane,
+        cfa_pattern: CfaPattern,
+        levels: SensorLevels,
+        as_shot_white_balance: WhiteBalance,
+        color_matrix: CamRgbToXyzD65Matrix,
+    ) -> Self {
+        Self {
+            pixels,
+            cfa_pattern,
+            levels,
+            as_shot_white_balance,
+            color_matrix,
+        }
+    }
+}
+
+/// Decode the Bayer-pattern sensor data of a CR3 (or other
+/// LibRaw-supported RAW) file into a typed [`RawImage`]. Public entry
+/// point for the develop pipeline (session 04+).
+///
+/// Allocates ~50 MB of `Box<[u16]>` per call at Canon R8 resolution
+/// (24Mpix × 2 bytes); LibRaw's internal demosaic-prep buffer adds
+/// another ~96-200 MB transient. Per-decode peak ~150-250 MB per
+/// worker per plan §1c memory pressure SLO.
+///
+/// # Errors
+///
+/// See [`crate::Error`] and [`crate::RawDecodeCause`] for the
+/// exhaustive failure-class breakdown.
+pub fn read_raw(path: &Path) -> Result<RawImage, Error> {
+    let raw_path = RawPath::new(path)?;
+    ffi::parse_libraw_image(&raw_path)
 }
 
 /// The raw Bayer-pattern sensor buffer plus its dimensions, with the
@@ -116,9 +155,6 @@ impl BayerPlane {
     ///
     /// Returns [`Error::RawImageDimensionMismatch`] if
     /// `data.len() != width * height`.
-    // TD-008: removed in the Deliverable 1a body commit when `ffi::read_raw`
-    // calls this constructor as a non-test caller.
-    #[allow(dead_code, reason = "TD-008")]
     pub(crate) fn new(
         path: &Path,
         data: Vec<u16>,
@@ -213,9 +249,6 @@ impl SensorBitDepth {
     ///
     /// Returns [`Error::RawInvalidBitDepth`] if `bits` is outside
     /// `8..=16`.
-    // TD-008: removed in the Deliverable 1a body commit when `ffi::read_raw`
-    // calls this constructor as a non-test caller.
-    #[allow(dead_code, reason = "TD-008")]
     pub(crate) fn new(bits: u8) -> Result<Self, Error> {
         if !(8..=16).contains(&bits) {
             return Err(Error::RawInvalidBitDepth { value: bits });
@@ -257,9 +290,6 @@ impl SensorLevels {
     /// invariants is violated: inverted levels (`black >= white`), too
     /// narrow a dynamic range, or `white` exceeds what `bit_depth` can
     /// represent.
-    // TD-008: removed in the Deliverable 1a body commit when `ffi::read_raw`
-    // calls this constructor as a non-test caller.
-    #[allow(dead_code, reason = "TD-008")]
     pub(crate) fn new(
         path: &Path,
         black: u16,
@@ -345,9 +375,6 @@ impl WhiteBalance {
     /// all-zero (LibRaw's "unloaded" signal), or with cause
     /// [`RawDecodeCause::WhiteBalanceInvalid`] when any element is
     /// NaN, infinite, or negative.
-    // TD-008: removed in the Deliverable 1a body commit when `ffi::read_raw`
-    // calls this constructor as a non-test caller.
-    #[allow(dead_code, reason = "TD-008")]
     pub(crate) fn from_libraw_cam_mul(path: &Path, cam_mul: [f32; 4]) -> Result<Self, Error> {
         let [r, g1, b, g2] = cam_mul;
         if cam_mul.iter().all(|x| *x == 0.0) {
@@ -412,9 +439,6 @@ impl CamRgbToXyzD65Matrix {
     /// matrix, color management downstream is undefined), or with cause
     /// [`RawDecodeCause::ColorMatrixInvalid`] when any entry is NaN or
     /// infinite.
-    // TD-008: removed in the Deliverable 1a body commit when `ffi::read_raw`
-    // calls this constructor as a non-test caller.
-    #[allow(dead_code, reason = "TD-008")]
     pub(crate) fn from_libraw_rgb_cam(path: &Path, rgb_cam: [[f32; 3]; 3]) -> Result<Self, Error> {
         let is_identity = rgb_cam.iter().enumerate().all(|(i, row)| {
             row.iter().enumerate().all(|(j, &val)| {

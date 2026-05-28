@@ -122,7 +122,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-008 — `photohelper-raw::decode` constructors carry `#[allow(dead_code)]` until the FFI body commit consumes them
 
-- **Status**: Open
+- **Status**: Closed (2026-05-28, session 2; Deliverable 1a-decode body commit removed every `#[allow(dead_code, reason = "TD-008")]` attribute from the five named decode constructors AND from the FFI extern block AND from `RawPath::as_path`. `ffi::parse_libraw_image` now calls each constructor as a non-test caller; `read_raw` is the public entry point. No transient suppression remains.)
 - **Opened**: 2026-05-28 (session 2, Deliverable 1c types-only slice)
 - **Stop-gap location**: five `pub(crate)` constructors in `crates/photohelper-raw/src/decode.rs` carry `#[allow(dead_code)]`:
   - `BayerPlane::new`
@@ -143,3 +143,4 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).
+- **TD-008** (decode constructor dead_code) — closed 2026-05-28 in session 2 (see entry above for the remediation).

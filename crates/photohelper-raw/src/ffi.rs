@@ -32,8 +32,12 @@ use std::path::{Path, PathBuf};
 
 use photohelper_core::model::ExifOrientation;
 
+use crate::decode::{
+    BayerPlane, CamRgbToXyzD65Matrix, CfaPattern, RawImage, SensorBitDepth, SensorLevels,
+    WhiteBalance,
+};
 use crate::exif::RawExifFields;
-use crate::{Error, RawExifCause};
+use crate::{Error, RawDecodeCause, RawExifCause};
 
 /// Opaque pointer-target for LibRaw's `libraw_data_t`. We never dereference
 /// it from Rust — the C shim functions do that work.
@@ -49,20 +53,12 @@ pub(crate) struct LibrawData {
 // `LibrawGuard` wraps a single handle and is not Send by default
 // (raw pointer), which is exactly the constraint we want.
 
-// `dead_code` allow applies to the WHOLE extern block — symbols added
-// for the upcoming decode FFI commit (cam_mul, rgb_cam, color_maximum,
-// raw_width/raw_height, filters, black, raw_image, raw_image_samples)
-// have no Rust consumer yet but their declarations are stable and
-// belong with the rest of the FFI surface for review locality.
-// Removed in the Deliverable 1a-decode body commit.
-#[allow(dead_code, reason = "TD-008")]
 unsafe extern "C" {
     // === Lifecycle ===========================================
     fn libraw_init(flags: c_uint) -> *mut LibrawData;
     fn libraw_open_file(lr: *mut LibrawData, path: *const c_char) -> c_int;
     fn libraw_unpack(lr: *mut LibrawData) -> c_int;
     fn libraw_close(lr: *mut LibrawData);
-    fn libraw_strerror(code: c_int) -> *const c_char;
 
     // === Direct accessors (typed-return; safe to call as-is) =
     fn libraw_get_iwidth(lr: *mut LibrawData) -> c_int;
@@ -169,10 +165,6 @@ impl RawPath {
 
     /// The underlying `&Path` — for error messages and the `path: &Path`
     /// argument that decode.rs constructors (TD-007 closure) take.
-    // TD-008: this method becomes alive in the 1a-decode body commit
-    // when `read_raw` forwards `raw_path.as_path()` into each decode
-    // constructor's first arg (TD-007 closure surface).
-    #[allow(dead_code, reason = "TD-008")]
     pub(crate) fn as_path(&self) -> &Path {
         &self.path
     }
@@ -347,25 +339,228 @@ fn libraw_flip_to_exif_orientation(flip: i32) -> Option<ExifOrientation> {
     }
 }
 
-/// Convert a non-zero LibRaw error code to a human-readable string
-/// for log lines. Returns `"unknown"` on NULL.
-#[allow(dead_code, reason = "TD-008-decode")]
-pub(crate) fn libraw_strerror_safe(code: c_int) -> String {
-    if code == 0 {
-        return "ok".to_string();
+/// FFI orchestration for Bayer-decode: open + unpack the pixel buffer,
+/// extract every `RawImage` member, close the handle. Copies the raw
+/// pixel buffer out of LibRaw before the guard drops.
+pub(crate) fn parse_libraw_image(raw_path: &RawPath) -> Result<RawImage, Error> {
+    let guard = LibrawGuard::open(raw_path).map_err(exif_to_decode_err)?;
+
+    // SAFETY: guard.handle is valid; CString is NUL-terminated.
+    let rc = unsafe { libraw_open_file(guard.handle, raw_path.as_c_ptr()) };
+    if rc != 0 {
+        return Err(Error::RawDecodeFailed {
+            path: guard.path.clone(),
+            cause: RawDecodeCause::LibRawCallFailed {
+                libraw_code: rc,
+                op: "libraw_open_file",
+            },
+        });
     }
-    // SAFETY: libraw_strerror takes an int by value; returns a pointer
-    // to a static C string (no lifetime concerns).
-    let ptr = unsafe { libraw_strerror(code) };
-    if ptr.is_null() {
-        return "unknown".to_string();
+
+    // SAFETY: open succeeded; libraw_unpack is the documented next step.
+    let rc = unsafe { libraw_unpack(guard.handle) };
+    if rc != 0 {
+        return Err(Error::RawDecodeFailed {
+            path: guard.path.clone(),
+            cause: RawDecodeCause::LibRawCallFailed {
+                libraw_code: rc,
+                op: "libraw_unpack",
+            },
+        });
     }
-    // SAFETY: ptr is non-null per the check above; libraw_strerror
-    // returns a pointer to LibRaw's static string table.
-    unsafe { CStr::from_ptr(ptr) }
-        .to_str()
-        .unwrap_or("invalid-utf8")
-        .to_string()
+
+    extract_raw_image(&guard, raw_path.as_path())
+}
+
+fn extract_raw_image(guard: &LibrawGuard, path: &Path) -> Result<RawImage, Error> {
+    // Pull raw sensor dimensions + raw_image pointer + sample count.
+    // SAFETY: handle is valid; each shim/accessor returns primitives.
+    let (raw_w, raw_h, raw_ptr, samples, filters, black, color_max) = unsafe {
+        (
+            libraw_get_raw_width(guard.handle),
+            libraw_get_raw_height(guard.handle),
+            ph_libraw_raw_image(guard.handle),
+            ph_libraw_raw_image_samples(guard.handle),
+            ph_libraw_filters(guard.handle),
+            ph_libraw_black(guard.handle),
+            libraw_get_color_maximum(guard.handle),
+        )
+    };
+
+    let raw_w_nz = positive_to_nonzero_u32_decode(raw_w, "raw_width", path)?;
+    let raw_h_nz = positive_to_nonzero_u32_decode(raw_h, "raw_height", path)?;
+
+    if raw_ptr.is_null() {
+        return Err(Error::RawDecodeFailed {
+            path: path.to_path_buf(),
+            cause: RawDecodeCause::LibRawCallFailed {
+                libraw_code: 0,
+                op: "ph_libraw_raw_image (returned NULL — non-Bayer format?)",
+            },
+        });
+    }
+    let expected = u64::from(raw_w_nz.get()) * u64::from(raw_h_nz.get());
+    if samples != expected {
+        return Err(Error::RawImageDimensionMismatch {
+            path: path.to_path_buf(),
+            declared_pixels: expected,
+            actual_pixels: samples,
+        });
+    }
+    let samples_usize = usize::try_from(samples).map_err(|_| Error::RawDecodeFailed {
+        path: path.to_path_buf(),
+        cause: RawDecodeCause::LibRawCallFailed {
+            libraw_code: 0,
+            op: "raw_image_samples exceeds usize",
+        },
+    })?;
+    // SAFETY: raw_ptr is non-null per the check above; the shim returns
+    // a pointer into LibRaw's owned `rawdata.raw_image` buffer whose
+    // length (in u16 samples) is exactly `raw_w * raw_h`. We copy into
+    // a Rust-owned Vec<u16> before guard drops to keep the data live.
+    let data: Vec<u16> = unsafe { std::slice::from_raw_parts(raw_ptr, samples_usize) }.to_vec();
+
+    let pixels = BayerPlane::new(path, data, raw_w_nz, raw_h_nz)?;
+
+    let cfa_pattern = cfa_pattern_from_filters(filters).ok_or_else(|| Error::RawDecodeFailed {
+        path: path.to_path_buf(),
+        cause: RawDecodeCause::LibRawCallFailed {
+            libraw_code: 0,
+            op: "cfa_pattern_from_filters (unsupported sensor — see DN-014)",
+        },
+    })?;
+
+    let black_u16 = u16::try_from(black).map_err(|_| Error::RawInvalidLevels {
+        path: path.to_path_buf(),
+        black: 0,
+        white: 0,
+    })?;
+    let white_u16 = u16::try_from(color_max).map_err(|_| Error::RawInvalidLevels {
+        path: path.to_path_buf(),
+        black: black_u16,
+        white: 0,
+    })?;
+    let bit_depth = SensorBitDepth::new(bit_depth_from_white(white_u16))?;
+    let levels = SensorLevels::new(path, black_u16, white_u16, bit_depth)?;
+
+    // SAFETY: handle is valid; libraw_get_cam_mul returns one float per call.
+    let cam_mul = unsafe {
+        [
+            libraw_get_cam_mul(guard.handle, 0),
+            libraw_get_cam_mul(guard.handle, 1),
+            libraw_get_cam_mul(guard.handle, 2),
+            libraw_get_cam_mul(guard.handle, 3),
+        ]
+    };
+    let as_shot_white_balance = WhiteBalance::from_libraw_cam_mul(path, cam_mul)?;
+
+    let mut rgb_cam = [[0.0_f32; 3]; 3];
+    for (i, row) in rgb_cam.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            // SAFETY: handle is valid; libraw_get_rgb_cam returns one
+            // float per call; i and j are bounded 0..=2 by the outer
+            // 3x3 array iteration.
+            *cell = unsafe {
+                libraw_get_rgb_cam(
+                    guard.handle,
+                    i32::try_from(i).unwrap_or(0),
+                    i32::try_from(j).unwrap_or(0),
+                )
+            };
+        }
+    }
+    let color_matrix = CamRgbToXyzD65Matrix::from_libraw_rgb_cam(path, rgb_cam)?;
+
+    Ok(RawImage::new(
+        pixels,
+        cfa_pattern,
+        levels,
+        as_shot_white_balance,
+        color_matrix,
+    ))
+}
+
+/// LibrawGuard::open returns a RawExifCause-wrapped Error (because it's
+/// the EXIF-default entry point). For decode flows we need a
+/// RawDecodeCause-wrapped Error instead. This adapter handles only the
+/// init-failure case; every other error is already correctly typed.
+fn exif_to_decode_err(e: Error) -> Error {
+    match e {
+        Error::RawExifUnavailable {
+            path,
+            cause: RawExifCause::LibRawCallFailed { libraw_code, op },
+        } => Error::RawDecodeFailed {
+            path,
+            cause: RawDecodeCause::LibRawCallFailed { libraw_code, op },
+        },
+        other => other,
+    }
+}
+
+fn positive_to_nonzero_u32_decode(
+    v: c_int,
+    field: &'static str,
+    path: &Path,
+) -> Result<NonZeroU32, Error> {
+    let as_u32 = u32::try_from(v).map_err(|_| Error::RawDecodeFailed {
+        path: path.to_path_buf(),
+        cause: RawDecodeCause::LibRawCallFailed {
+            libraw_code: v,
+            op: field,
+        },
+    })?;
+    NonZeroU32::new(as_u32).ok_or_else(|| Error::RawDecodeFailed {
+        path: path.to_path_buf(),
+        cause: RawDecodeCause::LibRawCallFailed {
+            libraw_code: 0,
+            op: field,
+        },
+    })
+}
+
+/// Map LibRaw's `filters` bitmask to a 2x2 Bayer pattern variant. Only
+/// the four standard layouts are modeled in v0.1; X-Trans / Foveon /
+/// monochrome return `None` for the caller to surface as an error
+/// (deferred to a non-Canon `CameraProfile` per DN-014).
+///
+/// Implements the LIBRAW_COLOR(filters, row, col) macro and reads the
+/// 2x2 cell to discriminate the pattern. LibRaw's color codes per the
+/// `cdesc` "RGBG" convention are: 0=R, 1=G(top-row), 2=B, 3=G(bottom-row).
+/// Canon R8 returns `filters = 0xb4b4b4b4` → RGGB; LibRaw upstream
+/// has used several legacy bit-encodings over the years for the same
+/// logical pattern, so the bit-shift recipe is more robust than a
+/// hardcoded constant match.
+fn cfa_pattern_from_filters(filters: u32) -> Option<CfaPattern> {
+    let cfa = [
+        libraw_color(filters, 0, 0),
+        libraw_color(filters, 0, 1),
+        libraw_color(filters, 1, 0),
+        libraw_color(filters, 1, 1),
+    ];
+    match cfa {
+        [0, 1, 3, 2] => Some(CfaPattern::Rggb),
+        [2, 1, 3, 0] => Some(CfaPattern::Bggr),
+        [1, 0, 2, 3] => Some(CfaPattern::Grbg),
+        [1, 2, 0, 3] => Some(CfaPattern::Gbrg),
+        _ => None,
+    }
+}
+
+/// LIBRAW_COLOR(filters, row, col) — returns the `cdesc` index for the
+/// 2x2 mosaic cell at (row, col). Codes per the LibRaw "RGBG" convention.
+fn libraw_color(filters: u32, row: u32, col: u32) -> u8 {
+    let shift = (((row << 1) & 14) + (col & 1)) << 1;
+    ((filters >> shift) & 3) as u8
+}
+
+/// Derive bit depth from the white (saturation) level. Result is
+/// the count of significant bits, e.g. 14 for `white = 16383` (Canon
+/// R8). Always in `1..=16` for non-zero `white`.
+fn bit_depth_from_white(white: u16) -> u8 {
+    if white == 0 {
+        return 0;
+    }
+    16 - white.leading_zeros() as u8
 }
 
 #[cfg(test)]
@@ -471,20 +666,79 @@ mod tests {
         }
     }
 
-    // === libraw_strerror_safe ===
+    // === cfa_pattern_from_filters ===
+    // RGGB constant 0xb4b4b4b4 verified empirically against
+    // `libraw_get_iparams(lr)->filters` on the Canon R8 fixture
+    // `_MG_9625.CR3` (see ANL-001 pre-flight). The other three
+    // constants derived via the LIBRAW_COLOR bit-shift recipe.
 
     #[test]
-    fn libraw_strerror_zero_returns_ok() {
-        assert_eq!(libraw_strerror_safe(0), "ok");
+    fn cfa_filters_canon_r8_recognized_as_rggb() {
+        assert_eq!(
+            cfa_pattern_from_filters(0xb4b4_b4b4),
+            Some(CfaPattern::Rggb)
+        );
     }
 
     #[test]
-    fn libraw_strerror_nonzero_returns_descriptive() {
-        // LibRaw's strerror table covers documented codes (negative ints).
-        // Any specific message is upstream-defined; we just verify it's
-        // a non-empty string we can render in WARN log lines.
-        let msg = libraw_strerror_safe(-1);
-        assert!(!msg.is_empty(), "got empty strerror");
-        assert_ne!(msg, "ok");
+    fn cfa_filters_bggr_recognized() {
+        // BGGR codes: [B=2, G=1, G=3, R=0] -> filters byte = 0x36
+        assert_eq!(
+            cfa_pattern_from_filters(0x3636_3636),
+            Some(CfaPattern::Bggr)
+        );
+    }
+
+    #[test]
+    fn cfa_filters_grbg_recognized() {
+        // GRBG codes: [G=1, R=0, B=2, G=3] -> filters byte = 0xE1
+        assert_eq!(
+            cfa_pattern_from_filters(0xe1e1_e1e1),
+            Some(CfaPattern::Grbg)
+        );
+    }
+
+    #[test]
+    fn cfa_filters_gbrg_recognized() {
+        // GBRG codes: [G=1, B=2, R=0, G=3] -> filters byte = 0xC9
+        assert_eq!(
+            cfa_pattern_from_filters(0xc9c9_c9c9),
+            Some(CfaPattern::Gbrg)
+        );
+    }
+
+    #[test]
+    fn libraw_color_2x2_extraction() {
+        // RGGB (0xb4): expect [R=0, G=1, G=3, B=2]
+        let f = 0xb4_u32;
+        assert_eq!(libraw_color(f, 0, 0), 0);
+        assert_eq!(libraw_color(f, 0, 1), 1);
+        assert_eq!(libraw_color(f, 1, 0), 3);
+        assert_eq!(libraw_color(f, 1, 1), 2);
+    }
+
+    #[test]
+    fn cfa_filters_unknown_returns_none() {
+        for filters in [0u32, 0xDEAD_BEEF, 0x1234_5678] {
+            assert_eq!(cfa_pattern_from_filters(filters), None);
+        }
+    }
+
+    // === bit_depth_from_white ===
+
+    #[test]
+    fn bit_depth_canonical_camera_values() {
+        assert_eq!(bit_depth_from_white(255), 8);
+        assert_eq!(bit_depth_from_white(1023), 10);
+        assert_eq!(bit_depth_from_white(4095), 12);
+        assert_eq!(bit_depth_from_white(16383), 14); // Canon R8
+        assert_eq!(bit_depth_from_white(65535), 16);
+    }
+
+    #[test]
+    fn bit_depth_partial_values() {
+        // Any value with 14 high bit set is 14-bit
+        assert_eq!(bit_depth_from_white(8192), 14);
+        assert_eq!(bit_depth_from_white(16000), 14);
     }
 }
