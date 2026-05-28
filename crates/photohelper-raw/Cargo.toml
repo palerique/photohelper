@@ -51,3 +51,8 @@ struct_field_names = "allow"
 [dependencies]
 photohelper-core = { path = "../photohelper-core" }
 thiserror.workspace = true
+# `static_assertions` is a REGULAR dependency (not dev) because the
+# `assert_impl_all!(RawExif: Send, Sync)` invariant lives at module scope
+# (per plan §1b: "module-scope, NOT cfg(test)") so it gates the
+# production build, not just the test profile.
+static_assertions.workspace = true

@@ -640,6 +640,7 @@ name = "photohelper-raw"
 version = "0.0.0"
 dependencies = [
  "photohelper-core",
+ "static_assertions",
  "thiserror",
 ]
 
