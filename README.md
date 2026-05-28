@@ -39,6 +39,24 @@ just test               # cargo test --all-features --workspace --no-fail-fast
 just ci                 # everything CI runs (fmt-check, lint, test, audit, verify-state)
 ```
 
+### Reset a catalog
+
+To wipe the catalog (so the next ingest starts from a clean slate):
+
+```bash
+# Dry-run — shows what would be deleted; safe to run.
+just clean-catalog "$HOME/Pictures/tests"
+
+# Actually delete.
+just clean-catalog "$HOME/Pictures/tests" --yes
+
+# For a custom --catalog path (the file + its -wal / -shm / .lock siblings):
+just clean-catalog --catalog /path/to/your.db --yes
+```
+
+Original photo files are never touched — only the `.photohelper/` derived
+metadata is removed.
+
 ## Roadmap (per the bootstrap plan)
 
 - **v0.1 (AI-first MVP)** — Canon R8 (CR3) ingest, AI culling (NIMA/ARNIQA

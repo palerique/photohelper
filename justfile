@@ -132,6 +132,13 @@ ci: fmt-check lint test audit unsafe-isolation sanitize-check
 sanitize-check:
     @./scripts/sanitize-check.sh
 
+# Wipe the photohelper catalog for a given ingest directory so the next
+# `photohelper ingest` run starts from a clean state. Safe by default;
+# pass `--yes` after the path to actually delete. Pass `--catalog <db>`
+# instead of a directory to clean a custom-located catalog file.
+clean-catalog *ARGS:
+    @./scripts/photohelper-clean-catalog.sh {{ARGS}}
+
 # Defense-in-depth: `crates/photohelper-raw` is the only crate allowed to
 # contain `unsafe` code, and only `ffi.rs` inside it. The crate Cargo.toml
 # allows `unsafe_code` for the FFI module; every other source file carries
