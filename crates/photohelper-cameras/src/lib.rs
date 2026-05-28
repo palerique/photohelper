@@ -106,7 +106,14 @@ impl CameraProfile for CanonR8 {
         CameraId::Known(KnownCamera::CanonR8)
     }
     fn make_model(&self) -> (&'static str, &'static str) {
-        ("Canon", "Canon EOS R8")
+        // LibRaw returns `model = "EOS R8"` (without the "Canon " prefix
+        // its `iparams.model` field carries). Pre-session-02 kamadak-exif
+        // returned `"Canon EOS R8"` verbatim from the EXIF Model tag,
+        // hence the original constant. The D4 ingest rewire to LibRaw
+        // forced the change so `--strict` doesn't flag every R8 as
+        // unknown-camera. Future profiles need to match LibRaw's
+        // normalized form, not the raw EXIF Model tag.
+        ("Canon", "EOS R8")
     }
 }
 
@@ -155,7 +162,7 @@ mod tests {
     fn for_exif_canon_r8_matches() {
         let r = CameraRegistry::default();
         let p = r
-            .for_exif("Canon", "Canon EOS R8")
+            .for_exif("Canon", "EOS R8")
             .expect("Canon R8 must be registered");
         assert_eq!(p.id(), CameraId::Known(KnownCamera::CanonR8));
     }
@@ -169,8 +176,8 @@ mod tests {
     #[test]
     fn for_exif_strips_trailing_nul_and_whitespace() {
         let r = CameraRegistry::default();
-        assert!(r.for_exif("Canon\0", "Canon EOS R8  ").is_some());
-        assert!(r.for_exif("  Canon  ", "  Canon EOS R8\0\0").is_some());
+        assert!(r.for_exif("Canon\0", "EOS R8  ").is_some());
+        assert!(r.for_exif("  Canon  ", "  EOS R8\0\0").is_some());
     }
 
     #[test]
@@ -178,7 +185,7 @@ mod tests {
         let r = CameraRegistry::default();
         // Lower-case 'canon' does NOT match — Canon's EXIF is stable;
         // we don't paper over inputs.
-        assert!(r.for_exif("canon", "canon eos r8").is_none());
+        assert!(r.for_exif("canon", "eos r8").is_none());
     }
 
     #[test]

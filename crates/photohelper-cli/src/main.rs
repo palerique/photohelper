@@ -10,6 +10,14 @@
         clippy::indexing_slicing
     )
 )]
+// Workspace `unused_crate_dependencies` lint produces false positives
+// here: this main.rs is the binary's top-level file; the transitive
+// crate users (tracing / walkdir / rayon / etc.) live inside the
+// `commands` module tree. The lint sees the bin compilation unit
+// "not directly using" those crates and flags them. Same for dev-deps
+// referenced only by tests/cli.rs. Per-target file-level allow is the
+// idiomatic mitigation.
+#![allow(unused_crate_dependencies)]
 
 use std::process::ExitCode;
 

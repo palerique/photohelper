@@ -44,8 +44,11 @@ rayon = "1"
 blake3 = "1"
 base64 = "0.22"
 
-# EXIF reading (default; DN-006 fallback may swap to LibRaw in session 02)
-kamadak-exif = "0.6"
+# EXIF reading: LibRaw via `photohelper-raw::exif::read_cr3` is the v0.1
+# sole producer (closes DN-006/DN-011: kamadak-exif failed on 370/370
+# real Canon R8 CR3s). The kamadak-exif crate is no longer a workspace
+# dep; the `unused_crate_dependencies` lint below catches any
+# accidental re-introduction.
 
 # Time
 time = { version = "0.3.47", features = ["macros"] }
@@ -88,6 +91,10 @@ debug = "limited"
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
+# Catch any new workspace.dependencies entry that's declared but not
+# actually consumed by the crate — guards against re-introducing
+# kamadak-exif (per plan §4a R2-T8 atomic-commit shape).
+unused_crate_dependencies = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

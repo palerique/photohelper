@@ -19,12 +19,17 @@ use photohelper_cameras::CameraRegistry;
 use photohelper_catalog::{Catalog, UpsertOutcome};
 use photohelper_core::Error;
 use photohelper_core::model::{
-    AbsPath, CameraId, ExifMetadata, ExifOrientation, IngestOutcome, Photo, PhotoId, clamp_mtime,
+    AbsPath, CameraId, ExifMetadata, IngestOutcome, Photo, PhotoId, clamp_mtime,
 };
 
 use crate::{Cli, IngestArgs, exit_code};
 
-const RAW_EXTS: &[&str] = &["cr3", "cr2", "arw", "nef", "raf", "orf", "rw2", "dng"];
+// Narrowed to `["cr3"]` for v0.1 per plan §4a R2-T8: photohelper supports
+// exactly one RAW format (Canon CR3) until a non-Canon `CameraProfile`
+// lands (per DN-014's binding trigger). Re-expansion to the full
+// 7-format walker behavior happens in the same session that adds the
+// second profile.
+const RAW_EXTS: &[&str] = &["cr3"];
 
 /// Heartbeat interval. Overridable in tests via the
 /// `PHOTOHELPER_HEARTBEAT_INTERVAL_MS` env var so test row 48 (heartbeat
@@ -386,7 +391,7 @@ pub(crate) fn ingest_one(
     // with zero fields" on the same file. User's prod trace on 371 real CR3s
     // produced 740 misleading log lines. The counter still bumps in both
     // cases because the §Observability contract says no-exif rows still ingest.
-    let (exif, parse_failed) = match parse_exif(canonical.as_path()) {
+    let (exif, parse_failed) = match parse_cr3_exif(canonical.as_path()) {
         Ok(e) => (e, false),
         Err(err) => {
             tracing::warn!(
@@ -473,108 +478,28 @@ fn is_raw_extension(path: &Path) -> bool {
         .is_some_and(|e| RAW_EXTS.contains(&e.as_str()))
 }
 
-fn parse_exif(path: &Path) -> Result<ExifMetadata, Error> {
-    let file = std::fs::File::open(path).map_err(|e| Error::Io {
+/// Parse CR3 EXIF via LibRaw (closes DN-006/DN-011). The previous
+/// `parse_exif(path)` used `kamadak-exif`, which silently failed on
+/// every real Canon R8 CR3; this replacement orchestrates LibRaw's
+/// init/open/unpack/close lifecycle inside `photohelper_raw` and
+/// converts the typed `RawExif` to `photohelper-core`'s `ExifMetadata`.
+///
+/// `photohelper_raw::Error` is converted to `photohelper_core::Error::Exif`
+/// at this crate boundary so the rest of the CLI sees a single
+/// storage-agnostic error type per the R2-T7 strategy.
+fn parse_cr3_exif(path: &Path) -> Result<ExifMetadata, Error> {
+    let raw = photohelper_raw::exif::read_cr3(path).map_err(|e| Error::Exif {
         path: path.to_path_buf(),
-        op: "read-prefix",
-        source: e,
+        source: Box::new(e),
     })?;
-    let mut buf = std::io::BufReader::new(file);
-    let reader = exif::Reader::new();
-    let exif_data = match reader.read_from_container(&mut buf) {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(Error::Exif {
-                path: path.to_path_buf(),
-                source: Box::new(e),
-            });
-        }
-    };
-
-    let mut out = ExifMetadata::default();
-    for field in exif_data.fields() {
-        match field.tag {
-            exif::Tag::Make => {
-                out.make = field
-                    .display_value()
-                    .to_string()
-                    .trim_matches('"')
-                    .to_string()
-                    .into();
-            }
-            exif::Tag::Model => {
-                out.model = field
-                    .display_value()
-                    .to_string()
-                    .trim_matches('"')
-                    .to_string()
-                    .into();
-            }
-            exif::Tag::PixelXDimension => {
-                out.width = field.value.get_uint(0);
-            }
-            exif::Tag::PixelYDimension => {
-                out.height = field.value.get_uint(0);
-            }
-            exif::Tag::Orientation => {
-                if let Some(tag) = field.value.get_uint(0) {
-                    match ExifOrientation::from_tag(i64::from(tag)) {
-                        Ok(orientation) => {
-                            out.orientation = Some(orientation);
-                        }
-                        Err(photohelper_core::Error::InvalidExifOrientationTag {
-                            tag: bad_tag,
-                        }) => {
-                            // R2-T20 fix: the new variant added by R1.T11 was
-                            // being silently discarded; surface it as a WARN so
-                            // operators triaging an out-of-range orientation
-                            // see the tag value instead of "EXIF parsed clean".
-                            tracing::warn!(
-                                tag = bad_tag,
-                                path = %path.display(),
-                                "EXIF orientation tag out of 1..=8 range; treating as missing"
-                            );
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-            exif::Tag::DateTimeOriginal => {
-                // Best-effort EXIF datetime parsing: "YYYY:MM:DD HH:MM:SS"
-                let s = field.display_value().to_string();
-                if let Some(secs) = parse_exif_datetime(&s) {
-                    out.capture_time_unix_seconds = Some(secs);
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(out)
-}
-
-fn parse_exif_datetime(s: &str) -> Option<i64> {
-    // EXIF format: "YYYY:MM:DD HH:MM:SS"
-    use time::{Date, Month, PrimitiveDateTime, Time};
-    let s = s.trim_matches('"');
-    let mut parts = s.split(' ');
-    let date = parts.next()?;
-    let time_s = parts.next()?;
-    let date_parts: Vec<&str> = date.split(':').collect();
-    let time_parts: Vec<&str> = time_s.split(':').collect();
-    if date_parts.len() != 3 || time_parts.len() != 3 {
-        return None;
-    }
-    let year: i32 = date_parts.first()?.parse().ok()?;
-    let month_n: u8 = date_parts.get(1)?.parse().ok()?;
-    let day: u8 = date_parts.get(2)?.parse().ok()?;
-    let hour: u8 = time_parts.first()?.parse().ok()?;
-    let minute: u8 = time_parts.get(1)?.parse().ok()?;
-    let second: u8 = time_parts.get(2)?.parse().ok()?;
-    let month = Month::try_from(month_n).ok()?;
-    let date = Date::from_calendar_date(year, month, day).ok()?;
-    let time = Time::from_hms(hour, minute, second).ok()?;
-    let dt = PrimitiveDateTime::new(date, time).assume_utc();
-    Some(dt.unix_timestamp())
+    Ok(ExifMetadata {
+        make: Some(raw.make().to_string()),
+        model: Some(raw.model().to_string()),
+        capture_time_unix_seconds: raw.capture_time_unix_seconds(),
+        width: Some(raw.width().get()),
+        height: Some(raw.height().get()),
+        orientation: Some(raw.orientation()),
+    })
 }
 
 #[cfg(test)]

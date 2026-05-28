@@ -4,6 +4,10 @@
 //! Every test asserts a concrete observable per `docs/testing-standards.md`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Workspace `unused_crate_dependencies` lint flags transitive dev-deps
+// like `num_cpus`, `rusqlite`, `time` that the test file doesn't
+// reference directly (they're used by the photohelper bin under test).
+#![allow(unused_crate_dependencies)]
 
 use std::path::PathBuf;
 
