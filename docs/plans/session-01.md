@@ -5,8 +5,9 @@
 > **Cadence**: A (tier-graduated, per `CLAUDE.md § Quality gates` and
 > `docs/quality-assurance.md § Review cadence`)
 > **Author**: Paulo Henrique Lerbach Rodrigues (Claude Code)
-> **Plan revisions**: v1 (initial) → v2 (post R1) → v3 (post R2) → **v4
-> (this revision; post R3 — see `docs/code-reviews/session-01-plan-round3.md`)**
+> **Plan revisions**: v1 (initial) → v2 (post R1) → v3 (post R2) → v4 (post R3)
+> → **v5 (this revision; post R4 focused — see
+> `docs/code-reviews/session-01-plan-round4.md`)**
 
 ## Session contract (top block — reviewed at plan-review checkpoints)
 
@@ -57,9 +58,12 @@ session 02 via LibRaw. See DN-006.
   spell the function name and import from `catalog_glue`, signalling
   intent).
 - Heartbeat prints via direct `eprintln!` (not `tracing::info!`) so it
-  appears at default verbosity (closes R3.T3); implemented as a *detached*
-  thread that reads `Arc<AtomicBool>` stop flag set by the driver at
-  end-of-walk (closes R3.T4). Driver checks `handle.is_finished()` at end
+  appears at default verbosity (closes R3.T3); implemented as a thread
+  spawned via `std::thread::spawn` with its `JoinHandle` retained (NOT
+  joined; never blocks the driver) for `handle.is_finished()` status
+  checks. The thread reads `Arc<AtomicBool>` stop flag set by the driver
+  at end-of-walk (closes R3.T4; R4.T1 terminology clarification — earlier
+  drafts said "detached" which conflicted with retaining the handle). Driver checks `handle.is_finished()` at end
   and logs WARN if the heartbeat died early. The `AtomicBool` is not a
   general cancellation primitive — it's a one-shot shutdown signal,
   scoped to this thread; the original "no `CancellationToken`" intent
@@ -99,20 +103,26 @@ session 02 via LibRaw. See DN-006.
    - Global flags: `--verbose/-v` (repeatable; sets `tracing` level per
      §Observability), `--quiet/-q` (suppresses non-error tracing output
      but NOT the end-of-run summary line or heartbeat), `--threads <N>`
-     (default = `num_cpus`; `value_parser` range `1..=1024`),
+     (default = `num_cpus`; `value_parser = clap::value_parser!(u32).range(1..=1024)`),
      `--catalog <path>` (default = `<input>/.photohelper/catalog.db`),
-     `--catalog-lock-timeout-seconds <N>` (default `60`), `--no-color`.
+     `--catalog-lock-timeout-seconds <N>` (default `60`;
+     `value_parser = clap::value_parser!(u32).range(1..=3600)` — closes
+     R4.T2: rejects `0` and silly-large values; min 1s, max 1hr),
+     `--no-color`.
    - `ingest` flags: `--recursive/-r` (default `true`), `--strict`
      (default `false`).
    - `tracing-subscriber` initialized with compact `fmt` + `EnvFilter`
      (honors `RUST_LOG`); `-v` count maps per §Observability.
    - `indicatif` spinner (not progress bar — `par_bridge` is lazy).
      Final summary via direct `eprintln!` (bypasses tracing filter).
-   - Heartbeat: a detached `std::thread::spawn` thread reads
-     `Arc<AtomicBool>` stop flag; every 10 seconds writes via
+   - Heartbeat: a `std::thread::spawn`-ed thread reads `Arc<AtomicBool>`
+     stop flag; every 10 seconds writes via
      `eprintln!("[heartbeat] walked {N}, ingested {M}, in-flight {P}")`.
-     Driver sets the flag at end-of-walk and checks `handle.is_finished()`
-     — logs WARN if heartbeat died before the walk.
+     Driver retains the `JoinHandle` (NEVER calls `.join()` — would block),
+     sets the stop flag at end-of-walk, and checks `handle.is_finished()`
+     — logs WARN if heartbeat died before the walk completed (closes
+     R4.T1 terminology bug — earlier drafts called this "detached" but a
+     truly detached thread has no `JoinHandle`).
    - `ingest` driver in `photohelper-cli::commands::ingest`: walks via
      `walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok)`,
      filters RAW extensions (lowercased: `.cr3`, `.cr2`, `.arw`, `.nef`,
@@ -166,9 +176,27 @@ session 02 via LibRaw. See DN-006.
        `Error::Exif` outside 1..=8. `pub fn to_tag(&self) -> i64`.
        Round-trip test asserts `from_tag(N).unwrap().to_tag() == N` for
        N ∈ 1..=8.
-     - `Aspect`: `enum Aspect { Landscape, Portrait, Square }` with
-       `Photo::aspect(&self) -> Aspect` derived from `(width, height,
-       exif_orientation)`.
+     - `Aspect`: `#[non_exhaustive] enum Aspect { Landscape, Portrait,
+       Square }` (closes R4.T5 — every other domain enum is
+       `#[non_exhaustive]`; this one was the lone exception). `Photo::aspect
+       (&self) -> Aspect` derived from `(width, height, exif_orientation)`.
+     - `ExifMetadata` (closes R4.T4 — named in `Photo::from_filesystem`
+       but never spec'd in earlier revisions):
+       ```rust
+       pub struct ExifMetadata {
+           pub make: Option<String>,
+           pub model: Option<String>,
+           pub capture_time_unix_seconds: Option<i64>,
+           pub width: Option<u32>,
+           pub height: Option<u32>,
+           pub orientation: Option<ExifOrientation>,
+       }
+       impl ExifMetadata {
+           /// True iff every field is None — the signal `ingest_one` uses
+           /// to route to `IngestOutcome::NoExifFields`.
+           pub fn is_empty(&self) -> bool { /* all None */ }
+       }
+       ```
      - `IngestOutcome`: `#[non_exhaustive] enum IngestOutcome {
        Inserted(PhotoId), SupersededPrevious { new: PhotoId, old: PhotoId },
        AlreadyCatalogued(PhotoId), SkippedNonRaw, SkippedHashWindowTooSmall,
@@ -245,7 +273,9 @@ session 02 via LibRaw. See DN-006.
         attempt every 5 seconds for `lock_timeout_seconds` total
         (default 12 attempts × 5s = 60s); WARN per retry; on budget
         exhaustion return `Error::CatalogLockHeld { path, attempts,
-        total_ms }`.
+        total_ms }`. (Note: 12 WARNs over 60s is acceptable for the
+        concurrent-ingest edge case; `-q` suppresses them — closes
+        R4.T7.)
      5. Verify existing catalog file (if any): existing-as-directory →
         `Error::CatalogPathIsDirectory`; existing non-empty file whose
         first 16 bytes are NOT `"SQLite format 3\0"` →
@@ -313,7 +343,8 @@ session 02 via LibRaw. See DN-006.
    - **Test infrastructure (`cfg(test)` knobs)** so tests are
      deterministic and CI-fast:
      - `LOCK_RETRY_DELAY_MS` — `pub(crate) const`, overridden to ~50ms
-       under `#[cfg(test)]`.
+       under `#[cfg(test)]`. **All catalog-lock-exercising tests MUST
+       use this override** to avoid 60s sleep time (closes R4.T8).
      - `HEARTBEAT_INTERVAL_MS` — same pattern (in `cli::commands::ingest`).
      - A `#[cfg(test)] fn poison_for_testing(&self)` on `Catalog` that
        forces a panic-inside-the-mutex via a closure, used by test 18.
@@ -496,7 +527,7 @@ Every test asserts a concrete observable per `docs/testing-standards.md`.
 | 29 | ingest_one happy path | unit (`cli::commands::ingest`) | `.cr3` file → `IngestOutcome::Inserted(...)`; catalog row matches |
 | 30 | ingest_one non-RAW filter | unit | `.jpg` → `IngestOutcome::SkippedNonRaw`; row count unchanged |
 | 31 | ingest_one 0-byte | unit | 0-byte `.cr3` → `IngestOutcome::SkippedHashWindowTooSmall` |
-| 32 | ingest CLI happy path | integration | tempdir with `a.cr3` + `b.jpg`; exit 0; stderr contains `walked: 2`, `ingested: 1`, `skipped (non-RAW): 1`; SQL row: `source_path` ends `a.cr3`, `file_size` matches, `id` is 32 bytes, `camera_slug = 'canon-r8'`, `mtime_anomalous = 0` |
+| 32 | ingest CLI happy path | integration | tempdir with `a.cr3` (fixture mtime pinned to `2020-01-01` via `filetime::set_file_mtime` to avoid CI clock-drift flakiness — R4.T6) + `b.jpg`; exit 0; stderr contains `walked: 2`, `ingested: 1`, `skipped (non-RAW): 1`; SQL row: `source_path` ends `a.cr3`, `file_size` matches, `id` is 32 bytes, `mtime_anomalous = 0`, and `camera_slug` is either `'canon-r8'` (kamadak-exif parsed CR3 EXIF, default expectation) **OR** `NULL` with `make`/`model` also NULL (DN-006 fallback active — kamadak-exif could not parse CR3 ISO-BMFF). Pre-flight verdict at implementation start decides which branch the test asserts. Closes R4.T3 (test row 32 used to assume kamadak-exif always works, contradicting the DN-006 fallback). |
 | 33 | ingest CLI summary survives `-q` | integration | `-q` + ingest; assert summary line still in stderr |
 | 34 | ingest CLI `.with_context()` boundary | integration | force per-photo read error; stderr contains `ingesting <path>` |
 | 35 | ingest CLI idempotency | integration | run twice; second stderr `already-catalogued: 1, ingested: 0`; row count stays at 1 |
@@ -508,7 +539,7 @@ Every test asserts a concrete observable per `docs/testing-standards.md`.
 | 41 | ingest CLI mtime-anomalous summary | integration | mtime=0 file → stderr `mtime-anomalous: 1`; row `mtime_anomalous = 1` |
 | 42 | ingest CLI tracing per-event-class mapping | integration (parameterized) | EXIF failure → WARN; two same-make/model unknowns → one WARN + one INFO; mtime clamp → WARN. Default `-v=0`. |
 | 43 | ingest CLI fatal exit codes | integration (parameterized) | catalog-path-is-directory → exit `74`; schema-too-new → exit `74`; lock-budget-exhausted → exit `74` |
-| 44 | ingest CLI clap parse exit | integration | `--threads 0` → exit `2`; `--threads 2000` → exit `2`; `--catalog /etc` (existing dir) → exit `74` |
+| 44 | ingest CLI clap parse exit | integration | `--threads 0` → exit `2`; `--threads 2000` → exit `2`; `--catalog-lock-timeout-seconds 0` → exit `2` (closes R4.T2); `--catalog-lock-timeout-seconds 5000` → exit `2`; `--catalog /etc` (existing dir) → exit `74` |
 | 45 | Stub subcommands | integration (parameterized) | each → exit `69`; stderr contains `not yet implemented` |
 | 46 | CLI `--verbose` mapping | integration | `-v` enables INFO; `-vv` DEBUG; `-q` mutes WARN tracing but NOT summary or heartbeat |
 | 47 | CLI `--catalog` override | integration | `--catalog /tmp/explicit.db` → DB at exact path, NOT `<input>/.photohelper/catalog.db` |
@@ -575,6 +606,7 @@ Verified on crates.io at plan authoring time.
 | `tempfile` | 3 | cli, catalog (dev-dep) | (none) |
 | `static_assertions` | 1 | catalog (dev-dep, optional) | (none) |
 | `trybuild` | 1 | core (dev-dep) | (none) — for compile-fail test row 6 |
+| `filetime` | 0.2 | cli (dev-dep) | (none) — pins fixture mtime in test row 32 (closes R4.T6 flakiness risk) |
 
 `cargo tree --workspace --depth 1` + `cargo audit` run at session-end;
 if transitive count > 120 OR audit flags any advisory, file a TD.
