@@ -8,31 +8,37 @@
 > rolling-archive convention. The git log is the full timeline.
 
 **Last session**: 1 (`cli-skeleton-and-ingest` — 2026-05-28) —
-implementation complete; session-end Round 1 + 2 done; R1+R2
-remediation applied; harness sync from fox/eng-protocol landed.
+**SHIPPED** via PR #1, merge commit `c120819` on `main`. Full
+session-end double-review (R1 + R2) plus remediation landed inside the
+branch; harness sync from fox/eng-protocol bundled. Session 01
+post-merge two-block handoff was NOT rendered (process-gap; recorded
+here for the audit trail).
 
-**Current session**: 1 (R2 REMEDIATION APPLIED — ready for `just ci` +
-PR push).
+**Current session**: 2 (`libraw-cr3-decode`, branch
+`session-02/libraw-cr3-decode`). Plan v1 committed at `b377aed`;
+plan-review Round 1 fired and artifact landed at
+`docs/code-reviews/session-02-plan-round1.md` (16 CRITICAL + 17 HIGH
++ 14 MEDIUM + 9 LOW); R1 remediation in flight (plan v2 next).
 
-**Goal** (session 1): Land the thinnest end-to-end slice that proves
-the workspace architecture — `clap` v4 CLI with all 7 subcommands
-(`ingest`, `cull`, `develop`, `export`, `run`, `models`, `camera`),
-with `ingest` doing real work. **DONE** at commit `310f753`; R1
-remediation at `0f28627`; harness sync at `02d43d1`; R2 review at
-`docs/code-reviews/session-01-round2.md`; R2 remediation in flight.
+**Goal** (session 2): land LibRaw FFI for Canon R8 CR3 — EXIF read
+(the DN-011 critical-path remediation: kamadak-exif fails 370/370 real
+CR3s, making `--strict` effectively unusable until LibRaw lands) AND
+RAW pixel decode (the originally-scoped session-02 deliverable).
+Rewire `ingest_one` for LibRaw EXIF; flip DN-006 integration tests
+to pass on real CR3 fixtures; bundle TD-002 rusqlite 0.32 → 0.40 bump
+(voluntary; calendar trigger 2026-08-01); fold in DN-008 row subset
+(rows 6, 17, 39, 42, 43, 49) + R2-T18 WARN regressions. See
+`docs/plans/session-02.md` for the full contract.
 
-**Action**: complete the R2 remediation commit, run `just ci`,
-push `session-01/cli-skeleton-and-ingest`, open PR to `main`, wait for
-green CI, merge with merge-commit, render two-block handoff per
-`docs/session-handoff-format.md`. Per `docs/quality-assurance.md §
-Double-review protocol`: R3 fires only if R2 remediation surfaces
-CRITICAL-class regressions — `just ci` green is the gating signal.
+**Action**: complete R1 remediation (plan v2 + decision-doc 0001
+amendment for v1→v2 migration framework reschedule + new DN-013 /
+DN-014 / TD-004 filings); fire plan-review Round 2; if R2 surfaces
+no CRITICAL-class regressions, begin implementation per the plan's
+sequencing (Deliverable 0 pre-flight first, then Deliverables 1-7).
 
-**Status**: 63 tests pass after R2 remediation (heartbeat
-env-override test replaced 1-for-1 with deterministic R2-T6 version;
-no net delta); `just ci` pending re-run; smoke test on user's
-`/Users/ph/Pictures/tests` (371 real Canon R8 CR3s) surfaced 3
-production bugs (R2-T5/T12/T13) all now remediated.
+**Status**: 63 tests passing on main (carried from session 01). No
+new code yet; session 02 is in the plan-review phase (pre-code per
+`docs/quality-assurance.md § Plan-review protocol`).
 
 ---
 
@@ -51,14 +57,15 @@ production bugs (R2-T5/T12/T13) all now remediated.
 
 ---
 
-## R1 + R2 remediation summary
+## Prior session: 1 — shipped (R1 + R2 remediation summary)
 
-Session-end Round 1 (`docs/code-reviews/session-01-round1.md`) surfaced
-7 CRITICAL + 5 HIGH + 4 MEDIUM + 3 LOW; R1 remediation commits landed
-in `0f28627`. Session-end Round 2 (`docs/code-reviews/session-01-round2.md`)
-surfaced 13 CRITICAL + 14 HIGH + 12 MEDIUM + 7 LOW, of which several
-were regressions inside R1's own remediation commit. R2 remediation
-applied (this commit window).
+Session 01 (`cli-skeleton-and-ingest`) shipped via PR #1 merge commit
+`c120819`. Session-end Round 1 (`docs/code-reviews/session-01-round1.md`)
+surfaced 7 CRITICAL + 5 HIGH + 4 MEDIUM + 3 LOW; R1 remediation commits
+landed in `0f28627`. Session-end Round 2
+(`docs/code-reviews/session-01-round2.md`) surfaced 13 CRITICAL + 14 HIGH
++ 12 MEDIUM + 7 LOW, of which several were regressions inside R1's own
+remediation commit. R2 remediation landed at `681a3a2`.
 
 ### R1 closure (from `docs/code-reviews/session-01-round1.md`)
 
@@ -122,9 +129,17 @@ that commit for details; the R2 review verified each closure.
 ### R2 items deferred to session 02 with binding triggers
 
 - **R2-T18** (regression tests for the 4 R1.T10 WARN paths):
-  rolled into DN-008's session-02 row enumeration.
+  rolled into DN-008's session-02 row enumeration. **Session-02
+  plan-review Round 1 (`docs/code-reviews/session-02-plan-round1.md`
+  § PR1-T4) flagged that R2-T18 closure as written is 3/4 not 4/4 —
+  the heartbeat-death WARN is deferred via "if added"; remediation in
+  session 02 plan v2.**
 - **R2-T19** (replace 128KB PhotoId test with discriminating fixture):
-  see R2 commit; if deferred, captured in DN-008 with session-02 trigger.
+  **closed inline at R2 remediation `681a3a2`** — the discriminating
+  test exists at `crates/photohelper-core/src/model.rs:770`
+  (`photoid_derive_window_disjoint_distinguishes_overlap_region_changes`).
+  Per session-02 plan-review PR1-T30: the plan v1's claim to close
+  R2-T19 again is redundant.
 - **R2-T15** (`open_with_retry_delay` dead public API): deferred to
   session-02 row-13 cross-process file-lock test per DN-008.
 - **R2-T22 / R2-T23** (R1 review count drifts): cosmetic; not blocking.
@@ -137,19 +152,23 @@ closed inline above or filed as DN/TD with binding triggers.
 
 ## Continuation-session bootstrap (verbatim)
 
-Session 01 is still open (paused for context refresh — not yet merged).
-The resume path is to stay on the same branch:
+Session 02 is in flight on branch `session-02/libraw-cr3-decode`.
+Resume from a fresh context by staying on the branch:
 
 ```bash
-git switch session-01/cli-skeleton-and-ingest && just session-start
+git switch session-02/libraw-cr3-decode && just session-start
 ```
 
-Then read this file + the latest `HANDOFF_REPORT.md § Checkpoint 2`
-(the pause-state checkpoint) and proceed to the **Action when context
-restored** above (fire session-end Round 2).
+Then read this file (re-orientation), the latest
+`HANDOFF_REPORT.md` checkpoint, `docs/discovery-notes.md`, the
+session-02 plan at `docs/plans/session-02.md`, and the in-flight
+plan-review artifact at
+`docs/code-reviews/session-02-plan-round1.md`. Proceed to the **Action**
+above (complete R1 remediation → fire plan-review Round 2 → begin
+implementation).
 
-After session 01 merges, the next session's bootstrap is the canonical:
+After session 02 merges, the next session's bootstrap is the canonical:
 
 ```bash
-git switch main && git pull --ff-only origin main && git switch -c session-02/<kebab-slug> && just session-start
+git switch main && git pull --ff-only origin main && git switch -c session-03/<kebab-slug> && just session-start
 ```
