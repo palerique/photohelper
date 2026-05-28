@@ -162,3 +162,19 @@
 - **Owner**: Deliverable 0 (pre-flight feasibility probe) owner. During pre-flight, the author runs the LibRaw EXIF extraction probe AND checks the MITRE CVE feed + LibRaw GitHub Security Advisories for any open CVE affecting `=0.21.4` (or the chosen version if the pre-flight chooses a different patch). Result recorded in `docs/analysis/ANL-001-libraw-cr3-preflight.md § CVE-posture-as-of-pin` subsection.
 - **Binding trigger**: Deliverable 0's pre-flight commit. ABORT trigger: if any open CVE affects the chosen version, escalate to plan-review v4 to either (a) pin a different version, (b) backport the fix via vendored-source patch, or (c) defer the LibRaw landing session.
 - **Status**: closed 2026-05-28 (session 2, Deliverable 0). Pre-flight artifact landed at `docs/analysis/ANL-001-libraw-cr3-preflight.md`. CVE-posture clean per MITRE NVD (`services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=libraw`: 0 CVEs published since 2023-01-01) AND per LibRaw GitHub Security Advisories ("There aren't any published security advisories"). Pin escalated from plan-default `=0.21.4` to `=0.22.1` because LibRaw 0.22.1 carries six TALOS-2026-* fixes + two CR3-parser-specific hardenings ("zero all buffers before fread"; 64-bit unsigned file offsets) that did NOT backport to 0.21.5b — 0.21.x is effectively EOL. User consulted under No-Acceptable-Trade-offs Policy; approved 0.22.1 pin. Plan amended to v3.2 in lockstep.
+
+### DN-020 — Stub-subcommand `planned for session 02` messages are stale post-merge (2026-05-28, session 02.5)
+
+- **Observed**: After session 02 merged with LibRaw FFI for the `ingest` subcommand, the other 6 stubs (`camera`, `cull`, `develop`, `export`, `run`, `models`) still emit `"<subcommand>: not yet implemented (planned for session 02)"`. Session 02 NEVER scoped any of these — they were stubbed in session 01 with the placeholder text and the message stayed.
+- **Why it matters**: Operators run these to see what's available and get a stale promise. Trust erodes.
+- **Owner**: session 03's first chore commit. One-line edit per stub source file — drop "planned for session 02" or replace with "not yet implemented; see SESSION-STATE.md for the current roadmap".
+- **Binding trigger**: session 03 session-start sweep — the SESSION-STATE.md Goal block surfaces this as a quick-win first-commit candidate.
+- **Status**: open (informational; deferred to session 03's first chore commit by binding trigger).
+
+### DN-021 — Two-shell PATH drift footgun: scripts merged on `main` but invisible to a separate terminal session that hasn't pulled (2026-05-28, session 02.5)
+
+- **Observed**: Within the session 02.5 sub-sessions (cleanup-catalog-script + list-catalog-script), the user tried to invoke a freshly-merged script from their own zsh terminal and got `zsh: no such file or directory` despite the file being on `main`. Diagnosis: their interactive terminal session was a separate working checkout (or hadn't `git pull`-ed) from the Claude Code session's working copy.
+- **Why it matters**: Two-shell workflows (Claude Code in one window, the user's daily terminal in another) silently diverge unless the user remembers to `git pull --ff-only origin main` after every merge. The current Quickstart in `README.md` does not call this out.
+- **Owner**: future Quickstart-section refinement (session 03 docs-pass or whenever the README is touched next). One-paragraph addition under § Development would suffice.
+- **Binding trigger**: next README touch OR next operator-reported "no such file or directory" repro (informational tracking only).
+- **Status**: open (informational; no immediate harm beyond the user's confusion in this one session).
