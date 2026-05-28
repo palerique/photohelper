@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -36,6 +36,46 @@ fn heartbeat_interval() -> Duration {
         return Duration::from_millis(ms.max(10));
     }
     Duration::from_secs(10)
+}
+
+/// Cooperative stop signal for the heartbeat thread. Pairs a `Mutex<bool>`
+/// with a `Condvar` so the heartbeat loop's wait can be cut short the
+/// instant `run_ingest` is ready to print the summary line — closes TD-003
+/// (the previous `AtomicBool` + `thread::sleep(granularity)` design left
+/// the heartbeat thread orphaned, racing stderr against the summary line).
+pub(crate) struct HeartbeatStop {
+    lock: Mutex<bool>,
+    cvar: Condvar,
+}
+
+impl HeartbeatStop {
+    fn new() -> Self {
+        Self {
+            lock: Mutex::new(false),
+            cvar: Condvar::new(),
+        }
+    }
+
+    /// Mark the stop flag and wake every waiter immediately.
+    fn signal(&self) {
+        let mut stopped = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        *stopped = true;
+        drop(stopped);
+        self.cvar.notify_all();
+    }
+
+    /// Wait up to `dur` for `signal()`; returns `true` if stop was observed.
+    fn wait_for_stop(&self, dur: Duration) -> bool {
+        let stopped = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        if *stopped {
+            return true;
+        }
+        let (stopped, _) = self
+            .cvar
+            .wait_timeout(stopped, dur)
+            .unwrap_or_else(|p| p.into_inner());
+        *stopped
+    }
 }
 
 /// Atomic counters mapped 1:1 to the §Observability summary line.
@@ -127,13 +167,19 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
     let registry = Arc::new(CameraRegistry::default());
     let seen_unknown = Arc::new(Mutex::new(HashSet::<(String, String)>::new()));
 
-    // Heartbeat thread: spawned (handle retained for is_finished check),
-    // never joined; reads Arc<AtomicBool> stop flag.
-    let stop_flag = Arc::new(AtomicBool::new(false));
+    // Heartbeat thread: spawned with a named handle so debuggers/profilers
+    // show "ph-heartbeat" instead of `thread<unnamed>`. The thread parks on
+    // `HeartbeatStop`'s Condvar between ticks; `signal()` wakes it the
+    // moment the walk completes so the post-walk `.join()` returns near-
+    // instantly (no granularity-cycle latency added to summary printing).
+    let stop = Arc::new(HeartbeatStop::new());
     let heartbeat_handle = {
         let stats = Arc::clone(&stats);
-        let stop = Arc::clone(&stop_flag);
-        thread::spawn(move || heartbeat_loop(&stats, &stop, heartbeat_interval()))
+        let stop = Arc::clone(&stop);
+        thread::Builder::new()
+            .name("ph-heartbeat".into())
+            .spawn(move || heartbeat_loop(&stats, &stop, heartbeat_interval()))
+            .context("spawning heartbeat thread")?
     };
 
     let walker = walkdir::WalkDir::new(input_root.as_path()).follow_links(false);
@@ -178,17 +224,13 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
              unavailable during ingest"
         );
     }
-    stop_flag.store(true, Ordering::Relaxed);
-    // The heartbeat thread observes the flag within `granularity` (≤100ms
-    // post-R2-T4) and exits cleanly. We don't .join() — that would add up
-    // to one `granularity` cycle (≤100ms) of latency to summary printing.
-    // Trade-off accepted: up to one granularity-cycle of zombie heartbeat
-    // output may appear after the summary line, tests asserting strict
-    // stderr ordering can flake, and in-process test runs that re-invoke
-    // `run_ingest` accumulate one leaked detached thread per call until
-    // process exit. Tracked as TD-003 (heartbeat-join) with a session-02
-    // binding trigger; file-TD upgrade if this becomes a problem in
-    // production once real CR3 fixtures land.
+    // TD-003 closure (DN-019 trigger fired): signal the Condvar so the
+    // heartbeat thread wakes up immediately, then join the handle so every
+    // `[heartbeat]` line is flushed to stderr BEFORE the summary line.
+    // Joining also reaps the detached thread that previously leaked once
+    // per `run_ingest` call.
+    stop.signal();
+    let _ = heartbeat_handle.join();
 
     eprintln!("{}", stats.summary_line());
 
@@ -220,13 +262,25 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
     Ok(0)
 }
 
-fn heartbeat_loop(stats: &IngestStats, stop: &AtomicBool, interval: Duration) {
+fn heartbeat_loop(stats: &IngestStats, stop: &HeartbeatStop, interval: Duration) {
     // R2-T4 fix: granularity = min(interval, 100ms). Pre-fix the granularity
     // was hardcoded to 100ms, which meant `PHOTOHELPER_HEARTBEAT_INTERVAL_MS`
     // values below 100 silently floored to 100ms because the first iteration
     // always slept `granularity` before the tick-counter check. Now sub-100ms
     // env overrides actually take effect (used by tests) while production
     // (interval=10s) still gets the 100ms responsive-to-stop-flag behavior.
+    //
+    // TD-003 closure: the wait below is a Condvar `wait_timeout`, not a
+    // blind `thread::sleep`, so `stop.signal()` cuts the wait short and the
+    // join in `run_ingest` returns near-instantly (no granularity-cycle
+    // latency added to summary printing).
+    //
+    // Tick BEFORE wait (DN-019 lesson): with a wait-first loop, a fast
+    // ingest could finish + signal `stop` before the heartbeat thread was
+    // scheduled, leaving the first `wait_for_stop` to observe the signal
+    // immediately and return without ever printing. Tick-first guarantees
+    // the operator gets at least one liveness signal per `interval` even
+    // when the run is shorter than the OS thread-startup latency.
     let granularity = interval.min(Duration::from_millis(100));
     let ticks = interval
         .as_millis()
@@ -234,8 +288,7 @@ fn heartbeat_loop(stats: &IngestStats, stop: &AtomicBool, interval: Duration) {
         .unwrap_or(1)
         .max(1) as u64;
     let mut counter: u64 = 0;
-    while !stop.load(Ordering::Relaxed) {
-        thread::sleep(granularity);
+    loop {
         counter += 1;
         if counter >= ticks {
             counter = 0;
@@ -245,6 +298,9 @@ fn heartbeat_loop(stats: &IngestStats, stop: &AtomicBool, interval: Duration) {
                 stats.ingested.load(Ordering::Relaxed),
                 stats.in_flight.load(Ordering::Relaxed),
             );
+        }
+        if stop.wait_for_stop(granularity) {
+            return;
         }
     }
 }

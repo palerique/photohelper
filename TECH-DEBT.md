@@ -57,14 +57,14 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-003 — Heartbeat thread is not `.join()`-ed at end of `run_ingest`; leaks past summary
 
-- **Status**: Open
+- **Status**: Closed (2026-05-28, session 2; replaced `AtomicBool` + `thread::sleep` with `HeartbeatStop` (`Mutex<bool>` + `Condvar`) and a `thread::Builder::new().name("ph-heartbeat").spawn(...)` named handle; `run_ingest` now calls `stop.signal()` then `heartbeat_handle.join()` so all `[heartbeat]` lines flush BEFORE the summary; also restructured `heartbeat_loop` to tick-first-wait-after so a fast ingest still emits at least one liveness signal even when `stop` fires inside the OS thread-startup latency window — closes the DN-019 empirical-trigger class.)
 - **Opened**: 2026-05-28 (session 1, R2-T17)
-- **Stop-gap location**: `crates/photohelper-cli/src/commands/ingest.rs:181-192` @ commit `0f28627` (R1.T2 remediation kept the leak deliberately to avoid join-latency on summary printing). R2 retained the trade-off; this TD captures the obligation.
-- **Fundamental fix**: spawn the heartbeat thread on a `JoinHandle` (already done); after setting `stop_flag.store(true, Ordering::Relaxed)`, call `let _ = heartbeat_handle.join();` with a soft timeout via `Builder::name + thread::Builder::spawn` + a `Condvar` wake-up so the join completes within one `granularity` cycle (≤100ms post-R2-T4). Alternative: convert to a `tokio` `JoinSet` if/when an async runtime lands in session 02.
-- **Binding trigger**: any session that touches `run_ingest`'s post-walk teardown (session 04 export pipeline is the likely first toucher) OR by `2026-08-01`, whichever first. Also triggered if a test-flake surfaces on CI from stderr-ordering instability. **TRIGGER FIRED 2026-05-28** (per DN-019): the heartbeat test fails 5/5 on apple-silicon at session-02 plan-review pause time. Session 02 implementation MUST close this TD before the LibRaw landing can satisfy Acceptance criterion 1 (`just ci` green).
-- **Scope estimate**: ~15 LoC + maybe one `Condvar` field on a small struct / low risk
-- **Consequence of inaction**: (1) up to one granularity-cycle (≤100ms) of zombie heartbeat output after `summary_line` prints; (2) integration tests asserting strict stderr ordering can flake under CI load; (3) in-process test runs accumulating one leaked detached thread per `run_ingest` call until process exit (currently bounded — no in-process test loops `run_ingest`).
-- **Related**: `docs/code-reviews/session-01-round2.md § R2-T17`; `docs/code-reviews/session-01-round1.md § T2 sub-(c)` (where the trade-off was originally deliberated).
+- **Stop-gap location**: `crates/photohelper-cli/src/commands/ingest.rs:181-192` @ commit `0f28627` (R1.T2 remediation kept the leak deliberately to avoid join-latency on summary printing). R2 retained the trade-off; this TD captured the obligation.
+- **Fundamental fix (as shipped in session 2)**: `HeartbeatStop` pairs `Mutex<bool>` with `Condvar` so `signal()` cuts a `wait_timeout` short on the spot — join returns near-instantly, not after one `granularity` cycle. The heartbeat thread carries the name `"ph-heartbeat"` so debuggers/profilers can spot it. The loop is now tick-first-wait-after (DN-019 lesson: a wait-first loop races thread-startup against `stop.signal()` and can return without ever printing).
+- **Binding trigger (no longer applies; closed)**: any session that touches `run_ingest`'s post-walk teardown OR by 2026-08-01 OR a test-flake from stderr-ordering instability. The empirical trigger fired on 2026-05-28 per DN-019; session 02 closed it ahead of LibRaw work so Acceptance criterion 1 (`just ci` green) is satisfiable.
+- **Scope estimate**: ~50 LoC delivered (originally estimated ~15 LoC; the `HeartbeatStop` newtype + struct doc-comments + DN-019 race remediation expanded the budget). / low risk delivered.
+- **Consequence of inaction (historical)**: (1) up to one granularity-cycle (≤100ms) of zombie heartbeat output after `summary_line` prints; (2) integration tests asserting strict stderr ordering can flake under CI load; (3) in-process test runs accumulating one leaked detached thread per `run_ingest` call until process exit. All three closed.
+- **Related**: `docs/code-reviews/session-01-round2.md § R2-T17`; `docs/code-reviews/session-01-round1.md § T2 sub-(c)`; `docs/discovery-notes.md § DN-019` (empirical trigger).
 
 ---
 
@@ -122,4 +122,4 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ## Closed
 
-_(none yet)_
+- **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).
