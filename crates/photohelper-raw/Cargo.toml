@@ -62,3 +62,7 @@ static_assertions.workspace = true
 # (Acceptance criterion 7). Pure-Rust crypto — no system openssl
 # dependency at build time.
 sha2.workspace = true
+# `cc` compiles `cpp/photohelper_libraw_shim.c` (the minimal C-ABI
+# wrapper over LibRaw's larger struct types) into a sibling static lib
+# that links alongside libraw.a.
+cc.workspace = true

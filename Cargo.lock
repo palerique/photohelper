@@ -687,6 +687,7 @@ dependencies = [
 name = "photohelper-raw"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "photohelper-core",
  "sha2",
  "static_assertions",

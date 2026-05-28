@@ -3,23 +3,21 @@
 //! Six fields the catalog actually persists: Make, Model, Orientation,
 //! CaptureTime, Width, Height. Private fields + accessor methods per
 //! the strong-type discipline locked at plan-review (PR1-T5 + R2-T5 +
-//! R2-T6). External code can hold and inspect a `RawExif` via the
-//! accessors but cannot construct one — the FFI module is the sole
-//! authoritative source.
-//!
-//! The validating constructor `RawExif::from_libraw_fields` and the
-//! crate-private FFI-crossing builder `RawExifFields` land together
-//! with the FFI body (Deliverable 1a). Splitting now would force a
-//! `#[allow(dead_code)]` placeholder on items that will be used in the
-//! very next commit; co-locating constructor + consumer keeps the
-//! diff readable.
+//! R2-T6). External code obtains a `RawExif` via [`read_cr3`] and uses
+//! the accessor methods to read the individual fields; direct
+//! construction is impossible by design — the FFI module is the sole
+//! authoritative producer.
 
 #![forbid(unsafe_code)]
 
 use std::num::NonZeroU32;
+use std::path::Path;
 
 use photohelper_core::model::ExifOrientation;
 use static_assertions::assert_impl_all;
+
+use crate::Error;
+use crate::ffi::{self, RawPath};
 
 /// Typed EXIF extract for one RAW file.
 ///
@@ -106,6 +104,69 @@ impl RawExif {
     pub fn height(&self) -> NonZeroU32 {
         self.height
     }
+
+    /// Validate the FFI-produced fields and move them into a `RawExif`.
+    ///
+    /// Currently a pure mover — every cross-field invariant the v0.1
+    /// scope cares about is enforced UPSTREAM (`NonZeroU32` rejects
+    /// zero width/height at the FFI boundary; `ExifOrientation` rejects
+    /// out-of-range flip values). The fallible signature is deliberate
+    /// API-shape reservation per plan §1b R2-T5: adding a cross-field
+    /// invariant later (e.g. aspect-ratio sanity) becomes a non-breaking
+    /// internal change rather than a constructor-signature break.
+    ///
+    /// # Errors
+    ///
+    /// Always returns `Ok(...)` in v0.1. The `Result` is shape
+    /// reservation for future invariants.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "API-shape reservation per plan §1b R2-T5 — future cross-field invariants will exercise the Err arm"
+    )]
+    pub(crate) fn from_libraw_fields(fields: RawExifFields) -> Result<Self, Error> {
+        Ok(Self {
+            make: fields.make,
+            model: fields.model,
+            orientation: fields.orientation,
+            capture_time_unix_seconds: fields.capture_time_unix_seconds,
+            width: fields.width,
+            height: fields.height,
+        })
+    }
+}
+
+/// FFI-to-typed crossing builder. The [`ffi`](crate::ffi) module
+/// constructs this by orchestrating LibRaw's lifecycle + accessor
+/// calls; [`RawExif::from_libraw_fields`] is the sole consumer.
+///
+/// Crate-private — never crosses the public API boundary.
+pub(crate) struct RawExifFields {
+    pub(crate) make: String,
+    pub(crate) model: String,
+    pub(crate) orientation: ExifOrientation,
+    pub(crate) capture_time_unix_seconds: Option<i64>,
+    pub(crate) width: NonZeroU32,
+    pub(crate) height: NonZeroU32,
+}
+
+/// Read EXIF metadata from a Canon CR3 (or other LibRaw-supported RAW)
+/// file. Public entry point for the `photohelper-cli` ingest path.
+///
+/// Validates the path (NUL byte / non-UTF-8 / empty rejection), then
+/// drives LibRaw's `libraw_init → libraw_open_file → libraw_unpack →
+/// (accessors) → libraw_close` lifecycle inside an RAII guard. Every
+/// LibRaw-owned string / pointer is copied out before the guard drops,
+/// so the returned `RawExif` owns all its data.
+///
+/// # Errors
+///
+/// See [`crate::Error`] and [`crate::RawExifCause`] for the exhaustive
+/// failure-class breakdown. Common cases: invalid path, corrupt CR3,
+/// LibRaw build mismatch, EXIF fields absent / malformed.
+pub fn read_cr3(path: &Path) -> Result<RawExif, Error> {
+    let raw_path = RawPath::new(path)?;
+    let fields = ffi::parse_libraw_fields(&raw_path)?;
+    RawExif::from_libraw_fields(fields)
 }
 
 #[cfg(test)]

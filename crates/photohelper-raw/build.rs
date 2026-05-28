@@ -86,6 +86,11 @@ fn run() -> Result<(), String> {
     );
     println!("cargo:rustc-link-lib=static=raw");
 
+    // Compile our minimal C ABI shim against LibRaw's headers. `cc::Build`
+    // emits a sibling static lib and the matching `cargo:rustc-link-lib`
+    // directive automatically.
+    compile_shim(&manifest_dir, &src_dir)?;
+
     // LibRaw is C++; we need the C++ standard library at the final link.
     let target = env::var("TARGET").unwrap_or_default();
     if target.contains("apple") {
@@ -96,6 +101,21 @@ fn run() -> Result<(), String> {
     // LibRaw uses zlib (the configure-time default we accept).
     println!("cargo:rustc-link-lib=z");
 
+    Ok(())
+}
+
+fn compile_shim(manifest_dir: &Path, libraw_src_dir: &Path) -> Result<(), String> {
+    let shim_src = manifest_dir.join("cpp").join("photohelper_libraw_shim.c");
+    println!("cargo:rerun-if-changed={}", shim_src.display());
+    cc::Build::new()
+        .file(&shim_src)
+        // Include LibRaw's public headers (extracted into OUT_DIR).
+        .include(libraw_src_dir)
+        // Suppress warnings from LibRaw's headers — they're upstream's
+        // problem, not ours.
+        .warnings(false)
+        .try_compile("photohelper_libraw_shim")
+        .map_err(|e| format!("cc::Build for shim failed: {e}"))?;
     Ok(())
 }
 

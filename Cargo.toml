@@ -57,6 +57,12 @@ fs4 = { version = "1", features = ["sync"] }
 # Build-script crypto (used by photohelper-raw's build.rs to verify the
 # vendored LibRaw tarball's SHA-256 — Acceptance criterion 7).
 sha2 = "0.10"
+# C/C++ compiler driver used by photohelper-raw's build.rs to compile
+# `cpp/photohelper_libraw_shim.c` (the minimal C-ABI wrapper that exposes
+# stable typed-pointer + numeric-return accessors over LibRaw's larger
+# struct types — avoids fragile #[repr(C)] mirroring of libraw_iparams_t /
+# libraw_image_sizes_t / libraw_imgother_t in Rust).
+cc = "1"
 
 # Dev-deps used across crates
 assert_cmd = "2"
