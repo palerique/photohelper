@@ -53,8 +53,20 @@ base64 = "0.22"
 # Time
 time = { version = "0.3.47", features = ["macros"] }
 
-# Persistence
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Persistence — `rusqlite 0.34` (was 0.32 through session 01 → TD-002).
+# Bumped voluntarily ahead of TD-002's 2026-08-01 calendar trigger
+# because session 02 is already in catalog-touching territory and the
+# bundled SQLite version under 0.32 was ~14 months stale. API surface
+# verified for our call sites (open / execute / query_row /
+# Transaction::Immediate / params!).
+#
+# v0.40 attempted (the plan's original target) but its bundled
+# `libsqlite3-sys 0.38.x` uses `cfg_select!` which requires MSRV 1.92
+# (we're on 1.88 per `rust-toolchain.toml`). Falling back to 0.34
+# (last MSRV-1.88-compatible release on the recent line). TD-002
+# remains open with a revised target: bump to latest rusqlite on the
+# next MSRV bump.
+rusqlite = { version = "0.34", features = ["bundled"] }
 fs4 = { version = "1", features = ["sync"] }
 
 # Build-script crypto (used by photohelper-raw's build.rs to verify the

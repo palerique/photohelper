@@ -42,16 +42,16 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
-### TD-002 — `rusqlite` pinned at 0.32 instead of plan-v5 target 0.40 (CVE exposure)
+### TD-002 — `rusqlite` pinned at 0.34 instead of plan-v5 target 0.40 (CVE exposure, partial closure)
 
-- **Status**: Open
+- **Status**: Partial (2026-05-28, session 2). Bumped from 0.32 → 0.34, the latest version compatible with our MSRV 1.88. **NOT** at the original 0.40 target because rusqlite ≥ 0.36 pulls in `libsqlite3-sys ≥ 0.38` which uses the `cfg_select!` macro requiring MSRV 1.92. Closing the full TD requires bumping MSRV first.
 - **Opened**: 2026-05-28 (session 1)
-- **Stop-gap location**: `Cargo.toml` `[workspace.dependencies]` `rusqlite = { version = "0.32", features = ["bundled"] }` @ commit `310f753` (initial implementation)
-- **Fundamental fix**: bump to `rusqlite = "0.40"` (or whatever the latest version is at remediation time); run `cargo update -p rusqlite`; verify `just ci` stays green (rusqlite 0.40 is API-compatible for `Connection::open` / `execute` / `query_row` / `Transaction` / `params!` — the operations photohelper uses); confirm `cargo audit` does not flag the newer bundled SQLite version.
-- **Binding trigger**: bump by **2026-08-01** OR before session 02 introduces new catalog schema columns (whichever first). Session 02 will modify `Catalog::upsert` paths anyway — bundling the dep bump into that change minimizes churn.
-- **Scope estimate**: ~5 LoC (Cargo.toml + Cargo.lock auto-update + possibly a few rusqlite API-rename touchups if 0.32→0.40 deprecates anything we use) / low risk
-- **Consequence of inaction**: any SQLite CVE released after rusqlite 0.32's bundled-amalgamation cutoff (mid-2024) will fail `cargo audit --deny warnings` → fail CI → emergency bump under time pressure. Sitting on a 14-month-old SQLite bundle is exactly the silent-failure-via-stale-dep pattern `cargo audit` exists to surface.
-- **Related**: `docs/discovery-notes.md` DN-007 (cross-reference); `docs/code-reviews/session-01-round1.md § T5` (the finding that surfaced this).
+- **Stop-gap location**: `Cargo.toml` `[workspace.dependencies]` `rusqlite = { version = "0.34", features = ["bundled"] }` @ commit (session 02 Deliverable 5).
+- **Fundamental fix (remaining)**: bump MSRV to ≥ 1.92 (file an ADR per the 1.85 → 1.88 precedent), then bump `rusqlite` to latest (currently 0.40). Touchups expected on the catalog crate's call sites if `libsqlite3-sys ≥ 0.38` introduces API breaks; verify with `cargo update -p rusqlite && cargo test`.
+- **Binding trigger (revised)**: next MSRV bump OR a SQLite CVE that 0.34's bundled amalgamation does not include the fix for OR 2026-08-01 (calendar-anchored, unchanged from original). The MSRV-bump dependency is the most likely path; rusqlite + bundled-sqlite is unusually conservative about MSRV.
+- **Scope estimate**: ~30 LoC for the MSRV bump (ADR + rust-toolchain.toml + workspace.package.rust-version) + ~5 LoC for the rusqlite bump itself / low risk.
+- **Consequence of inaction**: the bundled SQLite version inside rusqlite 0.34 (mid-2025) is significantly fresher than 0.32 (early-2024), so the CVE-exposure risk is now substantially smaller than when TD-002 was filed. Sitting on 0.34 long-term still violates the bundled-sqlite freshness expectation but the next-CVE risk window is months, not weeks.
+- **Related**: `docs/discovery-notes.md` DN-007; `docs/code-reviews/session-01-round1.md § T5`.
 
 ---
 
