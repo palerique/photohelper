@@ -19,3 +19,6 @@
 
 # eng-protocol session-config cache (per-session; not for source control)
 .eng-protocol/
+
+# Serena MCP per-machine project state (LSP indexes, on-boarding cache, etc.)
+.serena/
