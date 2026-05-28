@@ -149,3 +149,80 @@ Session-end Round 1 surfaced 7 CRITICAL + 5 HIGH; remediation applied
 in commits following `310f753` (see git log on
 `session-01/cli-skeleton-and-ingest`). Round 2 fires next to verify
 the remediation held cleanly.
+
+---
+
+## Checkpoint 2 — session 01 paused for context refresh (2026-05-28)
+
+**Status**: PAUSED. Last commit on branch: `02d43d1` (harness sync).
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code session 01)
+
+### What landed since Checkpoint 1
+- **Session-end Round 1** complete: full 8-agent suite fired against
+  commit `310f753`. Findings consolidated by theme in
+  `docs/code-reviews/session-01-round1.md` (7 CRITICAL + 5 HIGH + 4
+  MEDIUM + 3 LOW + 7 strengths preserved).
+- **R1 remediation** committed at `0f28627`. Applied every CRITICAL +
+  HIGH inline; deferred specific MEDIUMs to session 02 via DN-008
+  with binding triggers. Test count grew 59 → 63.
+- **Harness sync from fox/eng-protocol** committed at `02d43d1`.
+  Major upgrade to `eight-agent-review` skill (added §0 precondition
+  gate with memoization, §1 plugin-availability detection, §3
+  `model: "opus"` pin, §3.a 5-section sentinel-marker template, §6
+  9th-agent verifier with verbatim Read-window quotation, §6.b
+  verification YAML block). Added `session-pause` skill (5th in our
+  roster). Added `.claude/settings.json` + bash hook
+  `detect-eng-protocol.sh` + `.claudeignore`. Stack-specific fox
+  items (`address-vulnerabilities` npm command, `eng-protocol.mjs`,
+  `verify-review-artifact.mjs`) deliberately skipped — TD candidate
+  to bash-port the artifact enforcer later.
+- **All R1 governance work**: ADR `0001-msrv-bump-to-1.88-for-rustsec-2026-0009.md`,
+  decision `0001-catalog-schema-v1.md`, DN-006/007/008,
+  TD-002 (rusqlite 0.32 stale).
+
+### Why paused
+Context window approaching limit after 4 plan-review rounds + initial
+implementation + 1 session-end review round + R1 remediation + harness
+sync — total turn count and accumulated context warrants a refresh
+before R2 fires (so R2 doesn't run with degraded reasoning quality
+caused by context pressure).
+
+### Precise next steps when context restored
+1. **Read `SESSION-STATE.md`** (canonical re-orientation per the
+   resume prompt).
+2. **Read this Checkpoint 2** (you're here).
+3. **Read `docs/code-reviews/session-01-round1.md`** to know what R1
+   surfaced and what R1 remediation closed.
+4. **Skim the R1 remediation diff**: `git show 0f28627` for code
+   changes; `git show 02d43d1` for harness changes. The R2 watch-list
+   at the bottom of round1.md is the canonical "what R2 must verify."
+5. **Fire `/eight-agent-review session 0f28627..HEAD`** (or
+   equivalent — scope is the R1 remediation diff against R1's
+   findings). The newly-upgraded skill will:
+   - Prompt the §0 precondition gate (first invocation in the fresh
+     context — answer per your session config; the cache memoizes
+     for subsequent rounds).
+   - Pin `model: "opus"` on every sub-agent invocation.
+   - Run the 9th verifier agent to catch hallucinated findings (this
+     is the new mechanism — R1 had 4 hallucinated file:line refs that
+     the verifier would have caught).
+   - Emit the three YAML blocks (session_config, plugin_availability,
+     verification) at the top of the artifact.
+6. **Round 2 → remediate → Round 3 if R2 surfaces CRITICAL**. Per
+   `docs/quality-assurance.md § Double-review protocol`: never stop
+   after Round 1.
+7. **After R2 is clean**: commit ledgers + final state; push the
+   branch; `gh pr create --base main --head session-01/cli-skeleton-
+   and-ingest`; wait for green CI; `gh pr merge --merge --delete-
+   branch`; render the two-block handoff per
+   `docs/session-handoff-format.md`.
+
+### Resume from a fresh context
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-01/cli-skeleton-and-ingest
+just session-start
+```
+
+Then paste the restart prompt rendered at the end of the pause turn
+(below the ledger updates).

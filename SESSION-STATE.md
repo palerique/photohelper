@@ -8,26 +8,33 @@
 > rolling-archive convention. The git log is the full timeline.
 
 **Last session**: 1 (`cli-skeleton-and-ingest` — 2026-05-28) —
-implementation complete on branch `session-01/cli-skeleton-and-ingest`;
-session-end review Round 1 done; Round 1 remediation applied; Round 2
-pending; PR not yet opened.
+implementation complete; session-end Round 1 done; Round 1 remediation
+applied; harness sync from fox/eng-protocol landed; **PAUSED 2026-05-28
+for context-window refresh** at commit `02d43d1`.
 
-**Current session**: 1 (still — wraps when R2 + final commit + PR + merge land).
+**Current session**: 1 (PAUSED — resume at the action below).
 
 **Goal** (session 1): Land the thinnest end-to-end slice that proves
 the workspace architecture — `clap` v4 CLI with all 7 subcommands
 (`ingest`, `cull`, `develop`, `export`, `run`, `models`, `camera`),
-with `ingest` doing real work. **DONE** at commit `310f753`; 4
-remediation commits land R1 fixes.
+with `ingest` doing real work. **DONE** at commit `310f753`; R1
+remediation at `0f28627`; harness sync at `02d43d1`.
 
-**Action**: fire **session-end Round 2** (full 8-agent suite re-fired
-against the remediated code) per `docs/quality-assurance.md § Double-review
-protocol`. Never stop after Round 1.
+**Action when context restored**: fire **session-end Round 2** —
+the upgraded `/eight-agent-review` (skill at `.claude/skills/eight-agent-
+review/SKILL.md`, just upgraded with §0 precondition gate + §1
+plugin-availability + §3 model:opus pin + §3.a sentinel-marker
+template + §6 9th-agent verifier + §6.b verification YAML block per
+the harness sync). Scope: the R1 remediation diff (commits `0f28627`
++ `02d43d1`). Verify the 7 CRITICAL + 5 HIGH from R1 closed cleanly
+and check for new regressions. Per `docs/quality-assurance.md §
+Double-review protocol`: never stop after Round 1.
 
 **Status**: 63 tests pass; `just ci` green; smoke test on `/tmp/ph_demo`
-confirms end-to-end works; R1 remediation applied. Round 2 pending.
+confirms end-to-end works; R1 remediation applied; harness improved.
+R2 pending.
 
-**Next action** (after Round 2 + remediation): commit final state;
+**Next action AFTER R2 + remediation**: commit final state;
 push `session-01/cli-skeleton-and-ingest` branch; open PR to `main`;
 wait for CI green; merge with merge-commit; render two-block handoff
 per `docs/session-handoff-format.md`.
@@ -94,6 +101,19 @@ again.
 ---
 
 ## Continuation-session bootstrap (verbatim)
+
+Session 01 is still open (paused for context refresh — not yet merged).
+The resume path is to stay on the same branch:
+
+```bash
+git switch session-01/cli-skeleton-and-ingest && just session-start
+```
+
+Then read this file + the latest `HANDOFF_REPORT.md § Checkpoint 2`
+(the pause-state checkpoint) and proceed to the **Action when context
+restored** above (fire session-end Round 2).
+
+After session 01 merges, the next session's bootstrap is the canonical:
 
 ```bash
 git switch main && git pull --ff-only origin main && git switch -c session-02/<kebab-slug> && just session-start
