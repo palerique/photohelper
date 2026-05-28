@@ -226,3 +226,62 @@ just session-start
 
 Then paste the restart prompt rendered at the end of the pause turn
 (below the ledger updates).
+
+---
+
+## Checkpoint 3 — session 02 paused for context refresh (2026-05-28; plan-review complete)
+
+**Status**: PAUSED. Plan-review iteration COMPLETE (R1 + R2 + R3 + targeted R3 remediation). No code yet — pre-implementation pause.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code session 02 plan-review)
+
+### What landed this window
+
+Plan-review for session 02 ran 3 rounds with full agent suite (Cadence A Tier 5 — 8-agent suite at R1/R2, 7-agent at R3 with type-design-analyzer skipped post-closure). 10 plan-review commits on `session-02/libraw-cr3-decode`:
+
+- `b377aed` — plan v1 (initial contract)
+- `354406f` — plan-review Round 1 artifact
+- `b64425f` — SESSION-STATE.md drift cleanup (closes PR1-T22)
+- `5d5dc9a` — R1 remediation cross-doc fixes (PR1-T8 decision-doc 0001 amendment; PR1-T17 LGPL §6(a) correction; DN-013/014/015 + TD-004 filed)
+- `69b6a5b` — plan v2 R1 remediation (closes 16 CRITICAL + 17 HIGH)
+- `c80acf3` — plan-review Round 2 artifact
+- `0e54129` — R2 remediation cross-doc filings (DN-016/017/018 filed; SCUNet residue scrubbed)
+- `dc41dee` — plan v3 R2 remediation (closes 9 CRITICAL + 14 HIGH)
+- `37373f4` — plan-review Round 3 artifact
+- `dd62166` — R3 remediation plan v3.1 + TD-005/006/007 + SESSION-STATE update
+
+**Plan**: `docs/plans/session-02.md` v3.1 (1027 lines). Goal: LibRaw FFI for Canon R8 CR3 — EXIF read (DN-011 critical path) + RAW pixel decode + TD-002 rusqlite bump + 6-of-12 DN-008 rows + R2-T18 4/4 closure via env-var heartbeat hatch.
+
+**Self-criticism (preserved in audit trail)**: While remediating R2-T1 (phantom PR1-T# IDs in v2), I introduced 7 new phantom R2-* IDs in v3 (R2-S2, R2-T26, R2-PT2/3/4/7/8). R3 caught it; v3.1 corrected. Recorded as a "new bug class" pattern in `docs/code-reviews/session-02-plan-round3.md § R3-T1` + the new-bug-classes note: "phantom-ID recurrence at every round."
+
+**Diminishing returns observation**: each plan-review round closes most prior-round CRITICALs but introduces ~3-7 new ones (R1 → 16 CRITICAL; R2 → 9 inside R1 remediation; R3 → 7 inside R2 remediation). R4 NOT fired per 6-of-7 R3 agent consensus + recognition that further rounds would surface derivatives without substantive plan improvement.
+
+### CI gate state at pause time
+
+`just session-end` (= `just ci`) FAILS on a single test: `crates/photohelper-cli/tests/cli.rs::heartbeat_fires_during_ingest_when_interval_is_short`. Verified 5/5 failures on apple-silicon. Root cause is **TD-003** (heartbeat thread not `.join()`-ed) manifesting empirically — ingest of 80 stub CR3s completes in ~0.28s; spawned heartbeat thread doesn't flush its first `eprintln!` before parent process exits. NOT a regression from this session's docs-only work; the test was always borderline (session-01 R2 just got lucky). TD-003's binding trigger explicitly includes "test-flake surfaces on CI from stderr-ordering instability" — that trigger is NOW FIRED. Recorded as `docs/discovery-notes.md § DN-019`. Session 02 implementation MUST close TD-003 before Acceptance criterion 1 (`just ci` green) can be satisfied — fold into Deliverable 0 or the FFI module commit per TD-003's existing fundamental-fix spec (~15 LoC).
+
+### Why paused
+
+Plan-review iteration consumed substantial context across R1+R2+R3+remediation cycles. Pausing here to refresh context BEFORE implementation begins so Deliverable 0 (pre-flight LibRaw EXIF + CVE-posture audit) is authored with full reasoning quality, not under context pressure.
+
+### Precise next steps when context restored
+
+1. **Read `SESSION-STATE.md`** (canonical re-orientation per the resume prompt).
+2. **Read this Checkpoint 3** (you're here).
+3. **Read `docs/plans/session-02.md`** (1027 lines; the implementation contract — pay special attention to Deliverable 0 pre-flight + Deliverable 1's FFI strategy lock + Deliverables 4-7 sequencing).
+4. **Skim `docs/code-reviews/session-02-plan-round3.md`** for the R3 watch-list (specifically TD-005/006/007 that session 02 implementation MUST address inline as code is written).
+5. **Read `docs/discovery-notes.md § DN-019`** for the TD-003 empirical-trigger note + remediation requirement.
+6. **Begin implementation per plan v3.1's sequencing**:
+   - **Deliverable 0 (pre-flight; first commit `chore(libraw): pre-flight EXIF + CVE-posture audit`)**: invoke chosen LibRaw entry against `/Users/ph/Pictures/tests` 371-CR3 set; verify LibRaw 0.21.4 (or actually-current 0.21.x latest) extracts Make/Model/Orientation/CaptureTime; check MITRE CVE feed for any open CVE on the chosen version; produce `docs/analysis/ANL-001-libraw-cr3-preflight.md`. ABORT if >5% extraction failure OR any open CVE → raise plan-review v4.
+   - **Address TD-003 in lockstep** (~15 LoC heartbeat `.join()` cleanup; unblocks Acceptance criterion 1).
+   - Then Deliverables 1 (FFI/exif/decode/Error) → 2 (build-system + ADR-0002) → 3 (Git LFS fixtures + sanitize) → 4 (ingest rewire atomic commit) → 5 (rusqlite bump) → 6 (test infra including TD-005/006/007 inline addressing) → 7 (DN-012 polish).
+   - **Sub-component reviews** fire at FFI boundary + LGPL build-system per the Checkpoints table.
+
+### Resume from a fresh context
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-02/libraw-cr3-decode
+just session-start
+```
+
+Then paste the restart prompt rendered at the end of this pause turn.

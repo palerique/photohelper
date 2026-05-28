@@ -30,20 +30,33 @@ to pass on real CR3 fixtures; bundle TD-002 rusqlite 0.32 → 0.40 bump
 (rows 6, 17, 39, 42, 43, 49) + R2-T18 WARN regressions. See
 `docs/plans/session-02.md` for the full contract.
 
-**Action**: **READY FOR IMPLEMENTATION.** Plan-review Rounds 1, 2, 3
+**Action**: **PAUSED for context refresh.** Plan-review Rounds 1, 2, 3
 all fired; v3 + targeted R3 remediation landed; remaining R3 design-class
 CRITICALs filed as TD-005/006/007 with binding triggers for session-02
-implementation to address inline as code is written. Begin
-implementation per `docs/plans/session-02.md § Deliverables`
-sequencing (Deliverable 0 pre-flight first, then Deliverables 1-7).
+implementation to address inline as code is written. Next session
+window: begin implementation per `docs/plans/session-02.md
+§ Deliverables` sequencing (Deliverable 0 pre-flight first, then
+Deliverables 1-7), AND close TD-003 in lockstep (binding trigger
+now FIRED per DN-019).
 
-**Status**: 63 tests passing on main (carried from session 01). No
-new code yet; plan-review phase complete (R1 + R2 + R3 + targeted R3
-remediation). 8 plan-review commits land on session-02 branch:
+**Status**: 62 of 63 tests passing on apple-silicon
+(`heartbeat_fires_during_ingest_when_interval_is_short` fails 5/5 —
+empirical manifestation of TD-003 heartbeat thread not `.join()`-ed,
+per DN-019). NOT a regression from this session's docs-only work; the
+test was always borderline on fast hardware. Session 02 implementation
+MUST close TD-003 before Acceptance criterion 1 (`just ci` green) can
+be satisfied. Plan-review phase complete. 10 plan-review commits land
+on session-02 branch:
 - `b377aed` — plan v1
-- `<sha1>` — R1 artifact + session-state cleanup + cross-doc fixes + plan v2
-- `<sha2>` — R2 artifact + cross-doc DN-016/017/018 + TD-004 + plan v3
-- `<sha3>` — R3 artifact + targeted R3 remediation (plan v3.1) + TD-005/006/007
+- `354406f` — plan-review Round 1 artifact
+- `b64425f` — SESSION-STATE.md drift cleanup
+- `5d5dc9a` — R1 remediation cross-doc fixes
+- `69b6a5b` — plan v2 (R1 remediation, closes 16 CRITICAL + 17 HIGH)
+- `c80acf3` — plan-review Round 2 artifact
+- `0e54129` — R2 remediation cross-doc filings (DN-016/017/018 + SCUNet scrub)
+- `dc41dee` — plan v3 (R2 remediation, closes 9 CRITICAL + 14 HIGH)
+- `37373f4` — plan-review Round 3 artifact
+- `dd62166` — R3 remediation plan v3.1 + TD-005/006/007 + SESSION-STATE update
 
 **Plan-review history (3 rounds; diminishing-returns observation)**:
 R1 surfaced 16 CRITICAL + 17 HIGH + 14 MEDIUM + 9 LOW; v2 closed
