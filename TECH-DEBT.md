@@ -42,6 +42,32 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-002 — `rusqlite` pinned at 0.32 instead of plan-v5 target 0.40 (CVE exposure)
+
+- **Status**: Open
+- **Opened**: 2026-05-28 (session 1)
+- **Stop-gap location**: `Cargo.toml` `[workspace.dependencies]` `rusqlite = { version = "0.32", features = ["bundled"] }` @ commit `310f753` (initial implementation)
+- **Fundamental fix**: bump to `rusqlite = "0.40"` (or whatever the latest version is at remediation time); run `cargo update -p rusqlite`; verify `just ci` stays green (rusqlite 0.40 is API-compatible for `Connection::open` / `execute` / `query_row` / `Transaction` / `params!` — the operations photohelper uses); confirm `cargo audit` does not flag the newer bundled SQLite version.
+- **Binding trigger**: bump by **2026-08-01** OR before session 02 introduces new catalog schema columns (whichever first). Session 02 will modify `Catalog::upsert` paths anyway — bundling the dep bump into that change minimizes churn.
+- **Scope estimate**: ~5 LoC (Cargo.toml + Cargo.lock auto-update + possibly a few rusqlite API-rename touchups if 0.32→0.40 deprecates anything we use) / low risk
+- **Consequence of inaction**: any SQLite CVE released after rusqlite 0.32's bundled-amalgamation cutoff (mid-2024) will fail `cargo audit --deny warnings` → fail CI → emergency bump under time pressure. Sitting on a 14-month-old SQLite bundle is exactly the silent-failure-via-stale-dep pattern `cargo audit` exists to surface.
+- **Related**: `docs/discovery-notes.md` DN-007 (cross-reference); `docs/code-reviews/session-01-round1.md § T5` (the finding that surfaced this).
+
+---
+
+### TD-003 — Heartbeat thread is not `.join()`-ed at end of `run_ingest`; leaks past summary
+
+- **Status**: Open
+- **Opened**: 2026-05-28 (session 1, R2-T17)
+- **Stop-gap location**: `crates/photohelper-cli/src/commands/ingest.rs:181-192` @ commit `0f28627` (R1.T2 remediation kept the leak deliberately to avoid join-latency on summary printing). R2 retained the trade-off; this TD captures the obligation.
+- **Fundamental fix**: spawn the heartbeat thread on a `JoinHandle` (already done); after setting `stop_flag.store(true, Ordering::Relaxed)`, call `let _ = heartbeat_handle.join();` with a soft timeout via `Builder::name + thread::Builder::spawn` + a `Condvar` wake-up so the join completes within one `granularity` cycle (≤100ms post-R2-T4). Alternative: convert to a `tokio` `JoinSet` if/when an async runtime lands in session 02.
+- **Binding trigger**: any session that touches `run_ingest`'s post-walk teardown (session 04 export pipeline is the likely first toucher) OR by `2026-08-01`, whichever first. Also triggered if a test-flake surfaces on CI from stderr-ordering instability.
+- **Scope estimate**: ~15 LoC + maybe one `Condvar` field on a small struct / low risk
+- **Consequence of inaction**: (1) up to one granularity-cycle (≤100ms) of zombie heartbeat output after `summary_line` prints; (2) integration tests asserting strict stderr ordering can flake under CI load; (3) in-process test runs accumulating one leaked detached thread per `run_ingest` call until process exit (currently bounded — no in-process test loops `run_ingest`).
+- **Related**: `docs/code-reviews/session-01-round2.md § R2-T17`; `docs/code-reviews/session-01-round1.md § T2 sub-(c)` (where the trade-off was originally deliberated).
+
+---
+
 ## Closed
 
 _(none yet)_

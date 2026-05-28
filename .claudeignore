@@ -1,0 +1,28 @@
+# Claude Code ignore patterns. Files and directories listed here will be
+# excluded from Claude's context when reading project files for general
+# orientation (Claude can still Read them explicitly when needed).
+#
+# Pattern: like .gitignore.
+
+# Build outputs
+/target/
+/dist/
+
+# IDE / editor files
+.idea/
+.vscode/
+
+# Local SQLite catalogs and AI model caches photohelper itself produces
+# when run against test inputs (not source-of-truth state).
+.photohelper/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+
+# Logs and scratch
+*.log
+/.scratch/
+
+# OS
+.DS_Store
+Thumbs.db

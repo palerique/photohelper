@@ -16,3 +16,6 @@
 
 # photohelper runtime caches
 .photohelper/
+
+# eng-protocol session-config cache (per-session; not for source control)
+.eng-protocol/

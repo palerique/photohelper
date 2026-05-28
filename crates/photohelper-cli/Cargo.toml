@@ -17,3 +17,22 @@ path = "src/main.rs"
 
 [dependencies]
 photohelper-core = { path = "../photohelper-core" }
+photohelper-cameras = { path = "../photohelper-cameras" }
+photohelper-catalog = { path = "../photohelper-catalog" }
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+walkdir.workspace = true
+rayon.workspace = true
+num_cpus.workspace = true
+kamadak-exif.workspace = true
+rusqlite.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
+filetime.workspace = true
+rusqlite.workspace = true
