@@ -30,23 +30,27 @@ to pass on real CR3 fixtures; bundle TD-002 rusqlite 0.32 → 0.40 bump
 (rows 6, 17, 39, 42, 43, 49) + R2-T18 WARN regressions. See
 `docs/plans/session-02.md` for the full contract.
 
-**Action**: **PAUSED for context refresh.** Plan-review Rounds 1, 2, 3
-all fired; v3 + targeted R3 remediation landed; remaining R3 design-class
-CRITICALs filed as TD-005/006/007 with binding triggers for session-02
-implementation to address inline as code is written. Next session
-window: begin implementation per `docs/plans/session-02.md
-§ Deliverables` sequencing (Deliverable 0 pre-flight first, then
-Deliverables 1-7), AND close TD-003 in lockstep (binding trigger
-now FIRED per DN-019).
+**Action**: **PAUSED for context refresh** (second pause this session;
+post-Deliverable-1a-scaffolding). Today's window closed TD-003 (CI green
+end-to-end) AND landed Deliverable 0 (LibRaw pin escalated to `=0.22.1`)
+AND landed Deliverable 1a's lint-scaffolding foundation. Next session
+window: implement the body of Deliverable 1 — 1d Error enum first
+(`crates/photohelper-raw/src/lib.rs` per plan §1d, ~5 variants +
+2 cause enums), then 1b `RawExif` (`src/exif.rs`), then 1c `RawImage`
++ companions (`src/decode.rs`), then 1a body (FFI bindings to ~15
+LibRaw C-API functions in `src/ffi.rs`). Then proceed to Deliverable 2
+(LibRaw build.rs + ADR-0002 LGPL §6(a)).
 
-**Status**: 62 of 63 tests passing on apple-silicon
-(`heartbeat_fires_during_ingest_when_interval_is_short` fails 5/5 —
-empirical manifestation of TD-003 heartbeat thread not `.join()`-ed,
-per DN-019). NOT a regression from this session's docs-only work; the
-test was always borderline on fast hardware. Session 02 implementation
-MUST close TD-003 before Acceptance criterion 1 (`just ci` green) can
-be satisfied. Plan-review phase complete. 10 plan-review commits land
-on session-02 branch:
+**Status**: `just ci` GREEN end-to-end on apple-silicon. 63/63 tests
+pass deterministically (verified 10/10 reruns of the previously-broken
+`heartbeat_fires_during_ingest_when_interval_is_short`). Workspace
+state clean. 4 new commits this window:
+- `bb87735` — fix(session-02): close TD-003 (heartbeat join) per DN-019 trigger
+- `e6d53fb` — chore: gitignore `.serena/` per-machine MCP state
+- `0d4a7f7` — chore(libraw): pre-flight EXIF + CVE-posture audit (Deliverable 0)
+- `440388a` — chore(session-02): photohelper-raw lint scaffolding + unsafe-isolation gate (Deliverable 1a setup)
+
+10 plan-review commits remain on the branch from the prior phase:
 - `b377aed` — plan v1
 - `354406f` — plan-review Round 1 artifact
 - `b64425f` — SESSION-STATE.md drift cleanup
@@ -79,6 +83,23 @@ filed TD-005/006/007 for the remaining design items (RawDecodeCause
 dispatch; PathBuf empty-path) — session 02 implementation will
 surface and close those in real code.
 
+**Plan amendments this window**: plan v3.1 → v3.2.
+- Deliverable 0 / 2 / Acceptance 7 / Plan revisions log: LibRaw pin
+  escalated `=0.21.4` → `=0.22.1` per Deliverable 0 pre-flight
+  (rationale in `docs/analysis/ANL-001-libraw-cr3-preflight.md` and the
+  `0d4a7f7` commit body); cross-series jump exceeded the implementer's
+  plan-granted authority so user consultation under the No-Acceptable-
+  Trade-offs Policy approved the choice. DN-018 closed.
+- Deliverable 1a § unsafe_code discipline: `src/lib.rs` removed from the
+  list of files carrying file-level `#![forbid(unsafe_code)]`. Plan v3.1
+  prescribed forbid on lib.rs but rustc disallows downgrading `forbid`
+  in submodules, which would make `ffi.rs`'s unsafe blocks fail to
+  compile no matter what attribute `ffi.rs` carries. Crate-level
+  Cargo.toml `allow` is the lib.rs baseline; `exif.rs` / `decode.rs` /
+  any future non-FFI files carry the file-level forbid; the
+  `unsafe-isolation` CI gate is the third defense layer. Folded into
+  the `440388a` scaffolding commit.
+
 ---
 
 ## Component progress
@@ -87,7 +108,7 @@ surface and close those in real code.
 |-----------------------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | `photohelper-cli`     | **implemented (session 01)**            | clap v4 + 7 subcommands; `ingest` real; stubs exit 69; heartbeat + summary via eprintln!.                     |
 | `photohelper-core`    | **implemented (session 01)**            | model (PhotoId, AbsPath, CameraId, KnownCamera, ExifOrientation, Aspect, ExifMetadata, IngestOutcome, Photo); error (13 variants); catalog_glue. |
-| `photohelper-raw`     | scaffolded                              | LibRaw FFI + CR3 decode land in session 02.                                                                   |
+| `photohelper-raw`     | **lint scaffolding (session 02 D1a)**   | Cargo.toml `[lints]` overrides workspace `forbid(unsafe_code)` → `allow`; explicit per-key restate of every workspace lint; `src/{ffi,exif,decode}.rs` stub files carry file-level `#![deny(unsafe_op_in_unsafe_fn)]` (ffi) or `#![forbid(unsafe_code)]` (exif, decode); `scripts/check-unsafe-isolation.sh` + `just ci unsafe-isolation` recipe is the third defense layer. FFI body + `RawExif`/`RawImage` types + Error enum land in next-window Deliverable 1 body commits. |
 | `photohelper-ai`      | scaffolded                              | ort/tract + culling/denoise models land in sessions 03+.                                                      |
 | `photohelper-sidecar` | scaffolded                              | XMP read/write (crs:/ph: namespaces) lands when `develop` is wired (~session 04).                             |
 | `photohelper-export`  | scaffolded                              | resize + watermark + mozjpeg encode land when `export` is wired (~session 05).                                |

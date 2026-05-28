@@ -285,3 +285,60 @@ just session-start
 ```
 
 Then paste the restart prompt rendered at the end of this pause turn.
+
+---
+
+## Checkpoint 4 — session 02 paused for context refresh (2026-05-28; CI green, Deliverable 0 done, Deliverable 1a scaffolded)
+
+**Status**: PAUSED. Last commit on branch: `440388a` (Deliverable 1a scaffolding). `just ci` GREEN end-to-end. Pre-implementation gates closed.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code session 02, post-Checkpoint-3 implementation window)
+
+### What landed this window
+
+Four commits on `session-02/libraw-cr3-decode`, all conventional, no force-pushes:
+
+- `bb87735` — **`fix(session-02): close TD-003 (heartbeat join) per DN-019 trigger`**. Replaces `AtomicBool` + `thread::sleep` with `HeartbeatStop` (`Mutex<bool>` + `Condvar`) and a named `thread::Builder::new().name("ph-heartbeat").spawn(...)` handle. `run_ingest` now calls `stop.signal()` then `heartbeat_handle.join()` so every `[heartbeat]` line flushes BEFORE the summary. DN-019's race (test failed 5/5 on apple-silicon) also forced restructuring `heartbeat_loop` to tick-first-wait-after: a fast ingest can finish + signal stop before the heartbeat thread is scheduled, leaving the first `wait_for_stop` to observe the signal immediately and return without printing. Tick-first guarantees one liveness signal per `interval`. Production behavior (interval=10s, ticks=100) unchanged. Test passes 10/10 (was 0/5). Also restored DN-018's section header that was accidentally deleted in commit `31781e4`. TD-003 → Closed; DN-019 → closed.
+
+- `e6d53fb` — **`chore: gitignore .serena/ per-machine MCP state`**. Three-line `.gitignore` addition matching the existing `.eng-protocol/` / `.photohelper/` exclusions for per-machine runtime caches.
+
+- `0d4a7f7` — **`chore(libraw): pre-flight EXIF + CVE-posture audit (Deliverable 0)`**. Probe via Homebrew `raw-identify -v` (LibRaw 0.22.1) against `/Users/ph/Pictures/tests` 370-CR3 corpus. Extraction pass-rate 370/370 (100%; Make + Model + Width + Height + Timestamp + Flip on every fixture). CVE-posture: MITRE NVD = 0 CVEs since 2023-01-01, LibRaw GHSA = 0 advisories. Decision: **PROCEED with `=0.22.1` pin** (escalated from plan-default `=0.21.4` because 0.22.1 ships six TALOS-2026-* fixes + two CR3-parser-specific hardenings that did NOT backport to 0.21.5b; user-consulted under No-Acceptable-Trade-offs Policy). Artifact at `docs/analysis/ANL-001-libraw-cr3-preflight.md`. Plan amended in-place to v3.2. DN-018 → closed. Commit message carries the required `cve-posture: clean (versus MITRE feed 2026-05-28)` + `pass-rate: 370/370 (>=95% threshold; 100% actual)` lines.
+
+- `440388a` — **`chore(session-02): photohelper-raw lint scaffolding + unsafe-isolation gate (Deliverable 1a setup)`**. Foundation for the FFI body that lands next window. Three-layer defense:
+  1. Crate `[lints.rust]` overrides workspace `forbid(unsafe_code)` to `allow` (priority 1); every workspace lint restated explicitly (Cargo's per-key override does not merge).
+  2. `src/exif.rs` + `src/decode.rs` carry file-level `#![forbid(unsafe_code)]`; `src/ffi.rs` carries `#![deny(unsafe_op_in_unsafe_fn)]`. `src/lib.rs` does NOT carry a file-level forbid because rustc forbids downgrading `forbid` in submodules — plan v3.1 listed lib.rs in that group but it's incompatible with letting `ffi.rs` contain unsafe; plan v3.2 amendment corrects.
+  3. `scripts/check-unsafe-isolation.sh` + new `just ci unsafe-isolation` recipe greps `crates/photohelper-raw/src/` for any `unsafe { ... }` / `unsafe fn` / `unsafe trait` / `unsafe impl` outside `ffi.rs`. Workspace clippy `undocumented_unsafe_blocks = "deny"` requires `// SAFETY:` on every unsafe block.
+
+`src/{ffi,exif,decode}.rs` ship as empty module stubs carrying only the lint setup + module doc-comment. Body work (1d Error enum, 1b RawExif, 1c RawImage families, 1a FFI bindings) lands in next-window commits.
+
+### CI gate state at pause time
+
+`just session-end` (= `just ci`) GREEN end-to-end on apple-silicon. fmt clean, clippy zero-warnings, 63 tests passing (was 62/63 with the heartbeat flake before this window), cargo audit clean, `unsafe-isolation` gate clean, prek hooks all pass. Acceptance criterion 1 (`just ci` green) is now actually satisfiable; the remaining gating work is the LibRaw FFI implementation itself.
+
+### Why paused
+
+The Deliverable 1 body work is substantial (Error enum + RawExif + RawImage + 5 companion types + ~15 FFI function bindings; each with R2-T6 / R3-T5 / R3-T7 invariants the plan-review found). This window already absorbed the re-orientation reads (heavy SESSION-STATE + plan + R3 artifact + DN-019 + ANL-001 authoring), the heartbeat race investigation, the LibRaw version-pin investigation + user consultation, and the lint scaffolding + plan-design correction. Continuing into the FFI body without a fresh context would risk degraded design quality on the unsafe-heavy code. Pausing here so the next window opens fresh on Deliverable 1d → 1b → 1c → 1a body sequencing.
+
+### Precise next steps when context restored
+
+1. **Read `SESSION-STATE.md`** (canonical re-orientation per the resume prompt). The "Current session" + "Action" + "Status" blocks reflect this checkpoint.
+2. **Read this Checkpoint 4** (you're here).
+3. **Skim `docs/plans/session-02.md` §§ Deliverable 1d / 1b / 1c / 1a body** for the type-family invariants the plan locked across plan-review R1/R2/R3.
+4. **Skim `docs/analysis/ANL-001-libraw-cr3-preflight.md § EXIF extraction § Field mapping`** for the LibRaw API → photohelper field correspondences (`libraw_get_iparams` → make/model/timestamp; `libraw_get_iwidth/iheight` → width/height; `imgdata.sizes.flip` → orientation). This is what the FFI module 1a will bind.
+5. **Read `crates/photohelper-raw/src/{lib,ffi,exif,decode}.rs`** to see the current scaffolding. They're tiny — module docs + lint setup only.
+6. **Begin Deliverable 1 body work in the plan's stated order**:
+   - **1d Error enum** first (`crates/photohelper-raw/src/lib.rs`): `Error`, `RawExifCause`, `RawDecodeCause` per plan §1d; all `#[non_exhaustive]`; `thiserror::Error` derives; carries `path: PathBuf` + `op: &'static str` + `libraw_code: i32` per R2-T13. Add TD-007 inline addressing (constructor signatures take `path: &Path` first so the constructors can populate the field with the real path; closes the `PathBuf::new()` stop-gap). Add `Error::RawInvalidBitDepth { value: u8 }` variant per R3-T5.
+   - **1b RawExif** (`src/exif.rs`): private-fields + fallible constructor + accessor methods; `static_assertions::assert_impl_all!(RawExif: Send, Sync)` at module scope. UTC timestamp assumption documented inline + cross-ref DN-016. Add `static_assertions` as a regular workspace dep (not dev-dep) in `crates/photohelper-raw/Cargo.toml`.
+   - **1c RawImage + companions** (`src/decode.rs`): `BayerPlane` (length-invariant; `row(y) → Option<&[u16]>` / `pixel(x,y) → Option<u16>` / `rows() → impl Iterator`); `CfaPattern` (4-variant `#[non_exhaustive]`); `SensorBitDepth` (8..=16 constrained); `SensorLevels` (black<white, dynamic-range floor 256, bit-depth bound); `WhiteBalance` (R/G1/B/G2 Canon order; reject all-zero / NaN / negative); `CamRgbToXyzD65Matrix` (reject identity / NaN). Address TD-007 inline on each constructor.
+   - **1a FFI body** (`src/ffi.rs`): ~15 LibRaw C-API accessor functions per plan §1a + `RawPath` newtype (interior-NUL / non-UTF-8 / Windows long-path handling). Every `unsafe { ... }` block carries `// SAFETY:` comment. `cargo clippy` enforces via `undocumented_unsafe_blocks = "deny"`.
+7. **Sub-component review fires** when `ffi.rs` first exposes a non-scaffold public API (per plan § Checkpoints): `docs/code-reviews/session-02-photohelper-raw-ffi-round{1,2}.md`.
+8. **Then Deliverables 2-7 + session-end double-review + ship PR**.
+
+### Resume from a fresh context
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-02/libraw-cr3-decode
+just session-start
+```
+
+Then paste the restart prompt rendered at the end of this pause turn.
