@@ -69,10 +69,14 @@ CVE-clean.
   edits (need LibRaw bindings to call) AND BEFORE Deliverable 4's `ingest`
   rewire.
 - **Artifact**: `docs/analysis/ANL-001-libraw-cr3-preflight.md` with:
-  - **§ LibRaw version**: chosen X.Y.Z (target `=0.21.4`; if libraw.org's
-    current 0.21.x latest differs at pre-flight time, the implementer
-    picks the actual latest 0.21.x and amends this plan + decision-doc
-    0002 with the actual version).
+  - **§ LibRaw version**: chosen X.Y.Z (now `=0.22.1`, escalated from the
+    plan-v3.1 default `=0.21.4` per ANL-001 § LibRaw version; the
+    implementer is empowered to pick a different 0.21.x patch but the
+    0.22.x cross-series jump exceeds that authority and required user
+    consultation under the No-Acceptable-Trade-offs Policy. Pin landed
+    2026-05-28 because LibRaw 0.22.1's release notes carry six TALOS-2026
+    fixes AND two CR3-parser-specific hardenings that did NOT backport
+    to 0.21.5b).
   - **§ CVE-posture-as-of-pin** (closes DN-018): MITRE CVE feed +
     [LibRaw GitHub Security Advisories](https://github.com/LibRaw/LibRaw/security/advisories)
     grep on the pin date for any open CVE affecting the chosen version;
@@ -459,15 +463,18 @@ pub enum RawDecodeCause {
 
 ##### 2a — Build system
 
-- **Strategy locked at plan-review v3** (per R2-T4): vendor LibRaw
-  **=0.21.4** at `crates/photohelper-raw/vendor/libraw-0.21.4/` (or the
-  actually-current 0.21.x latest at pre-flight time — Deliverable 0 owns
-  the version verification).
+- **Strategy locked at plan-review v3** (per R2-T4) and **version escalated
+  at plan-v3.2** (post-Deliverable-0 per `docs/analysis/ANL-001-libraw-cr3-preflight.md`):
+  vendor LibRaw **=0.22.1** at `crates/photohelper-raw/vendor/libraw-0.22.1/`.
+  Plan-v3.1 targeted `=0.21.4`; Deliverable 0 escalated to `=0.22.1` because
+  the 0.22.1 release ships TALOS-2026 fixes + two CR3-parser hardenings
+  that did NOT backport to 0.21.5b (LibRaw 0.21.x is effectively EOL post-
+  2025-12-25).
 - `crates/photohelper-raw/build.rs` invokes `cmake` (via the `cmake`
   crate) to compile vendored LibRaw as a static library; links the result
   into `photohelper-raw`.
 - **SHA-256 verification**: tarball SHA-256 recorded at
-  `crates/photohelper-raw/vendor/libraw-0.21.4.tar.gz.sha256` and verified
+  `crates/photohelper-raw/vendor/libraw-0.22.1.tar.gz.sha256` and verified
   by `build.rs` at the start of the build. Tampered tarball → build fails
   with actionable error.
 - **Actionable build errors**: `build.rs` emits `cargo:warning=` lines on
@@ -480,7 +487,7 @@ Per R2-M2 (PR1-L5): this is an **ADR** (binding for every release), not a
 smaller decision-doc. File at `docs/adr/0002-libraw-lgpl-static-link-mechanics.md`.
 
 - Records the §6(a) artifact shape: per-release
-  `vendor/libraw-0.21.4.tar.gz` ships alongside the binary in GitHub
+  `vendor/libraw-0.22.1.tar.gz` ships alongside the binary in GitHub
   Releases; relinking instructions in the release-notes template.
 - **§6(a), not §6(b)** — verified via `docs/discovery-notes.md § DN-001`
   (corrected per plan-review PR1-T17). Quotes LGPL-2.1 §6(a) verbatim.
@@ -876,14 +883,14 @@ trigger updated at session-end to "next session that touches
    `quality-assurance.md § Findings triage`. LOW ship with TD/DN OR
    accepted explicitly. HIGH carry-forward ≤ 2.
 
-7. **LibRaw upstream pinned to exact `=0.21.4`** (per PR1-T10 + R2-T4):
-   - `crates/photohelper-raw/vendor/libraw-0.21.4.tar.gz` exists.
-   - `crates/photohelper-raw/vendor/libraw-0.21.4.tar.gz.sha256` exists.
+7. **LibRaw upstream pinned to exact `=0.22.1`** (per PR1-T10 + R2-T4;
+   version escalated from `=0.21.4` at plan-v3.2 per Deliverable 0
+   pre-flight; rationale in `docs/analysis/ANL-001-libraw-cr3-preflight.md
+   § LibRaw version`):
+   - `crates/photohelper-raw/vendor/libraw-0.22.1.tar.gz` exists.
+   - `crates/photohelper-raw/vendor/libraw-0.22.1.tar.gz.sha256` exists.
    - `build.rs` verifies SHA-256 at build-time.
-   - The exact `0.21.4` recorded in ADR-0002 and `Cargo.toml` metadata.
-   - **If pre-flight (Deliverable 0) chooses a different patch (e.g.
-     0.21.5 if released by then)**, the implementer amends this plan +
-     ADR-0002 with the actual version + SHA-256.
+   - The exact `0.22.1` recorded in ADR-0002 and `Cargo.toml` metadata.
 
 8. **No `*_for_testing` method appears in the release-build binary
    symbol table** (per PR1-T15 + R2-T18). Two-pronged CI gate runs from
@@ -1025,3 +1032,5 @@ change project-wide convention; not adopted this session.
   - LibRaw build-system `detect_cmake` library factoring + unit test (R2-M10 — corrected from R3-T1 phantom `R2-PT3`).
   - `IngestOutcome::InsertedWithPartialExif` payload simplified to `PhotoId` only (R2-M6).
   - Hardlink dedup test asserts PhotoId equality (R2-M8).
+- **v3.1 (2026-05-28)**: post plan-review Round 3 (targeted remediation). Plan-v3 phantom-ID drift (R3-T1: R2-S2, R2-T26, R2-PT2..8) corrected; design CRITICALs that the agents flagged inline (R3-T3 heartbeat env-var DoS guard; R3-T5 SensorBitDepth ctor delegation; R3-T7 panic-vs-exit-code contract; R3-T8 sanitize-check preview descent; R3-T11 Acceptance 8 wording) folded inline; remaining design-class CRITICALs (R3-T6 RawDecodeCause dispatch; R3-T10 PathBuf empty-path) filed as TD-005/006/007 with binding triggers; R4 NOT fired per agent consensus.
+- **v3.2 (2026-05-28)**: post Deliverable 0 pre-flight (`docs/analysis/ANL-001-libraw-cr3-preflight.md`). LibRaw version escalated from `=0.21.4` to `=0.22.1` because LibRaw 0.22.1 ships six TALOS-2026 fixes + two CR3-parser hardenings ("zero all buffers before fread", 64-bit unsigned file offsets) that did NOT backport to 0.21.5b — the 0.21.x branch is effectively EOL post-2025-12-25. Choice exceeded the plan's implementer-granted authority (which is limited to picking the latest 0.21.x); user consultation under No-Acceptable-Trade-offs Policy approved the escalation. Pre-flight EXIF extraction was 370/370 (100%); CVE-posture (MITRE NVD + LibRaw GHSA) clean for both candidates. DN-018 status flipped to closed (Deliverable 0 owner satisfied).
