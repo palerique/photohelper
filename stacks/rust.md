@@ -12,10 +12,14 @@ Pin in `rust-toolchain.toml` at the repo root:
 
 ```toml
 [toolchain]
-channel = "1.85.0"
+channel = "1.88.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
 ```
+
+(Bumped from `1.85.0` in session 01 per
+`docs/adr/0001-msrv-bump-to-1.88-for-rustsec-2026-0009.md` —
+`time 0.3.47`'s fix for RUSTSEC-2026-0009 requires 1.88.)
 
 Commit `Cargo.lock` (this is a binary workspace). CI honors `rust-toolchain.toml`
 automatically via `dtolnay/rust-toolchain@stable`.
@@ -25,8 +29,8 @@ automatically via `dtolnay/rust-toolchain@stable`.
 ```bash
 brew install rustup just prek                          # or your platform equivalent
 rustup set profile minimal
-rustup install 1.85.0 --component rustfmt --component clippy
-rustup default 1.85.0
+rustup install 1.88.0 --component rustfmt --component clippy
+rustup default 1.88.0
 cargo install cargo-audit --locked                      # dependency-vuln audit
 ```
 

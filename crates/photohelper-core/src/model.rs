@@ -94,26 +94,33 @@ impl PhotoId {
             });
         }
 
+        // R1.T3 fix: head + tail are DISJOINT. Before the fix, a 100KB
+        // file would hash [0..64KB) plus [36KB..100KB) — [36KB..64KB)
+        // was hashed twice (28KB of overlap), violating the "first 64KB
+        // + last 64KB" spec. Tail starts at `max(file_size - 64KB,
+        // head_end)`. For files ≤ 128KB the tail is whatever remains
+        // after head; for > 128KB the tail is exactly the last 64KB.
         let head_len =
             usize::try_from(file_size.min(HASH_WINDOW_BYTES as u64)).unwrap_or(HASH_WINDOW_BYTES);
-        let tail_len = if file_size > HASH_WINDOW_BYTES as u64 {
-            HASH_WINDOW_BYTES
-        } else {
-            0
-        };
+        let head_end_u64 = head_len as u64;
+        let tail_start = file_size
+            .saturating_sub(HASH_WINDOW_BYTES as u64)
+            .max(head_end_u64);
+        let tail_len_u64 = file_size.saturating_sub(tail_start);
+        let tail_len = usize::try_from(tail_len_u64).unwrap_or(HASH_WINDOW_BYTES);
 
         let mut file = File::open(path).map_err(|e| Error::Io {
             path: path.to_path_buf(),
             op: "read-prefix",
             source: e,
         })?;
-
         let mut head = vec![0u8; head_len];
         read_exact_n(&mut file, &mut head, path)?;
 
         let tail = if tail_len > 0 {
             use std::io::{Seek, SeekFrom};
-            file.seek(SeekFrom::End(-(tail_len as i64)))
+            let tail_offset = i64::try_from(tail_len_u64).unwrap_or(i64::MAX);
+            file.seek(SeekFrom::End(-tail_offset))
                 .map_err(|e| Error::Io {
                     path: path.to_path_buf(),
                     op: "read-prefix",
@@ -126,17 +133,33 @@ impl PhotoId {
             Vec::new()
         };
 
+        Ok(Self::hash_parts(
+            file_size,
+            clamped_mtime_unix_seconds,
+            &head,
+            &tail,
+        ))
+    }
+
+    /// Hash `(file_size_le || clamped_mtime_le || head || tail)` with BLAKE3.
+    /// Infallible; returns the `PhotoId` directly.
+    fn hash_parts(
+        file_size: u64,
+        clamped_mtime_unix_seconds: i64,
+        head: &[u8],
+        tail: &[u8],
+    ) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&file_size.to_le_bytes());
         hasher.update(&clamped_mtime_unix_seconds.to_le_bytes());
-        hasher.update(&head);
+        hasher.update(head);
         if !tail.is_empty() {
-            hasher.update(&tail);
+            hasher.update(tail);
         }
         let digest = hasher.finalize();
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(digest.as_bytes());
-        Ok(Self(bytes))
+        Self(bytes)
     }
 
     /// Catalog-only reconstruction. `pub(crate)` so only `photohelper-core`
@@ -362,10 +385,7 @@ impl ExifOrientation {
             6 => Ok(Self::Rotate90Cw),
             7 => Ok(Self::Transverse),
             8 => Ok(Self::Rotate90Ccw),
-            other => Err(Error::Exif {
-                path: PathBuf::new(),
-                source: format!("invalid EXIF orientation tag: {other}").into(),
-            }),
+            other => Err(Error::InvalidExifOrientationTag { tag: other }),
         }
     }
 
@@ -641,18 +661,18 @@ mod tests {
     }
 
     #[test]
-    fn exif_orientation_tag_0_returns_error() {
+    fn exif_orientation_tag_0_returns_invalid_tag_error() {
         assert!(matches!(
             ExifOrientation::from_tag(0),
-            Err(Error::Exif { .. })
+            Err(Error::InvalidExifOrientationTag { tag: 0 })
         ));
     }
 
     #[test]
-    fn exif_orientation_tag_9_returns_error() {
+    fn exif_orientation_tag_9_returns_invalid_tag_error() {
         assert!(matches!(
             ExifOrientation::from_tag(9),
-            Err(Error::Exif { .. })
+            Err(Error::InvalidExifOrientationTag { tag: 9 })
         ));
     }
 
@@ -693,6 +713,73 @@ mod tests {
         std::fs::write(&p, vec![0x42u8; 100]).unwrap();
         let id = PhotoId::derive(&p).expect("100-byte file should hash");
         assert_ne!(id.as_bytes(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn photoid_derive_window_disjoint_for_files_64k_to_128k() {
+        // R1.T3 regression test: two 100KB files differing ONLY in
+        // bytes [40000..50000) must produce different PhotoIds. With
+        // the pre-fix overlapping windows, bytes [36864..65536) were
+        // hashed twice; the [40000..50000) difference still affected
+        // both head and tail, so this test cannot distinguish overlap
+        // from disjoint *just* by hash difference. Instead, assert
+        // the spec invariant: head reads exactly first 64KB; tail
+        // reads exactly the bytes after that until file_size. For a
+        // 100KB file: head [0..64KB), tail [64KB..100KB) = 36KB.
+        // Construct content where differing the byte at offset 70000
+        // (in the tail region only) changes the hash, and differing
+        // the byte at offset 30000 (in head only) also changes the
+        // hash. The previous overlap meant bytes [36864..65536) were
+        // hashed twice — visible as 2× hash sensitivity to changes
+        // there. Disjoint = bytes hashed exactly once.
+        let dir = tempfile::tempdir().unwrap();
+        let mtime = filetime::FileTime::from_unix_time(1_577_836_800, 0);
+
+        // Compute the EXACT expected hash for a 100KB all-zero file
+        // under the disjoint-window spec: head = [0..64KB) of zeros,
+        // tail = [64KB..100KB) of zeros (36KB), file_size = 102400.
+        let file_size: u64 = 100 * 1024;
+        let head = vec![0u8; 64 * 1024];
+        let tail = vec![0u8; 36 * 1024];
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&file_size.to_le_bytes());
+        hasher.update(&1_577_836_800_i64.to_le_bytes());
+        hasher.update(&head);
+        hasher.update(&tail);
+        let expected = *hasher.finalize().as_bytes();
+
+        let p = dir.path().join("100k.cr3");
+        std::fs::write(&p, vec![0u8; 100 * 1024]).unwrap();
+        filetime::set_file_mtime(&p, mtime).unwrap();
+        let actual = PhotoId::derive_with_clamped_mtime(&p, file_size, 1_577_836_800).unwrap();
+        assert_eq!(
+            actual.as_bytes(),
+            &expected,
+            "100KB file must hash with DISJOINT head[0..64KB) + tail[64KB..100KB), not overlapping windows",
+        );
+    }
+
+    #[test]
+    fn photoid_derive_window_disjoint_for_files_exactly_128k() {
+        // Exactly 128KB: head ends at 64KB, tail starts at 64KB (no
+        // overlap, no gap). Full file content hashed exactly once.
+        let dir = tempfile::tempdir().unwrap();
+        let mtime = filetime::FileTime::from_unix_time(1_577_836_800, 0);
+        let file_size: u64 = 128 * 1024;
+        let head = vec![0xAAu8; 64 * 1024];
+        let tail = vec![0xAAu8; 64 * 1024];
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&file_size.to_le_bytes());
+        hasher.update(&1_577_836_800_i64.to_le_bytes());
+        hasher.update(&head);
+        hasher.update(&tail);
+        let expected = *hasher.finalize().as_bytes();
+
+        let p = dir.path().join("128k.cr3");
+        std::fs::write(&p, vec![0xAAu8; 128 * 1024]).unwrap();
+        filetime::set_file_mtime(&p, mtime).unwrap();
+        let actual = PhotoId::derive_with_clamped_mtime(&p, file_size, 1_577_836_800).unwrap();
+        assert_eq!(actual.as_bytes(), &expected);
     }
 
     #[test]

@@ -54,4 +54,25 @@
 - **Observed**: SQLite (via `rusqlite`) chosen over sled / flat JSON for the catalog at `<root>/.photohelper/catalog.db`. Schema (tables, indices, migration story) is undefined. Lightroom's `.lrcat` is the prior-art precedent but is not open-spec.
 - **Why it matters**: First session that writes catalog rows (session 01 for the `ingest` slice) needs at least a `photos` table; a half-baked schema becomes a migration headache.
 - **Owner**: session 01 (minimal schema) + session 02 (full schema once `cull` adds dup-group and culling-score tables).
+- **Status**: partially resolved 2026-05-28 — session 01 lands v1 single-table `photos` schema; authoritative spec at `docs/decisions/0001-catalog-schema-v1.md`. Session 02 still owes cull-score + dup-group tables + the migration framework v1 → v2 (per the decision doc's "Migration policy" section).
+
+### DN-006 — kamadak-exif cannot parse synthetic CR3 ISO-BMFF containers (2026-05-28, session 1)
+
+- **Observed**: Session 01 implementation smoke test on `/tmp/ph_demo` and integration test row 32 confirm: `kamadak-exif 0.6` returns "Unknown image format" when fed raw `0xCC`-byte CR3 fixtures, then yields zero `Fields` on subsequent parse. The synthetic-CR3 path was the only one available pre-real-fixtures (plan v5 §Out of scope item 7 defers real CR3 fixtures to session 02 via git-lfs). What's still UNVERIFIED: whether kamadak-exif can parse a *real* Canon R8 CR3 (ISO-BMFF container with EXIF inside a `uuid` box). The synthetic test is weak evidence — the bytes aren't a real CR3 at all.
+- **Why it matters**: If kamadak-exif also fails on real CR3, the v0.1 fallback (NULL EXIF columns for every CR3) is the de-facto behavior until session 02 wires LibRaw as the alternate EXIF source. The `CameraRegistry::for_exif` lookup needs `make` + `model` to succeed; without them every CR3 row's `camera_slug` stays NULL even if the user has a Canon R8.
+- **Owner**: session 02 — when real CR3 fixtures land via `git-lfs`, re-run the pre-flight against a real Canon R8 CR3 and (a) confirm parse failure → wire LibRaw EXIF, OR (b) confirm parse success → flip integration test row 32's assertions from `is_none()` to `Some("canon-r8")`.
+- **Status**: open
+
+### DN-007 — `rusqlite` pinned at 0.32 instead of plan-v5's 0.40 target (2026-05-28, session 1)
+
+- **Observed**: Plan v5 §Dependencies committed `rusqlite 0.40`. Session-01 implementation shipped `rusqlite 0.32` (the version that lets the `bundled` SQLite amalgamation compile cleanly under the rest of the dep graph on 2026-05-28). The 0.32 bundle is ~14 months stale and per R2.T1 (plan-review) "will trip SQLite CVE advisories." `cargo audit --deny warnings` is currently clean on 0.32, but the staleness is a real future-risk.
+- **Why it matters**: Each SQLite CVE released after the 0.32 bundle's cutoff is a candidate for `cargo audit` failure. The longer we sit on 0.32, the more likely a CI break + emergency-bump scramble.
+- **Owner**: TD-002 (filed; binding trigger = "bump by 2026-08-01 OR before session 02 adds new schema columns, whichever first"). Cross-reference this DN.
+- **Status**: open
+
+### DN-008 — Missing `cfg(test)` knobs for plan-row tests 6, 12, 13, 14, 18, 19, 34, 39, 42 partial, 43 partial, 49 (2026-05-28, session 1)
+
+- **Observed**: Plan v5 §Test infrastructure committed FOUR `cfg(test)` knobs (`LOCK_RETRY_DELAY_MS`, `HEARTBEAT_INTERVAL_MS`, `poison_for_testing`, `fail_init_after_create_table`). Session 01 landed TWO: `Catalog::open_with_retry_delay` (one-shot constructor overload) + `PHOTOHELPER_HEARTBEAT_INTERVAL_MS` env-var override (closes test row 48 in a weakly-deterministic way). The remaining two (`poison_for_testing`, `fail_init_after_create_table`) plus the `trybuild` compile-fail test for plan row 6 plus 9 other plan rows ship without coverage. Behavioral coverage is ~36/50 plan rows = 72% (per session-end Round 1 test-analyzer finding).
+- **Why it matters**: Each uncovered plan row is a load-bearing claim with no regression guard. The mutex-poison ROLLBACK path (R3.T5 fix), the schema-init transactional path, the cross-process file-lock test, and the per-photo `.with_context()` boundary all rely on convention — a future refactor that drops the ROLLBACK or the with_context will not fail any test.
+- **Owner**: session 02 (alongside real CR3 fixtures + LibRaw integration the deferred rows benefit from). Binding trigger: "session 02 lands `poison_for_testing` + tests 6/12/13/14/18/19/34/39/42/43/49 OR files explicit DN cross-references for each row deferred further."
 - **Status**: open

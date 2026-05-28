@@ -133,6 +133,18 @@ pub enum Error {
         /// Camera that lacks the data.
         camera_id: CameraId,
     },
+
+    /// EXIF orientation tag value was outside the valid 1..=8 range.
+    /// R1.T11 fix: previously routed through `Error::Exif { path:
+    /// PathBuf::new() }` which used an empty sentinel path. The
+    /// dedicated variant carries the offending tag and no path —
+    /// the caller (a single site in the EXIF parser) attaches its
+    /// own path context if needed.
+    #[error("invalid EXIF orientation tag: {tag} (valid range 1..=8)")]
+    InvalidExifOrientationTag {
+        /// The out-of-range tag value found in the EXIF data.
+        tag: i64,
+    },
 }
 
 #[cfg(test)]

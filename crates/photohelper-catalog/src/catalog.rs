@@ -12,12 +12,23 @@ use std::time::{Duration, Instant};
 use rusqlite::Connection;
 
 use photohelper_core::Error;
-use photohelper_core::model::{AbsPath, ExifMetadata, KnownCamera, Photo, PhotoId};
+use photohelper_core::model::{AbsPath, Photo, PhotoId};
 
 use crate::row::{PhotoRow, SELECT_ALL_COLUMNS, insert_error};
 use crate::schema::{INIT_SQL, SCHEMA_VERSION};
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+
+/// 13-column INSERT used by both the `Inserted` and `SupersededPrevious`
+/// arms of `Catalog::upsert`. Extracted in R1.T14 to eliminate duplicate-
+/// statement drift risk.
+const INSERT_PHOTO_SQL: &str = "INSERT INTO photos (
+    id, source_path, file_size, mtime_unix_seconds,
+    mtime_anomalous, make, model, camera_slug,
+    capture_time_unix_seconds, width, height,
+    exif_orientation, ingested_at_unix_seconds,
+    superseded_at_unix_seconds
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)";
 
 /// Production lock-retry delay between attempts. Tests override via the
 /// public-but-`#[cfg(test)]`-only `with_retry_delay` constructor helper.
@@ -124,9 +135,12 @@ impl Catalog {
                     thread::sleep(retry_delay);
                 }
                 Err(fs4::TryLockError::Error(e)) => {
+                    // R1.T10 fix: op tag was "stat"; the actual op is
+                    // file-lock acquisition. Operators debugging lock
+                    // failures should see the accurate tag.
                     return Err(Error::Io {
                         path: lock_path,
-                        op: "stat",
+                        op: "file-lock",
                         source: e,
                     });
                 }
@@ -215,14 +229,25 @@ impl Catalog {
         }
 
         // Step 9: WAL recovery check.
-        let recovered: i64 = conn
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(1))
-            .unwrap_or(0);
-        if recovered > 0 {
-            tracing::warn!(
-                frames = recovered,
-                "previous shutdown was unclean; recovered N WAL frames"
-            );
+        // R1.T10 fix: surface PRAGMA failures rather than silently
+        // collapsing to "clean shutdown." Any unknown error here (schema
+        // mismatch, busy, future SQLite column-count change) leaves us
+        // unable to tell the user whether their last run was clean —
+        // log explicitly.
+        match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(1)
+        }) {
+            Ok(recovered) if recovered > 0 => {
+                tracing::warn!(
+                    frames = recovered,
+                    "previous shutdown was unclean; recovered {recovered} WAL frames"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not query WAL checkpoint state; recovery status unknown"
+            ),
         }
 
         let canonical_path = AbsPath::canonicalize(catalog_path).map_or_else(
@@ -303,33 +328,36 @@ impl Catalog {
         let height_i64 = exif.height.map(i64::from);
         let file_size_i64 = i64::try_from(photo.file_size()).unwrap_or(i64::MAX);
 
+        // R1.T14 fix: single insert call used by both branches —
+        // previously this was a 13-column INSERT duplicated twice
+        // (drift risk on every schema change). The closure captures
+        // the per-call parameter bindings.
+        let do_insert = |tx: &rusqlite::Transaction<'_>| -> Result<(), Error> {
+            tx.execute(
+                INSERT_PHOTO_SQL,
+                rusqlite::params![
+                    &id_bytes,
+                    &source_path_str,
+                    file_size_i64,
+                    photo.clamped_mtime_unix_seconds(),
+                    i64::from(photo.mtime_anomalous()),
+                    exif.make.as_deref(),
+                    exif.model.as_deref(),
+                    camera_slug.as_deref(),
+                    exif.capture_time_unix_seconds,
+                    width_i64,
+                    height_i64,
+                    exif_orientation_i64,
+                    ingested_at_unix_seconds,
+                ],
+            )
+            .map_err(|e| insert_error(pid, e))?;
+            Ok(())
+        };
+
         let outcome = match existing_at_path {
             None => {
-                tx.execute(
-                    "INSERT INTO photos (
-                        id, source_path, file_size, mtime_unix_seconds,
-                        mtime_anomalous, make, model, camera_slug,
-                        capture_time_unix_seconds, width, height,
-                        exif_orientation, ingested_at_unix_seconds,
-                        superseded_at_unix_seconds
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
-                    rusqlite::params![
-                        &id_bytes,
-                        &source_path_str,
-                        file_size_i64,
-                        photo.clamped_mtime_unix_seconds(),
-                        i64::from(photo.mtime_anomalous()),
-                        exif.make.as_deref(),
-                        exif.model.as_deref(),
-                        camera_slug.as_deref(),
-                        exif.capture_time_unix_seconds,
-                        width_i64,
-                        height_i64,
-                        exif_orientation_i64,
-                        ingested_at_unix_seconds,
-                    ],
-                )
-                .map_err(|e| insert_error(pid, e))?;
+                do_insert(&tx)?;
                 UpsertOutcome::Inserted
             }
             Some(old_bytes) => {
@@ -345,36 +373,11 @@ impl Catalog {
                 })?;
                 let old = photohelper_core::catalog_glue::photo_id_from_row_bytes(old_arr);
                 tx.execute(
-                    "UPDATE photos SET superseded_at_unix_seconds = ?2
-                       WHERE id = ?1",
+                    "UPDATE photos SET superseded_at_unix_seconds = ?2 WHERE id = ?1",
                     rusqlite::params![&old_bytes, ingested_at_unix_seconds],
                 )
                 .map_err(|e| insert_error(pid, e))?;
-                tx.execute(
-                    "INSERT INTO photos (
-                        id, source_path, file_size, mtime_unix_seconds,
-                        mtime_anomalous, make, model, camera_slug,
-                        capture_time_unix_seconds, width, height,
-                        exif_orientation, ingested_at_unix_seconds,
-                        superseded_at_unix_seconds
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
-                    rusqlite::params![
-                        &id_bytes,
-                        &source_path_str,
-                        file_size_i64,
-                        photo.clamped_mtime_unix_seconds(),
-                        i64::from(photo.mtime_anomalous()),
-                        exif.make.as_deref(),
-                        exif.model.as_deref(),
-                        camera_slug.as_deref(),
-                        exif.capture_time_unix_seconds,
-                        width_i64,
-                        height_i64,
-                        exif_orientation_i64,
-                        ingested_at_unix_seconds,
-                    ],
-                )
-                .map_err(|e| insert_error(pid, e))?;
+                do_insert(&tx)?;
                 UpsertOutcome::SupersededPrevious { old }
             }
         };
@@ -435,10 +438,6 @@ impl Catalog {
         Ok(out)
     }
 }
-
-// Avoid unused-import warnings for re-exports the linker would otherwise prune.
-#[allow(dead_code)]
-fn _ensure_exif_metadata_compiles(_x: ExifMetadata, _k: KnownCamera) {}
 
 #[cfg(test)]
 mod tests {

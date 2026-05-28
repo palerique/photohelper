@@ -80,8 +80,10 @@ stack module (`stacks/rust.md`) and wired into `justfile` +
 - **Test** — `just test`
   (`cargo test --all-features --workspace --no-fail-fast`).
 - **Dependency audit** — `just audit` (`cargo audit --deny warnings`).
-- **Toolchain pin** — `rust-toolchain.toml` (channel `1.85.0`) is committed;
-  don't bump without a `docs/adr/` entry.
+- **Toolchain pin** — `rust-toolchain.toml` (channel `1.88.0`) is committed;
+  don't bump without a `docs/adr/` entry. Most recent bump: 1.85 → 1.88
+  per `docs/adr/0001-msrv-bump-to-1.88-for-rustsec-2026-0009.md`
+  (session 01 forced by `time 0.3.47`'s CVE fix).
 - **Full local CI parity** — `just ci` runs exactly what
   `.github/workflows/ci.yml` runs, in the same order, so green locally ==
   green in CI.

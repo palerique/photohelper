@@ -25,7 +25,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 walkdir.workspace = true
 rayon.workspace = true
-indicatif.workspace = true
 num_cpus.workspace = true
 kamadak-exif.workspace = true
 rusqlite.workspace = true
