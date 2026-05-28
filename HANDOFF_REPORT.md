@@ -455,3 +455,120 @@ User invoked `/session-pause` to roll the context window. The skill mandates led
      && just session-start
    ```
    Author `docs/plans/session-03.md`, run plan-review, then implementation. See `SESSION-STATE.md § Goal` for the candidate scope (TD backlog or new feature work) and the open stub-subcommand drift item as a quick-win first commit.
+
+---
+
+## Checkpoint 7 — session 03 plan-review Round 1 complete (2026-05-28; PAUSED for context refresh)
+
+**Status**: PAUSED. Branch: `session-03/ai-culling-skeleton`. Plan v1 committed at
+`319a25d`; Round-1 artifact at `7fd1dea`. No implementation code. CI green on branch
+(118 tests, no code changes from main).
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code, session 03 plan-review window)
+
+### What landed this window
+
+Session 03 started per the eng-protocol:
+- Branch `session-03/ai-culling-skeleton` created off `main` (up-to-date at `6e633e1`).
+- `just session-start` → STATUS: ready.
+- Scope chosen by user: **AI culling skeleton** end-to-end (NIMA real model + catalog
+  v1→v2 migration + cull_scores/dup_groups + cull subcommand rewire + full TD-010
+  closure + DN-020 stub-message fix).
+
+`docs/plans/session-03.md` v1 authored and committed (`319a25d`):
+- 7 deliverables (D0 pre-flight + D1 photohelper-ai + D2 catalog migration + D3 fixtures
+  + D4 cull rewire + D5 TD-010 closure + D6 DN-020 fix + D7 docs).
+- Scope rationale: decision-doc 0001 § Amendments binds session 03 to v1→v2 migration
+  framework (honored in D2); TD-010 binding trigger fires (touches Catalog; honored in
+  D5); DN-020 binding trigger fires (session-03 start; honored in D6).
+
+Plan-review Round 1 ran full 8-agent suite (Cadence A Tier 5) against plan v1 +
+9th-agent verifier against all 34 CRITICAL+HIGH findings:
+- **43 themes total: 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW**
+- 0 hallucinated findings (9th agent: 26 verified, 8 drifted line-numbers, 0 no)
+- Artifact committed at `7fd1dea` (`docs/code-reviews/session-03-plan-round1.md`)
+
+### 10 CRITICAL themes requiring plan v2 remediation
+
+1. **PR1-T1** — D6 targets non-existent files (`commands/{camera,...}.rs` don't exist;
+   stubs live in `main.rs:127-130`); `stub()` only has "session 02" for `camera`; 30
+   LoC estimate is 5× too high; message points at internal `SESSION-STATE.md`.
+2. **PR1-T2** — D5c adds panic site to `heartbeat_loop` then immediately removes it in
+   the same deliverable; contradicts TD-005's "production `heartbeat_loop` becomes
+   panic-free." No panic site should ever land.
+3. **PR1-T3** — `DN-022` cited 4× in plan as if it exists; `discovery-notes.md` ends
+   at DN-021. Three separate scopes mapped to one phantom DN.
+4. **PR1-T4** — `per ANL-001 § out-of-scope, the original SCUNet plan is in flux`
+   fabricated; ANL-001 is LibRaw pre-flight with zero SCUNet content.
+5. **PR1-T5** — ort `Session::run()` requires `&mut self`; `Session: Send + Sync` does
+   NOT permit `&mut`-receiver calls from multiple rayon workers without a Mutex. The
+   plan's "one session shared across worker threads" won't compile.
+6. **PR1-T6** — `Scorer` trait referenced in D4 (`&dyn Scorer`) but never defined in
+   D1. No method signature, no associated SLUG const, no object-safety analysis.
+7. **PR1-T7** — §Stop-gap declarations says "None" but plan body acknowledges ≥3
+   stop-gaps (bilinear demosaic, dup_groups ships empty, per-cull-run audit trail
+   absent). No TD entries filed for any of the three.
+8. **PR1-T8** — D2b end-to-end column reads "manual SQLite REPL inspection" — not a
+   test per global testing standards. BLOCKS merge.
+9. **PR1-T9** — D0 pre-flight sequencing fires AFTER D1's first scaffolding commit; if
+   D0 ABORTs (CVE found), the ort dep + model file is already committed. Must invert:
+   D0 → D1a (dep only) → D0 commits ANL-002 → D1d (model file).
+10. **PR1-T10** — `LoadedModel`'s SHA-256 check on the ALREADY-CONSTRUCTED
+    `ort::Session` cannot verify the session's provenance. Trust boundary inverted.
+    Need `VerifiedModelBytes` type-state before `LoadedModel`.
+
+### 18 HIGH themes (abbreviated)
+
+- PR1-T11: `ort = "=2.0.X"` invalid Cargo syntax; 2.0 is still RC (use `=2.0.0-rc.12`).
+- PR1-T12: `cull_scores` SELECT walks superseded photos; supersede semantics unspecified.
+- PR1-T13: D4 per-photo error dispatch unspecified; all errors collapse to `errored`.
+  TD-006 binding trigger fires (cull is `read_raw`'s first consumer).
+- PR1-T14: `--strict cull` semantics: 6 cases unresolved ("TBD per plan-review").
+- PR1-T15: `apply_pending` ROLLBACK-of-ROLLBACK silent; partial-failure behavior unspecified.
+- PR1-T16: D1d hardcodes model filename before D0 has chosen the model.
+- PR1-T17: Catalog schema-version gate logic incoherent with migration runner insertion.
+- PR1-T18: D4 SELECT returns `id` blob; no spec for how `source_path` is obtained.
+- PR1-T19: Migration framework for one migration; decision-doc 0001:129 says this is wrong.
+- PR1-T20: Bilinear Rust demosaic planned when LibRaw already exposes `dcraw_process()`.
+- PR1-T21: SLO "wall-clock < 30 min" is 60× looser than expected (actual ~30s with rayon).
+- PR1-T22: `PRAGMA foreign_keys = ON` absent; v2 FK constraints are decorative.
+- PR1-T23: D5b cites `catalog.rs:281` for R2-M8; actual site is `:304`.
+- PR1-T24: TD-006/TD-007 binding-trigger status vs. session 03 scope unaddressed.
+- PR1-T25: TD-011 3-session bound unacknowledged (session 03 = 1 of 3).
+- PR1-T26: NIMA golden vector: no tolerance spec, no generation procedure.
+- PR1-T27: `ModelRegistry` trait with one impl; `--model-path` both premature abstractions.
+- PR1-T28: D3 sanitize-check on ONNX via `exiftool` technically wrong (ONNX is Protobuf).
+
+### Precise next steps when context restored
+
+1. **Read `SESSION-STATE.md`** (canonical re-orientation).
+2. **Read this Checkpoint 7** (you're here).
+3. **Read `docs/code-reviews/session-03-plan-round1.md`** — the canonical R1 artifact
+   with all 43 themes. The §R2 watch-list at the bottom is the mandatory R2 checklist.
+4. **Remediate all 10 CRITICAL + 18 HIGH items** in `docs/plans/session-03.md`:
+   - PR1-T1: rewrite D6 to target `main.rs:127-130`; fix message to point at README.
+   - PR1-T2: remove D5c's add-then-retire sequence; 5c-i = test-helper crate only; no
+     panic site ever in `heartbeat_loop`.
+   - PR1-T3: file DN-022/023/024 (or consolidated); remove phantom citations.
+   - PR1-T4: drop the fabricated `per ANL-001 § out-of-scope` clause.
+   - PR1-T5: specify ort concurrency model explicitly (Mutex / per-worker / run_async).
+   - PR1-T6: define `Scorer` trait in D1c/D1e, OR make D4 take concrete `&Nima`.
+   - PR1-T7: file TD entries for ≥3 stop-gaps; rewrite §Stop-gap declarations.
+   - PR1-T8: replace D2b manual-REPL with automated integration test spec.
+   - PR1-T9: fix D0 sequencing: D0 → D1a-dep-only → D0-ANL-002-commit → D1d-model-file.
+   - PR1-T10: add `VerifiedModelBytes` type-state to D1b LoadedModel spec.
+   - PR1-T11 through PR1-T28: address in the same remediation pass.
+5. **Commit plan v2** (single conventional commit: `docs(session-03): plan v2 — R1
+   remediation (closes NN CRITICAL + NN HIGH)`).
+6. **Fire plan-review Round 2** using `/plan-review` or the `eight-agent-review` skill.
+7. **Remediate Round 2 findings** → commit plan v3 → fire Round 3 if CRITICAL.
+8. **Begin implementation** only after Round 2 (or Round 3) is clean.
+
+### Resume from a fresh context
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-03/ai-culling-skeleton
+just session-start
+```
+
+Then paste the restart prompt (see handoff block below).
