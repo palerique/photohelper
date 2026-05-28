@@ -8,36 +8,31 @@
 > rolling-archive convention. The git log is the full timeline.
 
 **Last session**: 1 (`cli-skeleton-and-ingest` — 2026-05-28) —
-implementation complete; session-end Round 1 done; Round 1 remediation
-applied; harness sync from fox/eng-protocol landed; **PAUSED 2026-05-28
-for context-window refresh** at commit `02d43d1`.
+implementation complete; session-end Round 1 + 2 done; R1+R2
+remediation applied; harness sync from fox/eng-protocol landed.
 
-**Current session**: 1 (PAUSED — resume at the action below).
+**Current session**: 1 (R2 REMEDIATION APPLIED — ready for `just ci` +
+PR push).
 
 **Goal** (session 1): Land the thinnest end-to-end slice that proves
 the workspace architecture — `clap` v4 CLI with all 7 subcommands
 (`ingest`, `cull`, `develop`, `export`, `run`, `models`, `camera`),
 with `ingest` doing real work. **DONE** at commit `310f753`; R1
-remediation at `0f28627`; harness sync at `02d43d1`.
+remediation at `0f28627`; harness sync at `02d43d1`; R2 review at
+`docs/code-reviews/session-01-round2.md`; R2 remediation in flight.
 
-**Action when context restored**: fire **session-end Round 2** —
-the upgraded `/eight-agent-review` (skill at `.claude/skills/eight-agent-
-review/SKILL.md`, just upgraded with §0 precondition gate + §1
-plugin-availability + §3 model:opus pin + §3.a sentinel-marker
-template + §6 9th-agent verifier + §6.b verification YAML block per
-the harness sync). Scope: the R1 remediation diff (commits `0f28627`
-+ `02d43d1`). Verify the 7 CRITICAL + 5 HIGH from R1 closed cleanly
-and check for new regressions. Per `docs/quality-assurance.md §
-Double-review protocol`: never stop after Round 1.
+**Action**: complete the R2 remediation commit, run `just ci`,
+push `session-01/cli-skeleton-and-ingest`, open PR to `main`, wait for
+green CI, merge with merge-commit, render two-block handoff per
+`docs/session-handoff-format.md`. Per `docs/quality-assurance.md §
+Double-review protocol`: R3 fires only if R2 remediation surfaces
+CRITICAL-class regressions — `just ci` green is the gating signal.
 
-**Status**: 63 tests pass; `just ci` green; smoke test on `/tmp/ph_demo`
-confirms end-to-end works; R1 remediation applied; harness improved.
-R2 pending.
-
-**Next action AFTER R2 + remediation**: commit final state;
-push `session-01/cli-skeleton-and-ingest` branch; open PR to `main`;
-wait for CI green; merge with merge-commit; render two-block handoff
-per `docs/session-handoff-format.md`.
+**Status**: 63 tests pass after R2 remediation (heartbeat
+env-override test replaced 1-for-1 with deterministic R2-T6 version;
+no net delta); `just ci` pending re-run; smoke test on user's
+`/Users/ph/Pictures/tests` (371 real Canon R8 CR3s) surfaced 3
+production bugs (R2-T5/T12/T13) all now remediated.
 
 ---
 
@@ -56,47 +51,87 @@ per `docs/session-handoff-format.md`.
 
 ---
 
-## Open Round-2 items
+## R1 + R2 remediation summary
 
-Session-end Round 1 (`docs/code-reviews/session-01-round1.md`) surfaced 7
-CRITICAL + 5 HIGH + 4 MEDIUM + 3 LOW. R1 remediation commits landed:
-- **T1** no_exif counter increments at point of decision; new
-  integration test asserts.
-- **T2** heartbeat dead-`if` deleted; death-WARN added BEFORE stop-flag
-  set; over-engineered granularity loop kept for now.
-- **T3** PhotoId hash window made DISJOINT for 64KB–128KB files;
-  two regression tests added.
-- **T4** ADR `0001-msrv-bump-to-1.88-for-rustsec-2026-0009.md` filed;
-  CLAUDE.md + stacks/rust.md swept to `1.88`.
-- **T5** TD-002 (rusqlite 0.32 stale) + DN-007 (cross-ref) filed.
-- **T6** `docs/decisions/0001-catalog-schema-v1.md` written.
-- **T7** `PHOTOHELPER_HEARTBEAT_INTERVAL_MS` env-var test override +
-  test row 48 added; remaining 12 uncovered plan rows tracked in
-  **DN-008** with session-02 binding trigger.
-- **T8** `indicatif` dep removed (heartbeat covers the same UX);
-  HANDOFF Checkpoint 1 records the deliberate scope tightening.
-- **T9** HANDOFF Checkpoint 1, this SESSION-STATE update, DN-006
-  filed.
-- **T10** rayon `build_global` Err → WARN; PRAGMA `wal_checkpoint`
-  errors no longer silent; misnamed `op: "stat"` → `op: "file-lock"`;
-  `ContextForPath` no-op trait deleted.
-- **T11** `Error::InvalidExifOrientationTag { tag }` dedicated
-  variant; `ExifOrientation::from_tag` no longer emits empty-PathBuf
-  sentinel.
-- **T12** test row 32 pinned to deterministic DN-006 fallback branch
-  (`is_none()` for camera_slug/make/model).
-- **T13** type-design refinements deferred to session-02 watch
-  (small).
-- **T14** duplicate INSERT extracted to closure + `INSERT_PHOTO_SQL`
-  const; `_suppress_unused_warnings` + `_ensure_exif_metadata_compiles`
-  deleted.
-- **T15** minor polish deferred.
+Session-end Round 1 (`docs/code-reviews/session-01-round1.md`) surfaced
+7 CRITICAL + 5 HIGH + 4 MEDIUM + 3 LOW; R1 remediation commits landed
+in `0f28627`. Session-end Round 2 (`docs/code-reviews/session-01-round2.md`)
+surfaced 13 CRITICAL + 14 HIGH + 12 MEDIUM + 7 LOW, of which several
+were regressions inside R1's own remediation commit. R2 remediation
+applied (this commit window).
 
-**Magic-byte TOCTOU (T10 sub)** — not yet fixed: requires moving the
-`if catalog_path.exists()` check INSIDE the lock-acquisition window.
-Carrying forward; the failure mode is rare (writer would have to delete
-the catalog mid-open). Will land in Round 2 remediation if R2 flags it
-again.
+### R1 closure (from `docs/code-reviews/session-01-round1.md`)
+
+All R1 watch-list items closed via R1 remediation (`0f28627`). See
+that commit for details; the R2 review verified each closure.
+
+### R2 closure (highlights from `docs/code-reviews/session-01-round2.md`)
+
+- **R2-T1 Magic-byte TOCTOU** — VERIFIED-AND-CLOSED. The R1.T10
+  sub-item 3 framing was based on a misread of line refs: lock IS
+  acquired at `catalog.rs:121` (`Ok(()) => break` in the `try_lock`
+  loop) BEFORE the magic-byte check at `:151`. No TD needed; in-code
+  comment added at `catalog.rs:150` to make the in-lock guarantee
+  visible without grepping. Five other agents flagged this as a CRITICAL
+  policy violation (ungoverned deferral) — they assumed the deferral
+  was real; only Agent 6 (comment-analyzer) verified the code.
+- **R2-T2 `IngestOutcome::NoExifFields`** — variant + dead `apply_outcome`
+  arm deleted; `#[non_exhaustive]` dropped to make the match exhaustive
+  at compile time.
+- **R2-T3 `query_row(...).ok()`** — replaced at both sites in
+  `catalog.rs::upsert` with explicit `QueryReturnedNoRows`-vs-other
+  match arms (was masking real SQLite errors as "row missing").
+- **R2-T4 + R2-T6 Heartbeat** — `granularity = min(interval, 100ms)`
+  so sub-100ms env overrides actually take effect; test rewritten to
+  deterministic 80-CR3 fixture + 1ms interval + `[heartbeat]`
+  substring assertion (was `expect(true).toBe(true)` per global
+  testing standards).
+- **R2-T5 EXIF lying WARN** — `parse_failed` flag gates the
+  "succeeded with zero fields" WARN; user's prod trace will no
+  longer emit contradictory log pairs.
+- **R2-T7 ADR-0001** — vulnerable `time` API surface re-attributed to
+  the RFC-2822 value-parsing entry points (was incorrectly named as
+  `time::format_description::parse`).
+- **R2-T8 + decision doc 0001** — `Catalog::open` init transaction now
+  uses `BEGIN IMMEDIATE` matching the decision doc's prose contract.
+- **R2-T9 + R2-T20 `ExifOrientation::from_tag`** — rustdoc says
+  `InvalidExifOrientationTag`; sole production caller now logs a WARN
+  on the discard path instead of silently dropping.
+- **R2-T11 `op: "mkdir-p"` → `"lock-file-create"`** — fixed sibling
+  misnaming R1.T10 missed.
+- **R2-T12 `--strict` fail-open** — strict now fails when
+  `no_exif > 0` (was only failing on unknown_camera / anomalous /
+  errored). Surfaces DN-006/DN-011: makes strict effectively unusable
+  for CR3 in v0.1 — intentional escalation, session-02 LibRaw EXIF
+  is the remediation.
+- **R2-T13** — DN-011 filed; DN-006 binding trigger upgraded.
+- **R2-T17** — TD-003 (heartbeat-join) + DN-011 (T13 MtimeFacts) +
+  DN-012 (T15 polish) filed with binding triggers.
+- **R2-T16** — DN-008 rewritten: deleted `.with_context()` boundary
+  claim removed; row list reconciled.
+- **R2-T24** — `eight-agent-review` SKILL.md frontmatter adds
+  `AskUserQuestion` to `allowed-tools` (gate was working via harness
+  fallback; now declared).
+- **R2-T25** — HANDOFF Checkpoint 1 test count corrected (33 → 30 in
+  model.rs / 32 across crate).
+- **R2-T26** — unused `kamadak-exif` + `tracing` deps removed from
+  `photohelper-core`.
+- **R2-T27** — `Error::Io` doc-comment op-tag list extended with
+  `"file-lock"` + `"lock-file-create"`.
+
+### R2 items deferred to session 02 with binding triggers
+
+- **R2-T18** (regression tests for the 4 R1.T10 WARN paths):
+  rolled into DN-008's session-02 row enumeration.
+- **R2-T19** (replace 128KB PhotoId test with discriminating fixture):
+  see R2 commit; if deferred, captured in DN-008 with session-02 trigger.
+- **R2-T15** (`open_with_retry_delay` dead public API): deferred to
+  session-02 row-13 cross-process file-lock test per DN-008.
+- **R2-T22 / R2-T23** (R1 review count drifts): cosmetic; not blocking.
+- All MEDIUM and LOW items per R2 artifact's disposition summary.
+
+**No carry-forward CRITICAL items.** All R2 CRITICALs are either
+closed inline above or filed as DN/TD with binding triggers.
 
 ---
 

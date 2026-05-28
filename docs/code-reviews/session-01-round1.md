@@ -1,5 +1,35 @@
 # session-01 session-end Round 1 (code review)
 
+> **Post-R2 reconciliation note (2026-05-28)** — R2 review
+> (`docs/code-reviews/session-01-round2.md`) surfaced two count drifts
+> in this artifact (R2-T22 + R2-T23) that the R1 author missed:
+>
+> 1. **Theme totals (R2-T23)**: the §Summary table reads "7C + 5H + 4M
+>    + 3L = 19" but counting themes by their bracketed `### T*`
+>    severity tag yields 7 CRITICAL (T1-T7) + 4 HIGH (T8-T11) +
+>    3 MEDIUM (T12, T13, T14) + 1 LOW (T15) = 15. The "19" number
+>    appears to count per-agent severity flags inside themes (e.g.,
+>    T15's umbrella [LOW] contains 2 HIGH agent-flags + 1 LOW).
+>    Canonical convention going forward (recorded in this note rather
+>    than rewritten retroactively in the artifact): **count themes,
+>    not agent-flags.**
+> 2. **Uncovered-plan-row count (R2-T22)**: T7 title says "12 plan
+>    rows uncovered"; T7 body enumerates 13 rows (`{6, 12, 13, 14, 17,
+>    18, 19, 34, 39, 42, 43, 48, 49}`); DN-008 originally listed 11
+>    entries omitting rows 17 + 48; SESSION-STATE said 12. The
+>    canonical post-R2 row list — after R2-T6's deterministic
+>    heartbeat-test closes row 48 — is **12 rows: `{6, 12, 13, 14, 17,
+>    18, 19, 34, 39, 42, 43, 49}`**, now reconciled in DN-008 +
+>    SESSION-STATE + `docs/plans/session-01.md § Post-R1 / Post-R2
+>    amendments`.
+>
+> This artifact is preserved as-is for the historical record; the R2
+> artifact + the plan-amendments table are authoritative for current
+> state.
+
+---
+
+
 > Per `docs/quality-assurance.md § Session-end protocol`. Cadence A → Tier 5
 > (session end), full 8-agent suite fired in parallel against the
 > implementation commit `310f753` (4580 lines added across 8 crates + 16

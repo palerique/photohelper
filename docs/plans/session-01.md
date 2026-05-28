@@ -626,3 +626,56 @@ if transitive count > 120 OR audit flags any advisory, file a TD.
 review plan) appended below this line **after** plan-review reaches green
 (R4 if user requests; otherwise R3 closes with the v4 remediation above).
 Until then, the contract above is the load-bearing artifact.*
+
+---
+
+## Post-R1 / Post-R2 amendments (2026-05-28)
+
+The R1 + R2 remediation cycles deliberately tightened or relaxed several
+plan items vs. plan-v5 as written. This section is the canonical
+plan-vs-implementation diff a session-02 contributor reads to know what
+the v0.1 contract actually says today. Per R2-T10 / `docs/code-reviews/
+session-01-round2.md`.
+
+### Dependencies — actual vs. v5 table
+
+| Plan v5 said | Implementation shipped | Why | Tracking |
+|---|---|---|---|
+| `indicatif 0.17` | dep removed entirely (R1.T8) | heartbeat thread covers the same UX without competing with itself for the terminal line | HANDOFF Checkpoint 1; R1 review §T8 |
+| `rusqlite 0.40 + bundled` | `rusqlite 0.32 + bundled` | 0.40 wasn't trivially buildable under the rest of the dep graph on 2026-05-28; deferred bump | TD-002 + DN-007 (binding trigger 2026-08-01) |
+| `kamadak-exif 0.6` in `core` | `kamadak-exif` removed from `core` (R2-T26) | unused there; pulling format-specific parsers into the domain crate breaks the "core → ⊥" invariant | R2 §R2-T26 |
+| `tracing 0.1` in `core` | `tracing` removed from `core` (R2-T26) | unused there; binary/CLI layer only | R2 §R2-T26 |
+| `trybuild 1` in `core (dev-dep)` | kept but unused | plan row 6 (`PhotoId::from_db_bytes` compile-fail) deferred to session 02 | DN-008 |
+| MSRV `1.85` | MSRV bumped to `1.88` | `time 0.3.47` requires it; consumes RUSTSEC-2026-0009 fix | ADR-0001 |
+
+### Deliverables — actual vs. v5
+
+| Plan v5 deliverable | Status post-R2 | Notes |
+|---|---|---|
+| §Deliverables 1: `indicatif` spinner | DROPPED (R1.T8) | heartbeat covers the same UX |
+| §Deliverables 5: per-photo `.with_context()` boundary | DROPPED (R1.T10) | replaced with structured `Error::Io { path }` + `Error::CatalogInsert { photo_id }` variants; `ContextForPath` trait deleted as no-op |
+| §Test infrastructure: `LOCK_RETRY_DELAY_MS` knob | partially landed (`Catalog::open_with_retry_delay` exists as `pub fn #[doc(hidden)]`, NO test calls it; R2-T15 / DN-008 binding trigger for session-02 row 13 cross-process test) | dead public API awaiting consumer |
+| §Test infrastructure: `HEARTBEAT_INTERVAL_MS` knob | landed; test row 48 deterministic post-R2-T6 rewrite | env-var override `PHOTOHELPER_HEARTBEAT_INTERVAL_MS` |
+| §Test infrastructure: `poison_for_testing` | NOT landed | DN-008 binding trigger for session 02 |
+| §Test infrastructure: `fail_init_after_create_table` | NOT landed | DN-008 binding trigger for session 02 |
+| §Type-design: `MtimeFacts { clamped, anomalous }` newtype (R1.T13 sub-fix) | NOT landed | DN-011 binding trigger for next session touching `model.rs` clamp_mtime callers |
+
+### Behavioral contract — actual vs. v5
+
+| Plan v5 said | Implementation reality | Why |
+|---|---|---|
+| `--strict` fails on unknown camera / mtime anomalous / errored | `--strict` ALSO fails on `no_exif > 0` (R2-T12 expansion) | the "EXIF entirely missing" case is operationally equivalent to "unrouted photo"; the prior shape was fail-open for this case (user's prod trace surfaced) |
+| Heartbeat fires at `PHOTOHELPER_HEARTBEAT_INTERVAL_MS` env value | Now genuinely fires at the env value (R2-T4 fix to granularity) | prior `granularity = 100ms` hardcode silently floored sub-100ms requests; env-var advertised 10ms minimum but loop fired at 100ms |
+| Per-CR3 EXIF behavior | DN-006 fallback (NULL EXIF) is the DEFAULT for ALL real Canon R8 CR3, not just synthetic fixtures (DN-011) | kamadak-exif cannot parse CR3 ISO-BMFF at all in v0.1; LibRaw EXIF in session 02 is critical path |
+
+### Plan rows — actual coverage vs. v5
+
+Plan v5 §Test plan declared 50 rows. Coverage post-R2:
+- **closed**: rows 32, 33, 35-38, 40, 41, 44-47, 48 (R2-T6 deterministic rewrite), 50 = ~38 rows
+- **deferred per DN-008** (binding trigger = session 02): rows 6, 12, 13, 14, 17, 18, 19, 34, 39, 42, 43, 49 = 12 rows
+- **R2-T19 PhotoId discriminating-window test** replaces the prior 128KB non-discriminating test
+
+This list is the authoritative coverage-state for the session-02
+plan-review to compare against — NOT the historical R1 review's count
+(which had a triple-drift per R2-T22, since reconciled in DN-008 +
+SESSION-STATE + this amendments table).

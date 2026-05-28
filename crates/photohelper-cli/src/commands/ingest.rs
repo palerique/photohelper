@@ -179,9 +179,16 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
         );
     }
     stop_flag.store(true, Ordering::Relaxed);
-    // The heartbeat thread observes the flag within `granularity` (100ms)
-    // and exits cleanly. We don't .join() — that would add up to
-    // HEARTBEAT_INTERVAL latency to summary printing.
+    // The heartbeat thread observes the flag within `granularity` (≤100ms
+    // post-R2-T4) and exits cleanly. We don't .join() — that would add up
+    // to one `granularity` cycle (≤100ms) of latency to summary printing.
+    // Trade-off accepted: up to one granularity-cycle of zombie heartbeat
+    // output may appear after the summary line, tests asserting strict
+    // stderr ordering can flake, and in-process test runs that re-invoke
+    // `run_ingest` accumulate one leaked detached thread per call until
+    // process exit. Tracked as TD-003 (heartbeat-join) with a session-02
+    // binding trigger; file-TD upgrade if this becomes a problem in
+    // production once real CR3 fixtures land.
 
     eprintln!("{}", stats.summary_line());
 
@@ -192,8 +199,19 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
     let unknown = stats.unknown_camera.load(Ordering::Relaxed);
     let anomalous = stats.mtime_anomalous.load(Ordering::Relaxed);
     let errored = stats.errored.load(Ordering::Relaxed);
+    let no_exif = stats.no_exif.load(Ordering::Relaxed);
 
-    if args.strict && (unknown > 0 || anomalous > 0 || errored > 0) {
+    // R2-T12 fix: `--strict` was fail-open when EXIF was entirely missing.
+    // User's prod trace on 371 real Canon R8 CR3s ran with `--strict` and
+    // got `unknown-camera: 0, errored: 0` — strict passed despite every
+    // photo being unroutable. The `unknown_camera` counter only bumps when
+    // EXIF parsed AND make/model don't match a profile; "EXIF entirely
+    // missing" silently fell through. Now strict fails on no_exif > 0 too,
+    // which is operationally equivalent to "unrouted photo." This makes
+    // strict mode effectively unusable in v0.1 for CR3 (per R2-T13 /
+    // DN-006: kamadak-exif can't parse ANY real CR3) — that's the
+    // intended escalation; LibRaw EXIF lands in session 02.
+    if args.strict && (unknown > 0 || anomalous > 0 || errored > 0 || no_exif > 0) {
         return Ok(exit_code::EX_STRICT_FAIL);
     }
     if walked > 0 && (ingested + superseded + already) == 0 {
@@ -203,8 +221,18 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
 }
 
 fn heartbeat_loop(stats: &IngestStats, stop: &AtomicBool, interval: Duration) {
-    let granularity = Duration::from_millis(100);
-    let ticks = (interval.as_millis() / granularity.as_millis()).max(1) as u64;
+    // R2-T4 fix: granularity = min(interval, 100ms). Pre-fix the granularity
+    // was hardcoded to 100ms, which meant `PHOTOHELPER_HEARTBEAT_INTERVAL_MS`
+    // values below 100 silently floored to 100ms because the first iteration
+    // always slept `granularity` before the tick-counter check. Now sub-100ms
+    // env overrides actually take effect (used by tests) while production
+    // (interval=10s) still gets the 100ms responsive-to-stop-flag behavior.
+    let granularity = interval.min(Duration::from_millis(100));
+    let ticks = interval
+        .as_millis()
+        .checked_div(granularity.as_millis())
+        .unwrap_or(1)
+        .max(1) as u64;
     let mut counter: u64 = 0;
     while !stop.load(Ordering::Relaxed) {
         thread::sleep(granularity);
@@ -237,16 +265,12 @@ fn apply_outcome(stats: &IngestStats, outcome: &IngestOutcome) {
         }
         IngestOutcome::SkippedHashWindowTooSmall => {
             stats.skipped_too_small.fetch_add(1, Ordering::Relaxed);
-        }
-        IngestOutcome::NoExifFields => {
-            stats.no_exif.fetch_add(1, Ordering::Relaxed);
-        }
-        // IngestOutcome is `#[non_exhaustive]` so a wildcard is mandatory.
-        // A new variant added in a later session that lands without a
-        // matching counter would log here as a TODO — see `docs/discovery-notes.md`.
-        _ => {
-            tracing::warn!("unaccounted IngestOutcome variant; summary counters out of sync");
-        }
+        } // R2-T2: `IngestOutcome::NoExifFields` was deleted as dead code (it
+          // was defined but never constructed; `ingest_one` increments
+          // `stats.no_exif` directly at the point of decision). The enum is
+          // no longer `#[non_exhaustive]`, so this match is exhaustive — a new
+          // variant added in a later session that lands without a matching
+          // counter will be caught at compile time rather than at runtime.
     }
 }
 
@@ -298,18 +322,41 @@ pub(crate) fn ingest_one(
 
     let photo_id =
         PhotoId::derive_with_clamped_mtime(canonical.as_path(), file_size, clamped_mtime)?;
-    let exif = parse_exif(canonical.as_path()).unwrap_or_else(|err| {
-        tracing::warn!(error = %err, path = %canonical.as_path().display(), "EXIF parse failed");
-        ExifMetadata::default()
-    });
+    // R2-T5 fix: gate the "succeeded with zero fields" WARN on parse-actually-
+    // succeeded. Pre-fix: every CR3 emitted TWO contradictory WARNs ("parse
+    // failed" + "parse succeeded with zero fields") because `unwrap_or_else`
+    // substituted an empty `ExifMetadata::default()` after logging "failed",
+    // and the unconditional `if exif.is_empty()` check then logged "succeeded
+    // with zero fields" on the same file. User's prod trace on 371 real CR3s
+    // produced 740 misleading log lines. The counter still bumps in both
+    // cases because the §Observability contract says no-exif rows still ingest.
+    let (exif, parse_failed) = match parse_exif(canonical.as_path()) {
+        Ok(e) => (e, false),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %canonical.as_path().display(),
+                "EXIF parse failed"
+            );
+            (ExifMetadata::default(), true)
+        }
+    };
 
     if exif.is_empty() {
-        // R1.T1 fix: bump the no_exif counter at the point of decision so
-        // the §Observability summary reflects reality. The catalog row
-        // still inserts with NULL EXIF columns (DN-006 fallback for CR3
-        // if kamadak-exif can't parse the ISO-BMFF container).
+        // R1.T1 fix: bump the no_exif counter at the point of decision so the
+        // §Observability summary reflects reality. The catalog row still
+        // inserts with NULL EXIF columns (DN-006 fallback for CR3 if
+        // kamadak-exif can't parse the ISO-BMFF container).
         stats.no_exif.fetch_add(1, Ordering::Relaxed);
-        tracing::warn!(path = %canonical.as_path().display(), "EXIF parse succeeded with zero fields");
+        if !parse_failed {
+            // R2-T5: only fire this WARN when the parse actually succeeded;
+            // on the failure path the "EXIF parse failed" WARN above already
+            // told the operator everything.
+            tracing::warn!(
+                path = %canonical.as_path().display(),
+                "EXIF parse succeeded but yielded zero fields"
+            );
+        }
     }
 
     let camera_id = if let (Some(m), Some(mo)) = (&exif.make, &exif.model) {
@@ -415,8 +462,24 @@ fn parse_exif(path: &Path) -> Result<ExifMetadata, Error> {
             }
             exif::Tag::Orientation => {
                 if let Some(tag) = field.value.get_uint(0) {
-                    if let Ok(orientation) = ExifOrientation::from_tag(i64::from(tag)) {
-                        out.orientation = Some(orientation);
+                    match ExifOrientation::from_tag(i64::from(tag)) {
+                        Ok(orientation) => {
+                            out.orientation = Some(orientation);
+                        }
+                        Err(photohelper_core::Error::InvalidExifOrientationTag {
+                            tag: bad_tag,
+                        }) => {
+                            // R2-T20 fix: the new variant added by R1.T11 was
+                            // being silently discarded; surface it as a WARN so
+                            // operators triaging an out-of-range orientation
+                            // see the tag value instead of "EXIF parsed clean".
+                            tracing::warn!(
+                                tag = bad_tag,
+                                path = %path.display(),
+                                "EXIF orientation tag out of 1..=8 range; treating as missing"
+                            );
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
             }

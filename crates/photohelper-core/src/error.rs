@@ -21,7 +21,8 @@ pub type BoxedSourceError = Box<dyn std::error::Error + Send + Sync>;
 #[non_exhaustive]
 pub enum Error {
     /// IO failure with structured context. `op` tags include `"canonicalize"`,
-    /// `"canonicalize-nul-check"`, `"read-prefix"`, `"stat"`, `"mkdir-p"`.
+    /// `"canonicalize-nul-check"`, `"read-prefix"`, `"stat"`, `"mkdir-p"`,
+    /// `"file-lock"` (R1.T10), and `"lock-file-create"` (R2-T11).
     #[error("IO error at {path} during {op}: {source}")]
     Io {
         /// Path that triggered the error.

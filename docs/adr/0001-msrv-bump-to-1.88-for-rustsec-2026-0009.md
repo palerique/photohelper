@@ -9,7 +9,13 @@
 
 Plan v5 §Dependencies pinned `time 0.3.47` (released 2026-02-05) to
 include the fix for **RUSTSEC-2026-0009** — a stack-exhaustion
-denial-of-service in `time::format_description::parse` that affected
+denial-of-service in the `time::*::parse` value-parsing entry points
+(`Date::parse`, `OffsetDateTime::parse`, `PrimitiveDateTime::parse`,
+`Time::parse`, `UtcDateTime::parse`, `UtcOffset::parse`, and
+`parsing::Parsed::parse_item`) when fed maliciously crafted
+**RFC-2822** input. The original ADR text said
+`time::format_description::parse` (which parses format strings, not
+values) — R2-T7 corrected the attribution. The vulnerability affected
 versions `< 0.3.47`. The fix shipped with a constraint:
 
 ```

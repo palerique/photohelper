@@ -106,9 +106,13 @@ impl Catalog {
         };
 
         // Step 3+4: open + acquire lock with retry budget.
+        // R2-T11 fix: op tag was "mkdir-p" (R1.T10's sibling miss); the actual
+        // op is lock-file creation, not directory creation. Operators debugging
+        // a permission-denied or read-only-FS lock-file failure should see
+        // the accurate tag.
         let lock_file = File::create(&lock_path).map_err(|e| Error::Io {
             path: lock_path.clone(),
-            op: "mkdir-p",
+            op: "lock-file-create",
             source: e,
         })?;
         let start = Instant::now();
@@ -148,6 +152,10 @@ impl Catalog {
         }
 
         // Step 5: verify existing catalog file's magic bytes.
+        // R2-T1 verified: this check runs AFTER Step 4's `try_lock` loop exit
+        // (via `Ok(()) => break`), i.e., while holding the exclusive file lock.
+        // SESSION-STATE.md formerly carried a "Magic-byte TOCTOU not yet fixed"
+        // item based on a misread of R1.T10 sub-item 3; closed-by-verification.
         if catalog_path.exists() {
             let meta = std::fs::metadata(catalog_path).map_err(|e| Error::Io {
                 path: catalog_path.to_path_buf(),
@@ -206,10 +214,18 @@ impl Catalog {
             })?;
         match user_version {
             0 => {
-                let tx = conn.transaction().map_err(|e| Error::CatalogOpen {
-                    path: catalog_path.to_path_buf(),
-                    source: Box::new(e),
-                })?;
+                // R2-T8 fix: use IMMEDIATE so init takes the RESERVED lock
+                // up-front, matching the prose contract in
+                // `docs/decisions/0001-catalog-schema-v1.md` § Init transaction.
+                // The file-lock already serialises openers (so DEFERRED would
+                // be safe), but IMMEDIATE makes the SQLite-level intent
+                // explicit and matches the upsert path at line ~291.
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|e| Error::CatalogOpen {
+                        path: catalog_path.to_path_buf(),
+                        source: Box::new(e),
+                    })?;
                 tx.execute_batch(INIT_SQL).map_err(|e| Error::CatalogOpen {
                     path: catalog_path.to_path_buf(),
                     source: Box::new(e),
@@ -292,13 +308,19 @@ impl Catalog {
             .map_err(|e| insert_error(pid, e))?;
 
         // Look for an existing row by id (same content) OR by source_path.
-        let existing_by_id: Option<()> = tx
-            .query_row(
-                "SELECT 1 FROM photos WHERE id = ?1",
-                rusqlite::params![&id_bytes],
-                |_| Ok(()),
-            )
-            .ok();
+        // R2-T3 fix: distinguish "no row" (Ok) from real SQLite errors. The
+        // former `.ok()` coalesced QueryReturnedNoRows with SqliteFailure /
+        // InvalidColumnType / disk-full into None, masking real lookup
+        // failures behind a misattributed CatalogInsert downstream.
+        let existing_by_id: Option<()> = match tx.query_row(
+            "SELECT 1 FROM photos WHERE id = ?1",
+            rusqlite::params![&id_bytes],
+            |_| Ok(()),
+        ) {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(insert_error(pid, e)),
+        };
         if existing_by_id.is_some() {
             tx.commit().map_err(|e| insert_error(pid, e))?;
             tracing::info!(
@@ -309,18 +331,22 @@ impl Catalog {
         }
 
         let source_path_str = photo.source_path().to_string_lossy().into_owned();
-        let existing_at_path: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT id FROM photos
-                   WHERE source_path = ?1 AND superseded_at_unix_seconds IS NULL",
-                rusqlite::params![&source_path_str],
-                |row| row.get(0),
-            )
-            .ok();
+        // R2-T3 fix (second site): same QueryReturnedNoRows-vs-real-error
+        // discrimination as the existing_by_id lookup above.
+        let existing_at_path: Option<Vec<u8>> = match tx.query_row(
+            "SELECT id FROM photos
+               WHERE source_path = ?1 AND superseded_at_unix_seconds IS NULL",
+            rusqlite::params![&source_path_str],
+            |row| row.get(0),
+        ) {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(insert_error(pid, e)),
+        };
 
-        let (camera_slug, _is_known) = match photo.camera_id() {
-            Some(photohelper_core::model::CameraId::Known(k)) => (Some(k.slug().to_string()), true),
-            _ => (None, false),
+        let camera_slug: Option<String> = match photo.camera_id() {
+            Some(photohelper_core::model::CameraId::Known(k)) => Some(k.slug().to_string()),
+            _ => None,
         };
         let exif = photo.exif();
         let exif_orientation_i64 = exif.orientation.map(|o| o.to_tag());

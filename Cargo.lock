@@ -622,11 +622,9 @@ dependencies = [
  "base64",
  "blake3",
  "filetime",
- "kamadak-exif",
  "tempfile",
  "thiserror",
  "time",
- "tracing",
  "trybuild",
 ]
 

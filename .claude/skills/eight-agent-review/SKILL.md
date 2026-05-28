@@ -2,7 +2,7 @@
 name: eight-agent-review
 description: The eng-protocol review engine. Launches the specialized review-agent suite IN PARALLEL against a target (a plan, a code change, or the whole session), consolidates findings by THEME (not by agent), triages by severity, verifies findings via a 9th Agent with verbatim Read-window quotation, and writes a docs/code-reviews artifact with machine-verifiable YAML markers. Honors the repo's recorded cadence (A tier-graduated). Use whenever a checkpoint requires a review; plan-review and session-end delegate to this one.
 argument-hint: '[plan|code|session] [scope or paths]'
-allowed-tools: Read Grep Glob Agent Write Edit Bash(test *) Bash(cat *) Bash(mkdir *)
+allowed-tools: Read Grep Glob Agent Write Edit AskUserQuestion Bash(test *) Bash(cat *) Bash(mkdir *)
 color: cyan
 ---
 

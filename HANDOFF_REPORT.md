@@ -66,7 +66,7 @@ cat SESSION-STATE.md
   export, cameras, catalog}`. Four crates implemented (`cli`, `core`,
   `cameras`, `catalog`); the other four remain one-line stubs awaiting
   sessions 02 (raw), 03+ (ai), 04+ (sidecar, export).
-- `photohelper-core::model` (~1000 lines, 33 unit tests): `PhotoId`
+- `photohelper-core::model` (~990 lines, 30 unit tests in model.rs / 32 across the crate): `PhotoId`
   (private `[u8; 32]`, BLAKE3 of `file_size_le || clamped_mtime_le ||
   first_64KB || last_64KB`, DISJOINT head/tail windows per R1.T3 fix;
   43-char base64url Display); `AbsPath` (canonicalize + canonicalize_within

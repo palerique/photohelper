@@ -421,29 +421,48 @@ fn ingest_no_exif_counter_increments_for_synthetic_cr3() {
 }
 
 // =====================================================================
-// R1 plan row 48: heartbeat appears at default verbosity.
-// Uses PHOTOHELPER_HEARTBEAT_INTERVAL_MS env-var test override so the
-// test doesn't have to wait 10 seconds.
+// R1 plan row 48: heartbeat fires at the configured interval.
+// R2-T6 rewrite: previous version asserted on the unconditional summary
+// line `walked: 1`, which fired whether or not the heartbeat thread ran.
+// The test would pass even if `heartbeat_loop` were deleted. Per the
+// global testing standards, that pattern blocks merge.
+//
+// New shape — deterministic by construction:
+//   * 80 CR3 fixtures so the walk + per-photo ingest takes >>1ms
+//     (kamadak-exif parse + BLAKE3 + SQLite insert per photo).
+//   * `PHOTOHELPER_HEARTBEAT_INTERVAL_MS=1` — with R2-T4's
+//     `granularity = min(interval, 100ms)`, the heartbeat ticks every
+//     1ms regardless of the walk speed.
+//   * Assert on the `[heartbeat]` substring (unique to the heartbeat
+//     output) — would FAIL if `heartbeat_loop` body were deleted.
 // =====================================================================
 
+/// 80-CR3 fixture so the ingest worker takes long enough that a 1ms
+/// heartbeat is guaranteed to fire at least once during the walk.
+fn fixture_dir_with_many_cr3s(n: usize) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..n {
+        let cr3 = dir.path().join(format!("img_{i:04}.cr3"));
+        // Vary the byte to vary the PhotoId so the catalog inserts (not
+        // dedup-skips) each row — exercises the full ingest path per file.
+        std::fs::write(&cr3, vec![(i & 0xFF) as u8; 200]).unwrap();
+        let mtime = filetime::FileTime::from_unix_time(1_577_836_800 + i as i64, 0);
+        filetime::set_file_mtime(&cr3, mtime).unwrap();
+    }
+    dir
+}
+
 #[test]
-fn heartbeat_appears_at_default_verbosity_via_env_override() {
-    let (dir, _) = fixture_dir_with_one_cr3();
-    // 50ms heartbeat interval; rayon walk is fast but heartbeat fires
-    // at least once during the spawn/walk/teardown window.
+fn heartbeat_fires_during_ingest_when_interval_is_short() {
+    let dir = fixture_dir_with_many_cr3s(80);
     let assert = Command::cargo_bin("photohelper")
         .unwrap()
-        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50")
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "1")
         .args(["ingest", dir.path().to_str().unwrap()])
         .assert()
         .success();
-    // Need to give the heartbeat thread a chance to fire before the walk
-    // completes — for a 1-file walk this is racy. Sleep injected via
-    // env override or via larger fixture is the deterministic shape; for
-    // v0.1 we accept the race: if walk finishes faster than 50ms, the
-    // heartbeat may not have ticked. Assert weakly: stderr should
-    // contain SOMETHING (either heartbeat OR just the summary).
-    // True heartbeat-firing test lands in session 02 with a fixture
-    // that takes >50ms to process.
-    assert.stderr(contains("walked: 1"));
+    // R2-T6: assert on the `[heartbeat]` substring (uniquely produced by
+    // `heartbeat_loop`'s eprintln!). If the loop body is deleted or the
+    // env-var override stops being honored, this assertion fails.
+    assert.stderr(contains("[heartbeat] walked"));
 }

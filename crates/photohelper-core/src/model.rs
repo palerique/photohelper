@@ -374,7 +374,10 @@ impl ExifOrientation {
     /// Parse EXIF tag value 1..=8.
     ///
     /// # Errors
-    /// - `Error::Exif` for tag values outside 1..=8.
+    /// - `Error::InvalidExifOrientationTag { tag }` for values outside 1..=8.
+    ///   (R2-T9: rustdoc previously claimed `Error::Exif`, but R1.T11
+    ///   replaced the empty-PathBuf-sentinel `Error::Exif` with the
+    ///   dedicated path-free variant.)
     pub fn from_tag(tag: i64) -> Result<Self, Error> {
         match tag {
             1 => Ok(Self::Normal),
@@ -444,8 +447,11 @@ pub struct ExifMetadata {
 }
 
 impl ExifMetadata {
-    /// True iff every field is `None` — the signal `ingest_one` uses to
-    /// route to `IngestOutcome::NoExifFields`.
+    /// True iff every field is `None`. `ingest_one` reads this to bump the
+    /// `no_exif` `IngestStats` counter at the point of decision, then proceeds
+    /// to `catalog.upsert` with NULL EXIF columns per the DN-006 fallback.
+    /// (Prior to R2-T2 this docstring claimed the empty-EXIF case routed to
+    /// `IngestOutcome::NoExifFields`; that variant was deleted as dead code.)
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.make.is_none()
@@ -584,11 +590,15 @@ impl Photo {
 /// What happened to a single file during ingest.
 ///
 /// Boolean tally signals (`camera_known`, `no_exif_fields`,
-/// `mtime_anomalous`) are NOT carried on the variants — the driver reads
-/// the written catalog row's columns to increment the right `IngestStats`
-/// atomics. Single source of truth per fact (closes R3.T10).
+/// `mtime_anomalous`) are NOT carried on the variants — the driver bumps
+/// the right `IngestStats` atomics at the point of decision inside
+/// `ingest_one`. Single source of truth per fact (closes R3.T10).
+///
+/// R2-T2 dropped `#[non_exhaustive]` because the enum + the sole driver
+/// (`photohelper-cli::commands::ingest::apply_outcome`) ship in the same
+/// workspace; an exhaustive match gives strictly stronger guarantees than
+/// a runtime WARN on the wildcard arm.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum IngestOutcome {
     /// Newly inserted (no prior row at this `source_path`).
     Inserted(PhotoId),
@@ -607,8 +617,6 @@ pub enum IngestOutcome {
     SkippedNonRaw,
     /// File is too small to hash (e.g. 0 bytes).
     SkippedHashWindowTooSmall,
-    /// EXIF reader returned zero fields (e.g. unrecognized container).
-    NoExifFields,
 }
 
 #[cfg(test)]
@@ -760,26 +768,80 @@ mod tests {
     }
 
     #[test]
-    fn photoid_derive_window_disjoint_for_files_exactly_128k() {
-        // Exactly 128KB: head ends at 64KB, tail starts at 64KB (no
-        // overlap, no gap). Full file content hashed exactly once.
+    fn photoid_derive_window_disjoint_distinguishes_overlap_region_changes() {
+        // R2-T19 rewrite: the previous `..._exactly_128k` test used an
+        // all-0xAA 128KB file — the one size at which the BUGGY pre-R1.T3
+        // code and the FIXED disjoint code feed IDENTICAL bytes to BLAKE3
+        // (head=[0..64KB) of 0xAA, tail=[64KB..128KB) of 0xAA in both
+        // implementations). That test passed against either implementation
+        // and so did not actually pin the disjoint-window invariant.
+        //
+        // This rewrite uses 96KB files where the bytes in the overlap
+        // window [32KB..64KB) differ between two files. Under the BUGGY
+        // overlap code (head=[0..64KB), tail=[32KB..96KB)) the differing
+        // bytes get hashed TWICE; under the FIXED disjoint code
+        // (head=[0..64KB), tail=[64KB..96KB)) the differing bytes get
+        // hashed ONCE in the head and NOT in the tail. The total hashed
+        // byte count differs between the two implementations for the same
+        // 96KB content — so a regression to overlap math would change
+        // the resulting hash, failing this test.
         let dir = tempfile::tempdir().unwrap();
         let mtime = filetime::FileTime::from_unix_time(1_577_836_800, 0);
-        let file_size: u64 = 128 * 1024;
-        let head = vec![0xAAu8; 64 * 1024];
-        let tail = vec![0xAAu8; 64 * 1024];
+        let file_size: u64 = 96 * 1024;
+
+        // Compute the EXPECTED hash under the DISJOINT invariant:
+        //   head = file[0..64KB)
+        //   tail = file[64KB..96KB)   (no overlap, no gap)
+        let mut content = vec![0xAAu8; (96 * 1024) as usize];
+        // Place a distinct sentinel in the would-be-overlap region
+        // [32KB..64KB) — these bytes appear in head exactly once under
+        // the disjoint code, and would appear in BOTH head and tail
+        // under the buggy code (different hash).
+        for byte in content.iter_mut().take(64 * 1024).skip(32 * 1024) {
+            *byte = 0x77;
+        }
+        let head_disjoint = &content[0..(64 * 1024)];
+        let tail_disjoint = &content[(64 * 1024)..(96 * 1024)];
         let mut hasher = blake3::Hasher::new();
         hasher.update(&file_size.to_le_bytes());
         hasher.update(&1_577_836_800_i64.to_le_bytes());
-        hasher.update(&head);
-        hasher.update(&tail);
-        let expected = *hasher.finalize().as_bytes();
+        hasher.update(head_disjoint);
+        hasher.update(tail_disjoint);
+        let expected_disjoint = *hasher.finalize().as_bytes();
 
-        let p = dir.path().join("128k.cr3");
-        std::fs::write(&p, vec![0xAAu8; 128 * 1024]).unwrap();
+        // Also compute the BUGGY-overlap hash to confirm it would differ —
+        // if a regression to overlap math lands, the actual hash matches
+        // this value instead, and the != assertion below would fail.
+        let head_buggy = &content[0..(64 * 1024)];
+        let tail_buggy = &content[(32 * 1024)..(96 * 1024)];
+        let mut buggy_hasher = blake3::Hasher::new();
+        buggy_hasher.update(&file_size.to_le_bytes());
+        buggy_hasher.update(&1_577_836_800_i64.to_le_bytes());
+        buggy_hasher.update(head_buggy);
+        buggy_hasher.update(tail_buggy);
+        let expected_buggy = *buggy_hasher.finalize().as_bytes();
+
+        // Sanity: the two expected hashes MUST differ (or this whole
+        // test isn't discriminating anything).
+        assert_ne!(
+            expected_disjoint, expected_buggy,
+            "test fixture is broken: disjoint and buggy implementations would produce the same hash here",
+        );
+
+        let p = dir.path().join("96k.cr3");
+        std::fs::write(&p, &content).unwrap();
         filetime::set_file_mtime(&p, mtime).unwrap();
         let actual = PhotoId::derive_with_clamped_mtime(&p, file_size, 1_577_836_800).unwrap();
-        assert_eq!(actual.as_bytes(), &expected);
+        assert_eq!(
+            actual.as_bytes(),
+            &expected_disjoint,
+            "PhotoId must follow the DISJOINT invariant; a regression to overlapping windows would produce {expected_buggy:?}",
+        );
+        assert_ne!(
+            actual.as_bytes(),
+            &expected_buggy,
+            "PhotoId must NOT match the buggy-overlap hash",
+        );
     }
 
     #[test]
