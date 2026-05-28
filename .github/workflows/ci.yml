@@ -1,13 +1,19 @@
 # photohelper — CI.
 #
 # Mirrors `just ci`. The protocol job (verify-state) is stack-agnostic; the
-# gate jobs (fmt, lint, test, audit) use the Rust step blocks from
-# stacks/rust.md. Green locally (`just ci`) == green here.
+# gate jobs (fmt, lint, test, audit, sanitize-check) use the Rust step blocks
+# from stacks/rust.md. Green locally (`just ci`) == green here.
 #
 # Security note: action versions below use the `@vN` floating tags for
 # bootstrap readability; replace each with a commit SHA per your
 # supply-chain policy before relying on this for releases.
 # (search for `<<pin to SHA>>` in stacks/rust.md for the policy reminder.)
+#
+# System prerequisites for the LibRaw build:
+#   * pkg-config + autoconf + libtool + make + g++ (apt build-essential)
+# Installed in the lint + test jobs via the shared `apt install` step
+# below. macOS dev builds get the same via `brew install pkgconf` per
+# the README quickstart.
 
 name: ci
 on:
@@ -41,19 +47,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4   # <<pin to SHA>>
+        with:
+          lfs: true
+      - name: Install LibRaw build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config autoconf libtool ripgrep
       - uses: dtolnay/rust-toolchain@stable   # <<pin to SHA>>
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2   # <<pin to SHA>>
       - run: cargo clippy --all-targets --all-features --workspace -- -D warnings
+      - name: unsafe-isolation gate
+        run: ./scripts/check-unsafe-isolation.sh
 
   test:
     name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4   # <<pin to SHA>>
+        with:
+          lfs: true
+      - name: Install LibRaw build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config autoconf libtool libimage-exiftool-perl
       - uses: dtolnay/rust-toolchain@stable   # <<pin to SHA>>
       - uses: Swatinem/rust-cache@v2   # <<pin to SHA>>
       - run: cargo test --all-features --workspace --no-fail-fast
+      - name: sanitize-check (CR3 fixtures)
+        run: ./scripts/sanitize-check.sh
 
   audit:
     name: dependency audit

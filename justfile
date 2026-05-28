@@ -121,10 +121,16 @@ hooks-run-all:
 # `ci` runs exactly what .github/workflows/ci.yml runs, in the same order, so
 # `just ci` passing locally is equivalent to CI passing. Keep this list in
 # sync with the workflow file.
-ci: fmt-check lint test audit unsafe-isolation
+ci: fmt-check lint test audit unsafe-isolation sanitize-check
     @./scripts/verify-state.sh
     @prek run --all-files
     @prek run --all-files --hook-stage pre-push
+
+# Sanitization gate for tests/fixtures/cr3/*.CR3 — every fixture must
+# contain only the asserted-survivor EXIF tag set (no GPS / lens serial
+# / owner / credits). Allow-list of required + forbidden tag patterns.
+sanitize-check:
+    @./scripts/sanitize-check.sh
 
 # Defense-in-depth: `crates/photohelper-raw` is the only crate allowed to
 # contain `unsafe` code, and only `ffi.rs` inside it. The crate Cargo.toml

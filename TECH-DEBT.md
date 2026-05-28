@@ -140,6 +140,42 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-009 — `scripts/sanitize-check.sh` ships stage-1 only; embedded-preview JPEG re-check (R3-T8 stage 2) deferred
+
+- **Status**: Open
+- **Opened**: 2026-05-28 (session 2, Deliverable 3 fixture commit)
+- **Stop-gap location**: `scripts/sanitize-check.sh` — does NOT yet
+  perform the R3-T8 stage-2 check: extract the embedded preview JPEG
+  via `exiftool -b -PreviewImage <fixture>`, then re-run the allow-list
+  check against the extracted JPEG. ExifTool's `-G -a` output (stage 1)
+  does NOT descend into IFD0:Preview embedded JPEGs in CR3 (the `-ee`
+  flag covers EPS/PDF/MPF streams, not CR3 embedded previews).
+- **Fundamental fix**: extend `scripts/sanitize-check.sh` per plan
+  §Deliverable 3 § Sanitize check § R3-T8: after the top-level
+  allow-list check, for each fixture run
+  `exiftool -b -PreviewImage "$fixture" > /tmp/preview.jpg
+  2>/dev/null || true`. If `/tmp/preview.jpg` is non-empty, run
+  `exiftool -G -a /tmp/preview.jpg` and assert the same allow-list.
+  Without stage 2, a fixture carrying a GPS-tagged preview JPEG inside
+  a clean CR3 would ship unsanitized despite the CR3 itself being clean.
+- **Binding trigger**: next session that touches the CR3 fixture set
+  (e.g. adding a new fixture, refreshing the existing ones, or session
+  04+ when XMP develop work lands and needs additional preview-image
+  invariants) OR before the first GitHub Release tag is cut. If a
+  GPS-tagged preview slips into a fixture before then, the violation is
+  silent.
+- **Scope estimate**: ~20 LoC in `sanitize-check.sh` / low risk.
+- **Consequence of inaction**: a contributor adding a non-sanitized
+  fixture with a GPS-bearing preview JPEG inside a stripped CR3 ships
+  GPS data despite passing the current sanitize gate. Today's two
+  fixtures from raw.pixls.us are CC0-clean (verified manually), so
+  the immediate exposure is zero, but the gap remains.
+- **Related**: `docs/plans/session-02.md § Deliverable 3 §
+  Sanitization gate § R3-T8`; `docs/code-reviews/session-02-plan-round3.md
+  § R3-T8`.
+
+---
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).

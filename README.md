@@ -22,13 +22,16 @@ and Windows.
 #                (LibRaw 0.22.1 is vendored under crates/photohelper-raw/vendor/
 #                 and built via autoconf the first time `cargo build` runs)
 #
-# on macOS: brew install rustup just prek pkgconf  # pkgconf provides pkg-config
-#           xcode-select --install                  # if you don't have Xcode CLT yet
+# on macOS: brew install rustup just prek pkgconf git-lfs  # pkgconf provides pkg-config
+#           xcode-select --install                          # if you don't have Xcode CLT yet
 #           rustup set profile minimal && rustup install 1.88.0 --component rustfmt --component clippy
 #           cargo install cargo-audit --locked
+#           git lfs install                                 # one-time; required to pull CR3 fixtures
 #
-# on Debian/Ubuntu: sudo apt install build-essential pkg-config rustup just prek
-# on Fedora:        sudo dnf install make gcc-c++ pkgconf-pkg-config rustup just prek
+# on Debian/Ubuntu: sudo apt install build-essential pkg-config git-lfs rustup just prek
+#                   git lfs install
+# on Fedora:        sudo dnf install make gcc-c++ pkgconf-pkg-config git-lfs rustup just prek
+#                   git lfs install
 
 just install-hooks      # one-time: install pre-commit + pre-push hooks
 just build              # cargo build --release --all-features --workspace
