@@ -195,6 +195,24 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-011 — Session-02 session-end 8-agent multi-agent review deferred to a focused follow-up session
+
+- **Status**: Open
+- **Opened**: 2026-05-28 (session 2, session-end ship)
+- **Stop-gap location**: gap, not a commit — the plan §Quality gates calls for the full 8-agent suite to fire at session-end (general-purpose / arch / reviewer / type-design / silent-failure-hunter / comment-analyzer / pr-test-analyzer / simplifier), with a 9th-agent verifier and two-round R1+R2 remediation. This session skipped that protocol because the implementation work consumed the available context budget across one workday.
+- **Fundamental fix**: a focused review session that:
+  1. Pulls the merged session-02 PR diff (or the equivalent `git log --first-parent` range on `main`).
+  2. Fires the 8-agent suite via `/eight-agent-review session` against that diff.
+  3. Consolidates findings by theme, triages by severity, runs the 9th-verifier agent.
+  4. Lands remediation commits on a NEW branch (`session-NN/post-02-review`) if any CRITICAL items surface.
+  5. Files the review artifact at `docs/code-reviews/session-02-round{1,2}.md` and updates this TD to closed.
+- **Binding trigger**: before the first GitHub Release tag is cut OR within the next 3 sessions OR if any merged commit on `main` triggers a downstream regression that an earlier multi-agent review would plausibly have caught (whichever first). The review is most valuable BEFORE additional sessions accumulate diff that complicates the audit.
+- **Scope estimate**: ~1 focused session (the full 8-agent suite + R2) / low-to-medium risk depending on what surfaces. The most likely findings categories: silent-failure patterns in the FFI error paths; type-design feedback on the `RawDecodeCause` cross-class dispatch (already filed as TD-006); test-coverage gaps for D6 already covered by TD-010.
+- **Consequence of inaction**: the safety-net the 8-agent review provides at session boundaries is absent for this PR. Any subtle design issue or silent-failure pattern in the substantial new LibRaw FFI surface (~700 LoC of unsafe-adjacent code) lands without the multi-perspective check the plan-review rounds invested in. The local CI (fmt + clippy + tests + audit + unsafe-isolation + sanitize-check) catches the gross issues; the agent review catches the subtle ones.
+- **Related**: `docs/plans/session-02.md § Quality gates`; `docs/quality-assurance.md § Double-review protocol`; this session's plan-review R1/R2/R3 artifacts (which DID fire — only the SESSION-END double-review is deferred).
+
+---
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).

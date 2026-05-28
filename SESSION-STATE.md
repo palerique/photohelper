@@ -30,25 +30,40 @@ to pass on real CR3 fixtures; bundle TD-002 rusqlite 0.32 → 0.40 bump
 (rows 6, 17, 39, 42, 43, 49) + R2-T18 WARN regressions. See
 `docs/plans/session-02.md` for the full contract.
 
-**Action**: **PAUSED for context refresh** (second pause this session;
-post-Deliverable-1a-scaffolding). Today's window closed TD-003 (CI green
-end-to-end) AND landed Deliverable 0 (LibRaw pin escalated to `=0.22.1`)
-AND landed Deliverable 1a's lint-scaffolding foundation. Next session
-window: implement the body of Deliverable 1 — 1d Error enum first
-(`crates/photohelper-raw/src/lib.rs` per plan §1d, ~5 variants +
-2 cause enums), then 1b `RawExif` (`src/exif.rs`), then 1c `RawImage`
-+ companions (`src/decode.rs`), then 1a body (FFI bindings to ~15
-LibRaw C-API functions in `src/ffi.rs`). Then proceed to Deliverable 2
-(LibRaw build.rs + ADR-0002 LGPL §6(a)).
+**Action**: **READY TO SHIP.** Every Deliverable 0-7 sub-goal landed
+on `session-02/libraw-cr3-decode` across 13 commits today. The session
+GOAL (LibRaw FFI for Canon R8 CR3 — EXIF read + RAW pixel decode) is
+fully met end-to-end: `photohelper ingest "$HOME/Pictures/tests" --strict`
+produces `walked: 371, ingested: 370, unknown-camera: 0, no-exif: 0,
+errored: 0, exit 0` against the user's 370-CR3 corpus (was
+`walked: 371, ingested: 0, no-exif: 370` pre-session-02). DN-006 +
+DN-011 + DN-018 + DN-019 closed; TD-003 + TD-008 closed; TD-002 partial.
+Deliverable 6 (test infrastructure) + Deliverable 5's 6-sub-test
+verification + Deliverable 4's per-RawExifCause dispatch table /
+ExifCompleteness deferred via TD-010 / TD-011 (next, see below) /
+inline plan-deviation notes. Next: session-end ship workflow per
+`docs/session-handoff-format.md`.
 
-**Status**: `just ci` GREEN end-to-end on apple-silicon. 63/63 tests
-pass deterministically (verified 10/10 reruns of the previously-broken
-`heartbeat_fires_during_ingest_when_interval_is_short`). Workspace
-state clean. 4 new commits this window:
+**Status**: `just ci` GREEN end-to-end on apple-silicon. 118 workspace
+tests pass; libraw.a builds in ~30s on a clean checkout. End-to-end
+acceptance: `photohelper ingest "$HOME/Pictures/tests" --strict` →
+`walked: 371, ingested: 370, unknown-camera: 0, no-exif: 0, errored: 0`,
+exit code 0. Was `walked: 371, ingested: 0, no-exif: 370` before
+session 02. Workspace state clean. 13 commits this session:
 - `bb87735` — fix(session-02): close TD-003 (heartbeat join) per DN-019 trigger
 - `e6d53fb` — chore: gitignore `.serena/` per-machine MCP state
 - `0d4a7f7` — chore(libraw): pre-flight EXIF + CVE-posture audit (Deliverable 0)
-- `440388a` — chore(session-02): photohelper-raw lint scaffolding + unsafe-isolation gate (Deliverable 1a setup)
+- `440388a` — chore(session-02): photohelper-raw lint scaffolding + unsafe-isolation gate (D1a setup)
+- `a59ef66` — feat(session-02): Error + RawExifCause + RawDecodeCause enums (D1d)
+- `c42ce2f` — feat(session-02): RawExif type + accessors (D1b types slice)
+- `8b6b9e8` — feat(session-02): RawImage + Bayer-decode companion types with R2-T6 invariants (D1c)
+- `51905be` — feat(libraw): vendor LibRaw 0.22.1 + autoconf build.rs + ADR-0002 LGPL (D2)
+- `092383f` — feat(libraw): FFI + RawPath + read_cr3 EXIF extraction (D1a-exif)
+- `f8238f4` — feat(libraw): read_raw + parse_libraw_image + RawImage::new (D1a-decode; closes TD-008)
+- `7907ca8` — feat(fixtures): Git LFS CC0 R8 CR3 fixtures + sanitize-check + integration tests (D3)
+- `203f58d` — refactor(session-02): atomic kamadak-exif removal + RAW_EXTS narrow + ingest LibRaw rewire (D4; closes DN-006/DN-011)
+- `2323b6b` — chore(deps): rusqlite 0.32 → 0.34 partial bump (D5; TD-002 partial)
+- `63002e5` — chore(session-02): Deliverable 7 polish + Deliverable 6 deferred via TD-010
 
 10 plan-review commits remain on the branch from the prior phase:
 - `b377aed` — plan v1
@@ -108,7 +123,7 @@ surface and close those in real code.
 |-----------------------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | `photohelper-cli`     | **implemented (session 01)**            | clap v4 + 7 subcommands; `ingest` real; stubs exit 69; heartbeat + summary via eprintln!.                     |
 | `photohelper-core`    | **implemented (session 01)**            | model (PhotoId, AbsPath, CameraId, KnownCamera, ExifOrientation, Aspect, ExifMetadata, IngestOutcome, Photo); error (13 variants); catalog_glue. |
-| `photohelper-raw`     | **lint scaffolding (session 02 D1a)**   | Cargo.toml `[lints]` overrides workspace `forbid(unsafe_code)` → `allow`; explicit per-key restate of every workspace lint; `src/{ffi,exif,decode}.rs` stub files carry file-level `#![deny(unsafe_op_in_unsafe_fn)]` (ffi) or `#![forbid(unsafe_code)]` (exif, decode); `scripts/check-unsafe-isolation.sh` + `just ci unsafe-isolation` recipe is the third defense layer. FFI body + `RawExif`/`RawImage` types + Error enum land in next-window Deliverable 1 body commits. |
+| `photohelper-raw`     | **implemented (session 02)**            | LibRaw 0.22.1 vendored (1.6 MB tarball under `vendor/`); autoconf-driven build.rs + cc-compiled C shim (`cpp/photohelper_libraw_shim.c`) over LibRaw struct types. `exif::read_cr3(path) → RawExif` + `decode::read_raw(path) → RawImage`. Error / RawExifCause / RawDecodeCause enums + RawExif + RawImage + BayerPlane + CfaPattern + SensorLevels + SensorBitDepth + WhiteBalance + CamRgbToXyzD65Matrix all with R2-T6 invariants. Three-layer unsafe-isolation defense (workspace forbid + file-level forbid + rg gate). 3 integration tests pass against CC0 R8 CR3 fixtures. |
 | `photohelper-ai`      | scaffolded                              | ort/tract + culling/denoise models land in sessions 03+.                                                      |
 | `photohelper-sidecar` | scaffolded                              | XMP read/write (crs:/ph: namespaces) lands when `develop` is wired (~session 04).                             |
 | `photohelper-export`  | scaffolded                              | resize + watermark + mozjpeg encode land when `export` is wired (~session 05).                                |

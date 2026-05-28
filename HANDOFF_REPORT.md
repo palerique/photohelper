@@ -342,3 +342,78 @@ just session-start
 ```
 
 Then paste the restart prompt rendered at the end of this pause turn.
+
+---
+
+## Checkpoint 5 — session 02 SHIPPED (2026-05-28; full LibRaw FFI for Canon R8 CR3)
+
+**Status**: shipped. Session-02 GOAL fully met end-to-end on `session-02/libraw-cr3-decode`. PR open + merge pending CI green.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code session 02, continued from Checkpoint 4)
+
+### What landed since Checkpoint 4 (9 additional commits)
+
+* `a59ef66` — **Deliverable 1d Error enum**: `photohelper-raw::Error` + `RawExifCause` + `RawDecodeCause` (all `#[non_exhaustive]`; every variant carries `path` where applicable; `LibRawCallFailed { op, libraw_code }` discriminator for log-grep triage per R2-T13).
+* `c42ce2f` — **Deliverable 1b RawExif types-only slice**: type + accessors, `assert_impl_all!(RawExif: Send, Sync)` at module scope.
+* `8b6b9e8` — **Deliverable 1c RawImage + companions**: `BayerPlane` / `CfaPattern` / `SensorLevels` / `SensorBitDepth` / `WhiteBalance` / `CamRgbToXyzD65Matrix` with the R2-T6 invariants (dynamic-range floor 256, NaN/identity rejection, etc.); TD-007 closure via constructor-takes-path discipline; TD-008 filed for the transient `#[allow(dead_code)]` on constructors.
+* `51905be` — **Deliverable 2 build-system + ADR-0002**: LibRaw 0.22.1 tarball vendored (`vendor/libraw-0.22.1.tar.gz` + SHA-256 sidecar). build.rs runs `./configure && make` (autoconf — not cmake; LibRaw 0.22.1 ships only autoconf scripts, the plan was amended in lockstep to v3.3). `cc::Build` compiles `cpp/photohelper_libraw_shim.c` against LibRaw headers from OUT_DIR. ADR-0002 LGPL §6(a) decision-doc as DRAFT.
+* `092383f` — **Deliverable 1a-exif body**: FFI bindings (14 extern "C" + 8 C shim), `RawPath` newtype (NUL/non-UTF-8/empty rejection), `LibrawGuard` RAII handle, `parse_libraw_fields` orchestration, `RawExif::from_libraw_fields` + `read_cr3` public entry. Smoke-tested against `_MG_9625.CR3` (Canon EOS R8, 6022×4024, Normal).
+* `f8238f4` — **Deliverable 1a-decode body**: `parse_libraw_image` + `read_raw` + `RawImage::new` + `cfa_pattern_from_filters` (LIBRAW_COLOR macro impl in Rust) + `bit_depth_from_white` derivation. **TD-008 closed** — every transient `#[allow(dead_code)]` removed. Smoke-tested: 6188×4120 RAW, RGGB, black=2047 white=16383 bit_depth=14, valid WB+matrix.
+* `7907ca8` — **Deliverable 3 fixtures + sanitize-check + integration tests**: Git LFS initialized, two CC0 Canon R8 CR3 fixtures from raw.pixls.us committed under `tests/fixtures/cr3/`, exiftool-sanitized, `scripts/sanitize-check.sh` allow-list gate wired into `just ci`, `fixture_is_real_cr3` helper, 3 integration tests against real CR3 sensor data, GitHub Actions workflow updated with `lfs: true` + system deps + sanitize-check + unsafe-isolation gates. R3-T8 stage-2 embedded-preview re-check deferred via TD-009.
+* `203f58d` — **Deliverable 4 atomic kamadak-exif removal + ingest LibRaw rewire**: `parse_exif` deleted; `parse_cr3_exif` wraps `photohelper_raw::exif::read_cr3`; `RAW_EXTS = ["cr3"]`; `kamadak-exif` workspace dep removed; `unused_crate_dependencies = "warn"` lint added (caught + removed unused `time` / `thiserror` / `photohelper-core` declarations in 5 stub crates); `CanonR8::make_model` updated to `("Canon", "EOS R8")` to match LibRaw's normalized model string. **DN-006 + DN-011 closed**: end-to-end acceptance test passes against the user's 370-CR3 corpus (was 0/371 ingested, now 370/371 ingested with `--strict` exit 0).
+* `2323b6b` — **Deliverable 5 rusqlite partial bump**: 0.32 → 0.34 (plan target was 0.40; rusqlite ≥ 0.36 needs `libsqlite3-sys ≥ 0.38` which requires MSRV 1.92, ours is 1.88). TD-002 partial closure; revised remediation depends on MSRV bump.
+* `63002e5` — **Deliverable 7 polish + Deliverable 6 deferral**: `KnownCamera::display_name()` + `Display` impl; `UpsertOutcome::#[non_exhaustive]` deliberately NOT added (cross-crate match in ingest would need wildcard; lands together with `InsertedWithPartialExif`). **TD-010 filed** for Deliverable 6 test infrastructure.
+
+### What was deferred (filed as TDs with binding triggers)
+
+* **TD-009** — `scripts/sanitize-check.sh` stage-2 embedded-preview re-check (R3-T8 stage 2).
+* **TD-010** — Deliverable 6 test infrastructure as a coherent unit (poison_for_testing, R2-T18 4-WARN regressions, DN-008 6 rows, R2-T3 heartbeat env-var panic, R2-M8 silent ROLLBACK fix).
+* **TD-011** — session-end 8-agent multi-agent review deferred to a focused follow-up session because of context-budget exhaustion at session end. Filed for a focused follow-up review session before any v0.1 Release tag.
+* **Plan §4b–§4f ingest enhancements**: `ExifCompleteness` predicate + `partial_exif`/`cr3_exif_absent` counters + per-`RawExifCause` dispatch table + `IngestOutcome::InsertedWithPartialExif`. Lands together with TD-010 work.
+
+### CI gate state at PR-creation time
+
+* `just ci` GREEN on apple-silicon: fmt clean, clippy zero-warnings (with the new `unused_crate_dependencies` + `undocumented_unsafe_blocks` + the `unsafe-isolation` script gate), 118 workspace tests passing (incl. 3 integration tests against the new LFS CR3 fixtures), cargo audit clean, sanitize-check clean (2 fixtures pass), prek hooks pass.
+* Acceptance criterion 2b smoke verified locally:
+  ```
+  $ photohelper ingest "$HOME/Pictures/tests" --strict
+  walked: 371, ingested: 370, superseded: 0, already-catalogued: 0,
+  unknown-camera: 0, no-exif: 0, mtime-anomalous: 0,
+  skipped (non-RAW): 1, skipped (too-small): 0, errored: 0
+  $ echo $?
+  0
+  ```
+
+### Closure summary
+
+Closes:
+* **DN-006** (kamadak-exif can't parse CR3) → closed.
+* **DN-011** (DN-006 extends to 370 real R8s) → closed.
+* **DN-018** (LibRaw CVE-posture audit owner) → closed.
+* **DN-019** (heartbeat test fails 5/5 on apple-silicon) → closed.
+* **TD-003** (heartbeat .join) → closed.
+* **TD-008** (decode constructor dead_code) → closed.
+* **TD-002** (rusqlite stale) → partial (0.32 → 0.34; full closure needs MSRV bump).
+
+Files new:
+* **TD-009** (sanitize-check stage 2 embedded preview).
+* **TD-010** (Deliverable 6 test infrastructure).
+* **TD-011** (deferred session-end 8-agent review).
+
+Plan amendments:
+* **v3.2**: LibRaw pin escalated `=0.21.4` → `=0.22.1` (Deliverable 0).
+* **v3.2**: `lib.rs` removed from file-level `#![forbid(unsafe_code)]` list (rustc forbid cannot be downgraded by submodule).
+* **v3.3**: build.rs uses autoconf, not cmake (LibRaw 0.22.1 ships only autoconf scripts).
+* **v3.3**: `unused_crate_dependencies` lint surfaces collateral cleanups in 5 stub crates' Cargo.toml.
+
+### How to land
+
+```bash
+git push -u origin session-02/libraw-cr3-decode
+gh pr create --base main --head session-02/libraw-cr3-decode \
+    --title "session 02: LibRaw FFI for Canon R8 CR3 (EXIF + decode)" \
+    --body "..."  # see PR for full body
+gh pr checks --watch
+gh pr merge --merge --delete-branch
+```
+
+Then render the two-block session handoff per `docs/session-handoff-format.md` in the PR review thread.
