@@ -139,6 +139,14 @@ sanitize-check:
 clean-catalog *ARGS:
     @./scripts/photohelper-clean-catalog.sh {{ARGS}}
 
+# List rows from the photohelper catalog (read-only). Default mode
+# pretty-prints active rows with key metadata; pass `--count` for just
+# the row count, `--by-camera` for an aggregate, or `--paths-only` for
+# pipe-friendly output. See `just list-catalog --help` for the full
+# flag list.
+list-catalog *ARGS:
+    @./scripts/photohelper-list-catalog.sh {{ARGS}}
+
 # Defense-in-depth: `crates/photohelper-raw` is the only crate allowed to
 # contain `unsafe` code, and only `ffi.rs` inside it. The crate Cargo.toml
 # allows `unsafe_code` for the FFI module; every other source file carries
