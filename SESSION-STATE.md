@@ -16,49 +16,40 @@ script + `just clean-catalog`) and PR #4 merge `1d31316` (list script
 + `just list-catalog`). Session 02 post-merge two-block handoff WAS
 rendered (per the previous context window's session-end response).
 
-**Current session**: **03** (`ai-culling-skeleton`) — **PAUSED for
-context refresh after plan-review Round 1.** Branch:
-`session-03/ai-culling-skeleton`. Plan v1 committed at `319a25d`;
-Round-1 review artifact at `7fd1dea`
-(`docs/code-reviews/session-03-plan-round1.md`). No implementation
-code yet — pre-implementation pause per protocol.
+**Current session**: **03** (`ai-culling-skeleton`) — **PLAN V2
+COMMITTED; ROUND 2 PENDING.** Branch: `session-03/ai-culling-skeleton`.
+Plan v1 at `319a25d`; Round-1 artifact at `7fd1dea`; plan v2 committed
+at `dc95639` (R1 remediation of 10 CRITICAL + 18 HIGH + 5 MEDIUM).
 
 **Goal** (session 03): End-to-end AI culling pipeline (NIMA aesthetic
-scorer + catalog v1→v2 migration framework + `cull_scores` +
-`dup_groups` tables + cull subcommand rewire) plus full TD-010 closure
-(Deliverable-6 test infrastructure) plus DN-020 stub-message fix.
+scorer + catalog v1→v2 migration + `cull_scores` table + cull subcommand
+rewire) plus full TD-010 closure (Deliverable-6 test infrastructure)
+plus DN-020 stub-message fix. `dup_groups` deferred to session 04+
+(PR1-T30).
 
-**Action**: **PLAN-REVIEW ROUND 1 COMPLETE.** Artifact committed at
-`7fd1dea`. Next: remediate 10 CRITICAL + 18 HIGH findings from Round 1
-in `docs/plans/session-03.md` → commit plan v2 → fire Round 2 →
-remediate → Round 3 if needed → begin implementation.
+**Action**: **PLAN V2 READY FOR ROUND 2.** Plan v2 committed at
+`dc95639`. Next: fire plan-review Round 2 (full 8-agent suite) →
+remediate R2 findings → commit plan v3 → Round 3 if CRITICAL → begin
+implementation.
 
-**Status**: `just ci` GREEN on branch `session-03/ai-culling-skeleton`
-(2 commits on branch, no implementation code). 118 workspace tests pass
-(unchanged from main). Branch is ONLY docs/review artifacts so far.
-PAUSED — context refresh. See HANDOFF_REPORT.md Checkpoint 7 for
-precise next steps.
-
-2 commits on `session-03/ai-culling-skeleton` (docs/plan only; no implementation):
+**Status**: `just ci` GREEN on branch `session-03/ai-culling-skeleton`.
+118 workspace tests pass (unchanged from main). Branch is docs/plan
+artifacts only; no implementation code. 4 commits on branch:
 - `319a25d` — docs(session-03): plan contract (top block, v1)
+- `79be4d4` — chore(session-03): save intermediate state for context refresh
 - `7fd1dea` — docs(session-03): plan-review Round 1 artifact
+- `dc95639` — docs(session-03): plan v2 — R1 remediation (10 CRITICAL + 18 HIGH)
 
-**Plan-review history (session 03 Round 1 — in progress)**:
+**Plan-review history (session 03)**:
 R1 surfaced 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW = 43 themes.
-All 34 CRITICAL+HIGH findings verified by 9th-agent (26 present=yes,
-8 present=drifted — line numbers off 1-5; 0 hallucinated).
-Top CRITICAL themes:
-- PR1-T1: D6 targets non-existent files; stub messages live in main.rs
-- PR1-T2: D5c adds-then-retires panic site (contradicts TD-005)
-- PR1-T3: DN-022 cited 4× as if it exists (discovery-notes ends at DN-021)
-- PR1-T4: ANL-001 fabricated SCUNet cross-reference (LibRaw pre-flight doc)
-- PR1-T5: ort Session.run() requires &mut self; shared-session won't compile
-- PR1-T6: Scorer trait referenced in D4 but never defined in D1
-- PR1-T7: Stop-gap declarations "None" false; ≥3 stop-gaps acknowledged inline
-- PR1-T8: D2b "manual SQLite REPL inspection" is not a test (blocks merge)
-- PR1-T9: D0/D1d sequencing inverted; model binary committed before D0 validates
-- PR1-T10: LoadedModel SHA trust boundary inverted; runtime check cannot verify source
-R2 fires after plan v2 remediation (next context window).
+All 34 CRITICAL+HIGH findings verified by 9th-agent (0 hallucinated).
+Plan v2 (dc95639) closes all 10 CRITICAL + 18 HIGH + 5 MEDIUM.
+Key structural changes: D0 resequenced first; no Migration trait (match arm);
+dup_groups deferred; no Scorer trait (concrete &Nima); VerifiedModelBytes type-state;
+per-worker ort Session; D5c restructured (no panic in heartbeat_loop);
+read_raw_rgb via LibRaw dcraw_process; 5 new TDs (TD-012–TD-016);
+4 new DNs (DN-022–DN-025).
+R2 fires against plan v2 next.
 
 ---
 
