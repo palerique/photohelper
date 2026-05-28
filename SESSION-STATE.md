@@ -30,15 +30,41 @@ to pass on real CR3 fixtures; bundle TD-002 rusqlite 0.32 → 0.40 bump
 (rows 6, 17, 39, 42, 43, 49) + R2-T18 WARN regressions. See
 `docs/plans/session-02.md` for the full contract.
 
-**Action**: complete R1 remediation (plan v2 + decision-doc 0001
-amendment for v1→v2 migration framework reschedule + new DN-013 /
-DN-014 / TD-004 filings); fire plan-review Round 2; if R2 surfaces
-no CRITICAL-class regressions, begin implementation per the plan's
+**Action**: **READY FOR IMPLEMENTATION.** Plan-review Rounds 1, 2, 3
+all fired; v3 + targeted R3 remediation landed; remaining R3 design-class
+CRITICALs filed as TD-005/006/007 with binding triggers for session-02
+implementation to address inline as code is written. Begin
+implementation per `docs/plans/session-02.md § Deliverables`
 sequencing (Deliverable 0 pre-flight first, then Deliverables 1-7).
 
 **Status**: 63 tests passing on main (carried from session 01). No
-new code yet; session 02 is in the plan-review phase (pre-code per
-`docs/quality-assurance.md § Plan-review protocol`).
+new code yet; plan-review phase complete (R1 + R2 + R3 + targeted R3
+remediation). 8 plan-review commits land on session-02 branch:
+- `b377aed` — plan v1
+- `<sha1>` — R1 artifact + session-state cleanup + cross-doc fixes + plan v2
+- `<sha2>` — R2 artifact + cross-doc DN-016/017/018 + TD-004 + plan v3
+- `<sha3>` — R3 artifact + targeted R3 remediation (plan v3.1) + TD-005/006/007
+
+**Plan-review history (3 rounds; diminishing-returns observation)**:
+R1 surfaced 16 CRITICAL + 17 HIGH + 14 MEDIUM + 9 LOW; v2 closed
+most. R2 surfaced 9 CRITICAL + 14 HIGH + 12 MEDIUM + 6 LOW (mostly
+regressions inside R1 remediation); v3 closed most. R3 surfaced 7
+CRITICAL + 9 HIGH + 8 MEDIUM + 4 LOW (mostly regressions inside R2
+remediation including the R2-T1 phantom-ID anti-pattern reborn at
+R3 level — orchestrator self-criticism); v3.1 + TD-005/006/007
+addressed inline + via TD-with-binding-trigger respectively.
+
+**R4 NOT fired** — per agent consensus across R3, "R4 not required
+if R3 remediation cleanly closes R3 CRITICALs." Targeted R3
+remediation landed the audit-trail corrections (R3-T1 phantom IDs;
+R3-T2 fabricated LibRaw symbol) + critical lint coordination
+(R3-T3 panic-lint allow + cfg!(debug_assertions) gate; R3-T4
+trybuild dep coordination) + design fixes (R3-T5 SensorBitDepth
+constructor; R3-T7 assert.success contract clarification; R3-T8
+sanitize-check preview descent; R3-T11 Acceptance 8 wording) and
+filed TD-005/006/007 for the remaining design items (RawDecodeCause
+dispatch; PathBuf empty-path) — session 02 implementation will
+surface and close those in real code.
 
 ---
 

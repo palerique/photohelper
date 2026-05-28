@@ -107,13 +107,12 @@ CVE-clean.
     `libraw_close`, `libraw_strerror`.
   - Accessors: `libraw_get_iwidth`, `libraw_get_iheight`,
     `libraw_get_cam_mul`, `libraw_get_pre_mul`, `libraw_get_rgb_cam`,
-    `libraw_get_color_maximum`, `libraw_get_iparams`,
-    `libraw_get_cdesc` (CFA pattern string).
-- **`unsafe_code` discipline (per PR1-T21 + R2-S2 syntax fix)**:
+    `libraw_get_color_maximum`, `libraw_get_iparams` (returns `libraw_iparams_t` struct whose `cdesc[4]` field carries the per-channel color-naming string AND whose `filters` field carries the 2x2 CFA mosaic bitmask — use `LIBRAW_COLOR(filters, row, col)` recipe for `CfaPattern` discrimination per R3-T2 correction; `libraw_get_cdesc` is NOT a real symbol).
+- **`unsafe_code` discipline (per PR1-T21; Cargo lint-syntax constraint per R3-M2 — verified against [Cargo manifest reference](https://doc.rust-lang.org/cargo/reference/manifest.html#the-lints-section))**:
   - `crates/photohelper-raw/Cargo.toml [lints]` REMOVES `workspace = true`
-    and ADDS explicit per-key: `[lints.rust] unsafe_code = { level = "allow", priority = 1 }` + restated workspace-inherited lints (`missing_docs = "warn"`) since Cargo lint inheritance does NOT merge with per-key overrides.
+    and ADDS explicit per-key: `[lints.rust] unsafe_code = { level = "allow", priority = 1 }` + RESTATES every workspace lint (`missing_docs = "warn"` from `[lints.rust]`; `pedantic`, `unwrap_used`, `expect_used`, `panic`, `indexing_slicing`, plus the existing allow overrides from `[lints.clippy]`) explicitly per-crate. Cargo lint inheritance does NOT merge with per-key overrides per the [Cargo manifest reference](https://doc.rust-lang.org/cargo/reference/manifest.html#the-lints-section); restating preserves R2-T8's intent (no enforcement loss on clippy lints).
   - `src/ffi.rs` head: `#![deny(unsafe_op_in_unsafe_fn)]` — every `unsafe fn` body still requires inner `unsafe { ... }` with `// SAFETY:` comment.
-  - `src/exif.rs`, `src/decode.rs`, `src/lib.rs` heads: `#![forbid(unsafe_code)]` (NOT `deny`; per R2-T8 the `forbid` ratchet cannot be downgraded by inner attributes, so new modules accidentally adding `unsafe` fail at compile time).
+  - `src/exif.rs`, `src/decode.rs`, `src/lib.rs` heads: `#![forbid(unsafe_code)]` (NOT `deny`; the `forbid` ratchet cannot be downgraded by inner attributes, so new modules accidentally adding `unsafe` fail at compile time).
   - Workspace `Cargo.toml` `[workspace.lints.clippy]` adds `undocumented_unsafe_blocks = "deny"`.
   - **CI grep gate** (defense-in-depth for new files inheriting crate-level
     `allow`): `just ci` runs `! rg "unsafe\s*\{|unsafe\s+fn" crates/photohelper-raw/src/ --glob '!ffi.rs'` and fails if any match.
@@ -263,7 +262,19 @@ pub struct SensorLevels {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SensorBitDepth(u8);  // constrained 8..=16
+pub struct SensorBitDepth(u8);  // constrained 8..=16 via SensorBitDepth::new
+
+impl SensorBitDepth {
+    pub(crate) fn new(bits: u8) -> Result<Self, Error> {
+        if !(8..=16).contains(&bits) {
+            return Err(Error::RawInvalidBitDepth { value: bits });
+        }
+        Ok(Self(bits))
+    }
+    pub fn get(&self) -> u8 { self.0 }
+}
+// Per R3-T5: SensorLevels::new must call bit_depth.get() (NOT bit_depth.0).
+// Add Error::RawInvalidBitDepth { value: u8 } variant to the Error enum.
 
 impl SensorLevels {
     pub(crate) fn new(black: u16, white: u16, bit_depth: SensorBitDepth) -> Result<Self, Error> {
@@ -376,7 +387,8 @@ Per PR1-T2 (5-way CRITICAL) + R2-T7 (Error::Exif coordination) + R2-T13
 
 ```rust
 // in photohelper-raw::Error (NOT photohelper-core; keeps core
-// storage-agnostic and free of LibRaw transitive dependency per R2-T26)
+// storage-agnostic and free of LibRaw transitive dependency — R1
+// strength preserved; cross-ref session-01 R2 "core → ⊥" claim)
 #[non_exhaustive]
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -498,10 +510,8 @@ smaller decision-doc. File at `docs/adr/0002-libraw-lgpl-static-link-mechanics.m
     mandatory ISO-BMFF container metadata: `[File]:FileType`,
     `[File]:FileSize`, `[ExifTool]:ExifToolVersion`, etc.). Any other
     tag → CI fails.
-  - `exiftool -ee -G -a` (extract embedded) on every fixture produces
-    ONLY the asserted survivor set; NO `[IFD0:Preview]` GPS / owner / serial.
-  - `exiftool` version pinned to a specific point release for reproducibility (e.g. `exiftool 12.96`); pin recorded in
-    `sanitize-check.sh` + verified via `exiftool -ver`.
+  - **Two-stage embedded-preview check** (per R3-T8): `exiftool -ee` does NOT actually descend into IFD0:Preview embedded JPEGs in CR3 (per ExifTool docs, `-ee` extracts from EPS/PDF/JPEG MPF/AVCHD streams, not from embedded-preview-JPEG inside a CR3). The sanitize-check MUST: (1) `exiftool -b -PreviewImage "$fixture" > /tmp/preview.jpg 2>/dev/null || true`; (2) if `/tmp/preview.jpg` is non-empty, run `exiftool -G -a /tmp/preview.jpg` and assert it contains ONLY the asserted-survivor tag set (same allow-list). Without (2), GPS/owner data in the preview JPEG ships unsanitized despite the parent CR3 being clean.
+  - `exiftool` version pinned to a specific point release for reproducibility (e.g. `exiftool 13.06`); pin recorded as a hard equality check in `sanitize-check.sh`: `[ "$(exiftool -ver)" = "13.06" ] || { echo "exiftool version mismatch"; exit 1; }`.
 - **`fixture_is_real_cr3` helper (PR1-T13)**:
   `tests/common/fixtures.rs::fixture_is_real_cr3(path)` verifies file
   is ≥1 MB AND first 16 bytes do NOT start with the LFS pointer magic
@@ -529,7 +539,8 @@ unused_crate_dependencies lint` containing ALL of:
 3. `Cargo.toml [workspace.dependencies] kamadak-exif = "0.6"` line removed.
 4. `crates/photohelper-cli/Cargo.toml` per-crate `kamadak-exif.workspace = true` line removed.
 5. `crates/photohelper-cli/tests/cli.rs` JPEG-path test deleted.
-6. `Cargo.toml [workspace.lints.rust]` adds `unused_crate_dependencies = "warn"` (closes R2-T26).
+6. `Cargo.toml [workspace.lints.rust]` adds `unused_crate_dependencies = "warn"`.
+7a. **`crates/photohelper-core/Cargo.toml` removes the unused `trybuild.workspace = true` dev-dep declaration** (closes R3-T4: the lint added in item 6 would otherwise fire on this existing declaration; per `photohelper-core/Cargo.toml:31`'s "declared but unused in this session" comment, the dep was scaffolded for DN-008 row 6 which now lands separately under Deliverable 6d's `trybuild` test). When the row-6 trybuild test lands (Deliverable 6d), it re-declares `trybuild.workspace = true` in the SAME commit that consumes it.
 7. `docs/discovery-notes.md § DN-006 Status` updated to "kamadak-exif removed in session 02; replaced by LibRaw for the only RAW format in v0.1."
 
 All 7 in one commit so `just ci` is green at every commit boundary.
@@ -675,7 +686,7 @@ At session-end (NOT this commit), append `§ History` entry to
 > EXIF columns now populated; schema shape unchanged; NULL semantics as
 > described in plan v3 Deliverable 5b."
 
-**Test plan row (per R2-M7 + R2-PT7)**: session-end verifies the History
+**Test plan row (per R2-M7; R3-T1 dropped phantom `R2-PT7`)**: session-end verifies the History
 entry exists via grep on the decision doc.
 
 #### Deliverable 6 — Test infrastructure (DN-008 subset + R2-T18 + R2-M8)
@@ -712,20 +723,31 @@ startup; absent → normal behavior).
 
 ```rust
 fn heartbeat_loop(stop_flag: Arc<AtomicBool>, granularity: Duration) {
-    let panic_on_first_tick = std::env::var("PHOTOHELPER_HEARTBEAT_PANIC_FOR_TESTING")
+    // Per R3-T3: env-var read gated on cfg!(debug_assertions) so release
+    // builds cannot be DoS'd by accidental env-var export.
+    let should_panic = cfg!(debug_assertions) && std::env::var("PHOTOHELPER_HEARTBEAT_PANIC_FOR_TESTING")
         .map(|v| v == "1")
         .unwrap_or(false);
+    // Note (per R3-M11): strict "1"-only contract; "true"/"yes"/"on"/etc
+    // silently parse to false. Documented in rustdoc on heartbeat_loop.
+    let mut tick = 0u32;
     loop {
         // ... existing tick logic ...
-        if panic_on_first_tick {
+        if should_panic && tick == 0 {
+            #[allow(clippy::panic, reason = "R3-T3 TD-005: env-var-triggered test affordance; debug_assertions gate prevents release DoS")]
             panic!("heartbeat death triggered by PHOTOHELPER_HEARTBEAT_PANIC_FOR_TESTING");
         }
+        tick += 1;
     }
 }
 ```
 
 R2-T18 4-of-4 closure verified via subprocess integration test:
-`Command::cargo_bin("photohelper").env("PHOTOHELPER_HEARTBEAT_PANIC_FOR_TESTING", "1").args(...).assert().stderr(contains("heartbeat death triggered"))`.
+`Command::cargo_bin("photohelper").env("PHOTOHELPER_HEARTBEAT_PANIC_FOR_TESTING", "1").args(...).assert().success().stderr(contains("heartbeat-death-WARN"))`.
+
+**Per R3-T7 (panic vs exit-code contract)**: the heartbeat thread panics; the parent process catches the panic via `JoinHandle::is_finished()` check at end-of-run (existing pattern from R1.T2); parent emits `WARN event="heartbeat-death-WARN"` to stderr and exits 0 (degraded-continue contract). Test assertion uses `.success()` because the parent process survives; substring assertion is on the PARENT-emitted WARN tag (not the panic-site message which may be lost depending on `panic = "unwind"` vs `panic = "abort"` profile config).
+
+**Per R3-T2 sibling (env-var DoS guard against accidental export)**: the env-var is read only when `cfg!(debug_assertions)` is true — release builds compile out the env-var read entirely, so a contributor exporting `PHOTOHELPER_HEARTBEAT_PANIC_FOR_TESTING=1` in production environments has no effect. Test environments use debug builds (default `cargo test`) which honor the env-var.
 
 ##### 6d — DN-008 row coverage (per PR1-T3)
 
@@ -864,24 +886,29 @@ trigger updated at session-end to "next session that touches
      ADR-0002 with the actual version + SHA-256.
 
 8. **No `*_for_testing` method appears in the release-build binary
-   symbol table** (per PR1-T15 + R2-T18). CI gate: a new
-   `scripts/check-no-test-helpers.sh` runs `nm target/release/photohelper`
-   (or `dumpbin /symbols` on Windows) and fails if any symbol matches
-   `*_for_testing`. Workspace lint additionally forbids
-   `cfg(any(test, feature = ...))` patterns to close the escape hatch.
+   symbol table** (per PR1-T15 + R2-T18). Two-pronged CI gate runs from
+   `just ci` (NOT a Rust lint — per R3-T11 correction; no rustc/clippy
+   lint exists that pattern-matches `cfg(any(test, feature = ...))`):
+   - **Symbol-table scan**: `scripts/check-no-test-helpers.sh` runs
+     `nm target/release/photohelper` (Linux/macOS) OR
+     `dumpbin /symbols target/release/photohelper.exe` (Windows) and
+     fails if any symbol matches `*_for_testing`.
+   - **Source-text grep gate**: `! rg "cfg\\(any\\(test, feature" crates/`
+     fails if any crate uses the `cfg(any(test, feature = "..."))`
+     escape-hatch pattern (closes at source-text level).
 
 ### Test plan
 
 | Deliverable | Unit | Integration |
 |-------------|------|-------------|
 | **Deliverable 0 — Pre-flight** | n/a | Manual `docs/analysis/ANL-001`: per-file pass/fail for 371-CR3 set + CVE-posture-as-of-pin. ABORT trigger: >5% failure OR any open CVE on chosen LibRaw version. |
-| **LibRaw build-system** | n/a | CI matrix `linux-x86_64` + `macos-arm64` builds clean. Static-link assertion (per R2-M10): `! nm -D target/release/photohelper 2>/dev/null \| grep -q ' U libraw_'` on Linux; `! otool -L target/release/photohelper \| grep -q 'libraw'` on macOS. Build.rs SHA-256 verification fires on tampered tarball. Missing-cmake error path: `build.rs` factored into `fn detect_cmake() -> Result<PathBuf, ToolchainError>` library function; unit-test with mocked `which`-style lookup (per R2-PT3). |
+| **LibRaw build-system** | n/a | CI matrix `linux-x86_64` + `macos-arm64` builds clean. Static-link assertion (per R2-M10): `! nm -D target/release/photohelper 2>/dev/null \| grep -q ' U libraw_'` on Linux; `! otool -L target/release/photohelper \| grep -q 'libraw'` on macOS. Build.rs SHA-256 verification fires on tampered tarball. Missing-cmake error path: `build.rs` factored into `fn detect_cmake() -> Result<PathBuf, ToolchainError>` library function; unit-test with mocked `which`-style lookup (per R2-M10 — corrected from phantom `R2-PT3`). |
 | **`photohelper-raw::ffi` path encoding** (PR1-T20) | NUL-byte interior → `Error::RawPath { reason: "interior-nul-byte" }`; NUL at first byte → same; non-UTF-8 path on Unix → typed error; emoji/CJK path on macOS APFS → `Ok`; symlink loop → `Error::RawPath`; Windows long path (>260 chars) → `\\?\`-prefixed `Ok`. **Plus happy-path: valid ASCII path → `Ok(RawPath)`** (R2-T4 boundary-pair coverage). | n/a |
-| **`photohelper-raw::ffi` LibRaw error-path table** | n/a | Per `RawExifCause` variant: `chmod 000` → `LibRawCallFailed { op: "libraw_open_file", libraw_code }`; CR2 fixture → `UnsupportedFormat { libraw_make, libraw_model }` (closes R2-PT8 wrong-format coverage); hex-edited CR3 with EXIF box zeros (via committed `tests/fixtures/cr3/gen_sad_path_fixtures.sh` per R2-T19) → `ExifFieldsMissing`; `ulimit -v` low + decode → `LibRawCallFailed { op: "libraw_unpack", libraw_code }` (resource exhaustion class); truncated CR3 → `LibRawCallFailed { op: "libraw_open_file" }`. |
-| **`photohelper-raw::exif::read_cr3` field conversions** | LibRaw stub (synthesized `RawExifFields`): trailing-NUL trim on `make`/`model`; `time_t = 0` / `i64::MAX` boundary on timestamp; **each of orientation 0/1/2/.../8/9 round-trips through `ExifOrientation::from_tag`** (per R2-PT4 — full domain coverage); `iwidth = 0` → `ExifMalformed { field: "width" }`; `iheight = 0` → `ExifMalformed { field: "height" }`; UTF-8-invalid bytes in `make` → typed error; UTF-8-invalid in `model` → typed error. | Real Canon R8 fixture: `make() == "Canon"`, `model() == "Canon EOS R8"` (or what LibRaw actually reports — recorded in ANL-001), `orientation() == ExifOrientation::Normal` (for known-orientation fixture), `capture_time_unix_seconds().is_some()`, `width().get() > 0`, `height().get() > 0`. |
+| **`photohelper-raw::ffi` LibRaw error-path table** | n/a | Per `RawExifCause` variant: `chmod 000` → `LibRawCallFailed { op: "libraw_open_file", libraw_code }`; CR2 fixture → `UnsupportedFormat { libraw_make, libraw_model }` (closes R2-M11 wrong-format coverage; corrected from phantom `R2-PT8`); hex-edited CR3 with EXIF box zeros (via committed `tests/fixtures/cr3/gen_sad_path_fixtures.sh` per R2-T19) → `ExifFieldsMissing`; `ulimit -v` low + decode → `LibRawCallFailed { op: "libraw_unpack", libraw_code }` (resource exhaustion class); truncated CR3 → `LibRawCallFailed { op: "libraw_open_file" }`. |
+| **`photohelper-raw::exif::read_cr3` field conversions** | LibRaw stub (synthesized `RawExifFields`): trailing-NUL trim on `make`/`model`; `time_t = 0` / `i64::MAX` boundary on timestamp; **each of orientation 0/1/2/.../8/9 round-trips through `ExifOrientation::from_tag`** (per R2-M11 — full domain coverage; corrected from phantom `R2-PT4`); `iwidth = 0` → `ExifMalformed { field: "width" }`; `iheight = 0` → `ExifMalformed { field: "height" }`; UTF-8-invalid bytes in `make` → typed error; UTF-8-invalid in `model` → typed error. | Real Canon R8 fixture: `make() == "Canon"`, `model() == "Canon EOS R8"` (or what LibRaw actually reports — recorded in ANL-001), `orientation() == ExifOrientation::Normal` (for known-orientation fixture), `capture_time_unix_seconds().is_some()`, `width().get() > 0`, `height().get() > 0`. |
 | **`photohelper-raw::decode::read_raw` shape + invariants** | `BayerPlane::new` rejects `data.len() != w*h`; `BayerPlane::row(h)` returns `None` (OOB; per R2-T5); `BayerPlane::pixel(w, h)` returns `None`; **`SensorLevels::new` rejects `black >= white`, `white - black < 256`, `white > (1<<bit_depth)-1`** (per R2-T6 expansion); **`WhiteBalance::from_libraw_cam_mul([0.0, 0.0, 0.0, 0.0])` returns `Err(WhiteBalanceUnloaded)`; `[NaN, 1.0, 1.0, 1.0]` returns `Err(WhiteBalanceInvalid)`** (per R2-T6); **`CamRgbToXyzD65Matrix::from_libraw_rgb_cam(identity_3x3)` returns `Err(ColorMatrixUnloaded)`; matrix with NaN entry returns `Err(ColorMatrixInvalid)`** (per R2-T6); `CfaPattern` derivable from each of the 4 valid `cdesc[4]` patterns. | Real Canon R8 fixture: `pixel_count == width * height`; `pixels[0..1000]` not all zero / not all `u16::MAX`; `levels.black() < levels.white()`; `matches!(cfa_pattern, CfaPattern::Rggb)`; `RawImage` peak RSS < 300 MB per worker via `getrusage(RUSAGE_SELF).ru_maxrss` post-decode (per R2-T16). |
 | **`From<RawExif> for ExifMetadata` conversion** | Field-by-field mapping unit test (in `photohelper-cli::commands::ingest`). | Covered by `parse_cr3_exif` integration tests. |
-| **`ingest` rewire** | Mock-free: `parse_cr3_exif(real_cr3_path)` returns `Ok(metadata)` with `make = "Canon"`. `ExifCompleteness::completeness()` returns `Full`/`Partial { missing }`/`Empty` per fixture inputs. **`apply_outcome(InsertedWithPartialExif(...), &mut stats)` asserts `stats.partial_exif == 1`** (per R2-PT2 — direct counter-wiring assertion). | **Happy path** (Acceptance 2a). **Sad paths (PR1-T29)**: `strict_mode_fails_on_unknown_camera_real_cr3` (CR3 with unrecognized Model — via committed `gen_sad_path_fixtures.sh`); `strict_mode_fails_on_libraw_error_real_cr3` (corrupted CR3); `strict_mode_fails_on_partial_exif_real_cr3` (hex-edited per `gen_sad_path_fixtures.sh`). Per R2-T19: fixture-generation script committed to repo so the sad-path edits are deterministic. |
+| **`ingest` rewire** | Mock-free: `parse_cr3_exif(real_cr3_path)` returns `Ok(metadata)` with `make = "Canon"`. `ExifCompleteness::completeness()` returns `Full`/`Partial { missing }`/`Empty` per fixture inputs. **`apply_outcome(InsertedWithPartialExif(...), &mut stats)` asserts `stats.partial_exif == 1`** (per R2-M6 — direct counter-wiring assertion; corrected from phantom `R2-PT2`). | **Happy path** (Acceptance 2a). **Sad paths (PR1-T29)**: `strict_mode_fails_on_unknown_camera_real_cr3` (CR3 with unrecognized Model — via committed `gen_sad_path_fixtures.sh`); `strict_mode_fails_on_libraw_error_real_cr3` (corrupted CR3); `strict_mode_fails_on_partial_exif_real_cr3` (hex-edited per `gen_sad_path_fixtures.sh`). Per R2-T19: fixture-generation script committed to repo so the sad-path edits are deterministic. |
 | **Narrowed `RAW_EXTS = ["cr3"]`** | n/a | Mixed-content directory with CR3 + ARW + NEF: walker walks all 3, ingests only CR3, counts other 2 under `skipped (non-RAW)`. |
 | **TD-002 rusqlite bump verification** | n/a | Per R2-M12 — 6 sub-tests: (1) PRAGMA WAL read-back; (2) roundtrip; (3) version_number ≥ 3_045_000; (4) concurrent connections no deadlock; (5) TransactionBehavior::Immediate rejects concurrent writes with SQLITE_BUSY; (6) params! type coercion roundtrip without truncation. |
 | **`Catalog::poison_for_testing`** | Three tests (per PR1-T15): poison_propagates_as_catalog_poisoned_error; poison_rollback_discards_panicked_workers_partial_insert; poison_recovery_admits_subsequent_inserts (drop-and-reopen — poison is permanent). | n/a |
@@ -891,7 +918,7 @@ trigger updated at session-end to "next session that touches
 | **DN-008 rows** | Per Deliverable 6d enumeration. | Row 17 (hardlink): `ingest` writes ONE row; stderr contains `hardlink-dedup` INFO at `-v`; **second SELECT confirms identical PhotoId for both paths** (per R2-M8). |
 | **Git LFS fixture sanity** (PR1-T13) | `fixture_is_real_cr3` helper unit: synthesized LFS pointer → `Err`; 1MB+ binary not starting with pointer → `Ok`. | All real-CR3 tests call `fixture_is_real_cr3` at top; failure ⇒ panic with actionable message. |
 | **Fixture EXIF sanitization (PR1-T11 + R2-T9)** | `tests/fixtures/sanitize-check.sh` allow-list lint: `exiftool -G -a -ee` on every `*.cr3` MUST contain ONLY the asserted-survivor tag set; any other tag → CI fails. Embedded-preview check via `exiftool -ee -G -a` MUST also be in the survivor set; NO preview-IFD GPS/owner. | n/a |
-| **Decision-doc 0001 § History entry** (per R2-PT7) | n/a | Session-end verifies `grep '## History' docs/decisions/0001-catalog-schema-v1.md` matches AND grep for `LibRaw landed in session 02` substring. |
+| **Decision-doc 0001 § History entry** (per R2-M7) | n/a | Session-end verifies `grep -E '## (History|Amendments)' docs/decisions/0001-catalog-schema-v1.md` matches AND grep for `LibRaw landed in session 02` substring. (Note per R3-M3: §5c appends to `§ Amendments` since that section already exists from the v1→v2 reschedule cross-doc commit; not a new `§ History` section.) |
 
 ### Checkpoints firing this session (Cadence A)
 
@@ -950,7 +977,7 @@ Session-02-specific sub-component reviews (Tier 4, 3-5 agents):
 | R2-T19 (128KB PhotoId test) | closed in session 01 | Test at `model.rs:770` (commit `681a3a2`). |
 | R2-T22 / R2-T23 (R1 count drifts) | unchanged | Cosmetic; not blocking. |
 | R2-M8 (silent ROLLBACK) | closed | Per Deliverable 6b. |
-| R2-T26 (`unused_crate_dependencies` lint) | closed | Per Deliverable 4a (atomic with kamadak-exif removal). |
+| R2-T26 → MAPPED TO R2-T8 (`unused_crate_dependencies` lint addition is bullet 6 of R2-T8's atomic 7-file commit shape) | closed | Per Deliverable 4a §4a items 6 + 7a (atomic with kamadak-exif removal AND atomic with photohelper-core/Cargo.toml trybuild dep removal — closes R3-T4 coordination). |
 
 ### Commit-scope convention (per PR1-T31)
 
@@ -995,6 +1022,6 @@ change project-wide convention; not adopted this session.
   - Rusqlite test sub-rows expanded to 6 (R2-M12).
   - Era-partitioning predicate documented (R2-M9).
   - DN-008 row 17 dedup assertion strengthened (R2-M8).
-  - LibRaw build-system `detect_cmake` library factoring + unit test (R2-PT3).
+  - LibRaw build-system `detect_cmake` library factoring + unit test (R2-M10 — corrected from R3-T1 phantom `R2-PT3`).
   - `IngestOutcome::InsertedWithPartialExif` payload simplified to `PhotoId` only (R2-M6).
   - Hardlink dedup test asserts PhotoId equality (R2-M8).
