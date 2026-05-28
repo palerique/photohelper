@@ -55,6 +55,7 @@
 - **Why it matters**: First session that writes catalog rows (session 01 for the `ingest` slice) needs at least a `photos` table; a half-baked schema becomes a migration headache.
 - **Owner**: session 01 (minimal schema) + session 02 (full schema once `cull` adds dup-group and culling-score tables).
 - **Status**: partially resolved 2026-05-28 — session 01 lands v1 single-table `photos` schema; authoritative spec at `docs/decisions/0001-catalog-schema-v1.md`. Session 02 still owes cull-score + dup-group tables + the migration framework v1 → v2 (per the decision doc's "Migration policy" section).
+  - **Update (2026-05-28, session 03 plan-review R1 remediation — PR1-T36)**: session 03 owns the v1→v2 migration + `cull_scores` table per decision-doc 0001 § Amendments 2026-05-28. `dup_groups` table deferred to session 04+ (DN-024). "Session 02" owner above crossed out; session 03 is the authoritative owner. DN-005 will be fully closed when session 03's PR merges.
 
 ### DN-006 — kamadak-exif cannot parse Canon R8 CR3 (both synthetic AND real CR3 fixtures) (2026-05-28, session 1; upgraded 2026-05-28 by DN-011)
 
@@ -178,3 +179,35 @@
 - **Owner**: future Quickstart-section refinement (session 03 docs-pass or whenever the README is touched next). One-paragraph addition under § Development would suffice.
 - **Binding trigger**: next README touch OR next operator-reported "no such file or directory" repro (informational tracking only).
 - **Status**: open (informational; no immediate harm beyond the user's confusion in this one session).
+
+### DN-022 — LibRaw demosaic algorithm selection for NIMA preprocessing (2026-05-28, session 03)
+
+- **Observed**: Session 03 adds `photohelper-raw::read_raw_rgb(path) -> Result<RgbImage>` via LibRaw's `dcraw_process` + `dcraw_make_mem_image` pipeline. LibRaw's default demosaic algorithm is AHD (Adaptive Homogeneity-Directed). NIMA was trained on consumer JPEGs produced by camera-native demosaic (typically a high-quality algorithm); the choice of demosaic algorithm may shift NIMA's score distribution slightly. LibRaw exposes alternative algorithms: AMaZE, AAHD, VNG4, DCB, and others via `imgdata.params.user_qual` (0=linear, 1=VNG, 2=PPG, 3=AHD, 11=AMaZE, 12=AAHD).
+- **Why it matters**: v0.1 uses the LibRaw default (AHD). If a future session's NIMA score distribution comparison vs. camera-native output shows systematic bias, the demosaic choice is the most likely cause. The develop pipeline (session 04+) may also want explicit algorithm selection for quality rendering.
+- **Owner**: session 04+ develop pipeline OR any session whose plan-review surfaces NIMA score bias as a quality regression. Cross-reference TD-012 (stop-gap for AHD default).
+- **Binding trigger**: session 04+'s first plan commit MUST include "demosaic algorithm selection for develop pipeline" as a §Deliverables item; if not, deferral rolls. Alternatively fires if NIMA score regression is documented in user feedback before session 04.
+- **Status**: open (informational; v0.1 uses LibRaw default AHD; TD-012 is the stop-gap tracker).
+
+### DN-023 — `cull_scores.photo_id` ON DELETE CASCADE absent from v2 schema (2026-05-28, session 03)
+
+- **Observed**: `cull_scores.photo_id REFERENCES photos(id)` with no `ON DELETE CASCADE`. In v0.1 there is no delete path for `photos` rows, so this is deliberately absent. If a future session adds photo deletion (`photohelper purge` or similar), orphan `cull_scores` rows would accumulate silently unless a delete path is also added to `cull_scores`. The FK *without* CASCADE means deletion of a `photos` row would fail (FK violation), which is actually a safer default for v0.1 — it prevents accidental orphaning.
+- **Why it matters**: If a delete path for photos is added, the `cull_scores` FK behavior must be explicitly decided: (a) `ON DELETE CASCADE` (scores auto-deleted with the photo), (b) `ON DELETE SET NULL` (scores orphaned for audit), or (c) keep the violating FK (the delete path must also clean `cull_scores` first). No correct answer exists without the delete use-case defined.
+- **Owner**: session that adds a delete path for `photos` rows. Decision-doc 0002 records this as a known open choice.
+- **Binding trigger**: first session whose plan includes `photohelper purge` or any `DELETE FROM photos` path. The plan-review for that session MUST include a resolution for `cull_scores.photo_id` FK behavior.
+- **Status**: open (informational; no v0.1 delete path exists; documented in decision-doc 0002).
+
+### DN-024 — MobileCLIP dup-detection compute deferred to session 04+ (2026-05-28, session 03)
+
+- **Observed**: Session 02's plan originally scoped `dup_groups` as a v2 schema table. Session 03 plan-review Round 1 (PR1-T30) found the table was under-specified (no dimension, no float-format, no model-identity column) and would ship with no writer — a schema-only stop-gap with no current value. Per decision-doc 0001:129 ("A single-statement migration doesn't justify framework overhead"), shipping a table with zero consumers also violates the spirit of the v2 migration: every table in v2 should have at least one producer session 03 can point to.
+- **Why it matters**: When MobileCLIP (or an alternative embedding model) arrives in session 04+, the schema design can be done correctly with the consumer's actual shape known. A premature schema must be migrated again (v3+), wasting a migration slot. Session 03 ships only `cull_scores` in v2.
+- **Owner**: session 04+ that adds the MobileCLIP producer. That session's plan MUST include: embedding table schema (`model_slug TEXT`, `dim INTEGER`, `quantization TEXT`, `embedding BLOB`), dimension validation at insert time, `dup_clusters` table for group assignment (separate from per-photo embeddings), and `v2→v3` migration.
+- **Binding trigger**: session 04+'s first plan commit IF MobileCLIP dup-detection is in scope for that session. If not, defers until the session that introduces the first embedding producer.
+- **Status**: open (dup_groups deferred from session 03 per PR1-T30 remediation; schema will be defined when the compute arrives).
+
+### DN-025 — NIMA cross-platform score tolerance (apple-silicon vs Linux x86_64) (2026-05-28, session 03)
+
+- **Observed**: ort CPU inference is deterministic per binary (same arch, same model, same ort version → same f32 output). However, f32 arithmetic is NOT bit-identical across CPU architectures: apple-silicon (arm64) and Linux x86_64 may produce NIMA scores differing by ~1e-3 due to FMA instruction presence/absence, SIMD lane ordering, and compiler vectorization differences. The golden-vector fixture committed on apple-silicon will not match the x86_64 CI score exactly.
+- **Why it matters**: If the Linux x86_64 CI runner asserts `score == golden` (exact), the test flakes non-deterministically across ort RC updates that change instruction scheduling. Session 03 mitigates with: (a) `±1e-3` tolerance on apple-silicon golden, (b) band assertion `score ∈ [3.0, 9.0]` on Linux x86_64 CI (based on actual D0 fixture scores ± safety margin). This is a known limitation of cross-arch f32 inference.
+- **Owner**: session that adds a second target architecture to CI (e.g., Linux arm64 or Windows x86_64). That session must extend the golden-vector fixture or switch to distribution-based assertions (e.g., assert that the score percentile within the NIMA training distribution is within ±5th percentile across architectures).
+- **Binding trigger**: first session adding a second native CI runner OR a user bug report of NIMA test flaking on a specific arch. OR by 2027-01-01 if the band assertion on Linux x86_64 CI fails 3+ consecutive runs (likely means the band is too tight for the chosen model's score range).
+- **Status**: open (informational; session 03 mitigates with tolerance + band; cross-arch full convergence deferred).
