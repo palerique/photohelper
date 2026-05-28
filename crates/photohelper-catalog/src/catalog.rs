@@ -35,6 +35,13 @@ const INSERT_PHOTO_SQL: &str = "INSERT INTO photos (
 const LOCK_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// Outcome of [`Catalog::upsert`] for an `IngestStats` driver.
+///
+/// NOT `#[non_exhaustive]` for v0.1 — adding the attribute now would
+/// force a wildcard arm into the cross-crate match in
+/// `photohelper-cli::commands::ingest::ingest_one`, which kills
+/// exhaustive-match safety. When `InsertedWithPartialExif` lands
+/// (plan §4e enhancement, deferred from D4), the `#[non_exhaustive]`
+/// attribute lands in the same commit alongside the wildcard arm.
 #[derive(Debug, PartialEq, Eq)]
 pub enum UpsertOutcome {
     /// Brand-new row inserted (no prior at this source_path).
