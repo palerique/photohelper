@@ -7,42 +7,34 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 1 (`cli-skeleton-and-ingest` — 2026-05-28) —
-**SHIPPED** via PR #1, merge commit `c120819` on `main`. Full
-session-end double-review (R1 + R2) plus remediation landed inside the
-branch; harness sync from fox/eng-protocol bundled. Session 01
-post-merge two-block handoff was NOT rendered (process-gap; recorded
-here for the audit trail).
+**Last session**: 2 (`libraw-cr3-decode` — 2026-05-28) — **SHIPPED**
+via PR #2, merge commit `67bd882` on `main` (LibRaw FFI for Canon R8
+CR3: EXIF + decode, atomic kamadak-exif removal, vendored LibRaw
+0.22.1, Git LFS CC0 fixtures + integration tests). Two operator
+follow-up sub-sessions also shipped: PR #3 merge `2f22094` (cleanup
+script + `just clean-catalog`) and PR #4 merge `1d31316` (list script
++ `just list-catalog`). Session 02 post-merge two-block handoff WAS
+rendered (per the previous context window's session-end response).
 
-**Current session**: 2 (`libraw-cr3-decode`, branch
-`session-02/libraw-cr3-decode`). Plan v1 committed at `b377aed`;
-plan-review Round 1 fired and artifact landed at
-`docs/code-reviews/session-02-plan-round1.md` (16 CRITICAL + 17 HIGH
-+ 14 MEDIUM + 9 LOW); R1 remediation in flight (plan v2 next).
+**Current session**: none — ready for session 03. The branch
+`session-02/libraw-cr3-decode` was deleted by `gh pr merge
+--delete-branch` after merge.
 
-**Goal** (session 2): land LibRaw FFI for Canon R8 CR3 — EXIF read
-(the DN-011 critical-path remediation: kamadak-exif fails 370/370 real
-CR3s, making `--strict` effectively unusable until LibRaw lands) AND
-RAW pixel decode (the originally-scoped session-02 deliverable).
-Rewire `ingest_one` for LibRaw EXIF; flip DN-006 integration tests
-to pass on real CR3 fixtures; bundle TD-002 rusqlite 0.32 → 0.40 bump
-(voluntary; calendar trigger 2026-08-01); fold in DN-008 row subset
-(rows 6, 17, 39, 42, 43, 49) + R2-T18 WARN regressions. See
-`docs/plans/session-02.md` for the full contract.
+**Goal** (next session — session 03): pick from the TD backlog (TD-002
+full rusqlite bump after an MSRV bump; TD-009 sanitize-check stage 2;
+TD-010 Deliverable 6 test infrastructure carry-over; TD-011 deferred
+session-02 8-agent multi-agent review) OR begin session 03's planned
+scope (AI culling skeleton per DN-005, OR the catalog
+`v1 → v2` migration framework for the upcoming `cull-score` +
+`dup-group` tables). Stub-message audit (the `photohelper camera` /
+`develop` / `export` / `run` / `models` / `cull` subcommands all
+still say "planned for session 02" — drift that needs a one-line fix
+in each). See the `goals` block of the next session's plan when
+authored.
 
-**Action**: **READY TO SHIP.** Every Deliverable 0-7 sub-goal landed
-on `session-02/libraw-cr3-decode` across 13 commits today. The session
-GOAL (LibRaw FFI for Canon R8 CR3 — EXIF read + RAW pixel decode) is
-fully met end-to-end: `photohelper ingest "$HOME/Pictures/tests" --strict`
-produces `walked: 371, ingested: 370, unknown-camera: 0, no-exif: 0,
-errored: 0, exit 0` against the user's 370-CR3 corpus (was
-`walked: 371, ingested: 0, no-exif: 370` pre-session-02). DN-006 +
-DN-011 + DN-018 + DN-019 closed; TD-003 + TD-008 closed; TD-002 partial.
-Deliverable 6 (test infrastructure) + Deliverable 5's 6-sub-test
-verification + Deliverable 4's per-RawExifCause dispatch table /
-ExifCompleteness deferred via TD-010 / TD-011 (next, see below) /
-inline plan-deviation notes. Next: session-end ship workflow per
-`docs/session-handoff-format.md`.
+**Action**: **SHIPPED.** Session 02 + two sub-session follow-ups all
+on `main`. Next session-start writes `docs/plans/session-03.md` and
+declares the session 03 goal; nothing currently in-flight on a branch.
 
 **Status**: `just ci` GREEN end-to-end on apple-silicon. 118 workspace
 tests pass; libraw.a builds in ~30s on a clean checkout. End-to-end

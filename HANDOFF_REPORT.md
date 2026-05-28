@@ -417,3 +417,41 @@ gh pr merge --merge --delete-branch
 ```
 
 Then render the two-block session handoff per `docs/session-handoff-format.md` in the PR review thread.
+
+---
+
+## Checkpoint 6 — session 02 + two operator sub-sessions all SHIPPED on main (2026-05-28)
+
+**Status**: SHIPPED. PR #2 merged at `67bd882`; PR #3 merged at `2f22094`; PR #4 merged at `1d31316`. All three on `main`. Working tree clean. CI green.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code, continuing from Checkpoint 5)
+
+### What landed since Checkpoint 5
+
+Two operator-requested follow-ups to session 02, each shipped as its own tiny sub-session PR per `CLAUDE.md § Branch-name convention` (decimal-suffix sub-sessions for tiny chores too small for a full session number):
+
+* **PR #3 — `session-02.5/cleanup-catalog-script`** (merge `2f22094`).
+  Adds `scripts/photohelper-clean-catalog.sh` (safe-by-default catalog wipe; dry-run unless `--yes`; refuses to clean directories without a `catalog.db` typo-guard) + `just clean-catalog <args>` recipe + README `Reset a catalog` quickstart section. Triggered by the user asking how to reset the catalog when the bare `rm -rf .photohelper` recipe was the only existing option.
+* **PR #4 — `session-02.5/list-catalog-script`** (merge `1d31316`).
+  Adds `scripts/photohelper-list-catalog.sh` (read-only SQLite inspector with four modes: `--list` default, `--count`, `--by-camera`, `--paths-only`; supports `--all` / `--limit N` / `--sort capture|path|ingested` / `--catalog <db-path>`) + `just list-catalog <args>` recipe + README `List ingested photos` quickstart section. Schema-sanity check refuses to query a DB without a `photos` table. Triggered by the user asking how to list already-ingested files.
+
+### Discovery findings from these sub-sessions
+
+* **Stub-subcommand documentation drift**: every stubbed CLI subcommand (`camera`, `cull`, `develop`, `export`, `run`, `models`) still emits `"planned for session 02"` even though session 02 shipped without implementing them. Plan-§7 polish committed `KnownCamera::Display` + `UpsertOutcome::#[non_exhaustive]` but missed this drift. Worth a one-line message update in each stub source file as session 03's first chore commit (very small).
+* **Two-shell PATH drift footgun**: the user's interactive zsh hit `zsh: no such file or directory` for a script that exists on disk + main — most likely because their terminal's shell hadn't pulled the merged PR yet. The current Quickstart doesn't surface "remember to `git pull` after a sub-session merge if you're using both Claude Code and a separate terminal."
+
+### Why I'm checkpointing now
+
+User invoked `/session-pause` to roll the context window. The skill mandates ledger updates + commit + a restart-prompt block. The skill's literal "commit" step couldn't apply on `main` per CLAUDE.md's never-commit-to-main rule, so this commit lands as its own tiny `session-02.5/ledger-catchup-post-ship` PR — the smallest possible PR that records the post-ship audit trail.
+
+### Precise next steps when context restored
+
+1. **Read `SESSION-STATE.md`** — the Last-session / Action / Goal blocks now reflect session 02 + sub-sessions SHIPPED, not "READY TO SHIP".
+2. **Read this Checkpoint 6** (you're here).
+3. **Read `git log --first-parent main`** to see the merge history (`67bd882` session 02 + `2f22094` cleanup + `1d31316` list).
+4. **Begin session 03** per the standard session-start protocol:
+   ```bash
+   git switch main && git pull --ff-only origin main \
+     && git switch -c session-03/<kebab-slug> \
+     && just session-start
+   ```
+   Author `docs/plans/session-03.md`, run plan-review, then implementation. See `SESSION-STATE.md § Goal` for the candidate scope (TD backlog or new feature work) and the open stub-subcommand drift item as a quick-win first commit.
