@@ -33,7 +33,8 @@ just ci                 # everything CI runs (fmt-check, lint, test, audit, veri
 - **v0.1 (AI-first MVP)** — Canon R8 (CR3) ingest, AI culling (NIMA/ARNIQA
   quality + SCRFD/MediaPipe face & eye-state + MobileCLIP dup grouping → auto
   1-5 star rating), classical develop (demosaic, WB, exposure, tone curve),
-  SCUNet RGB denoise, JPEG export with long-edge resize + watermarks, XMP
+  AI RGB denoise (model TBD pending session-04 plan-review), JPEG export
+  with long-edge resize + watermarks, XMP
   sidecars (Lightroom-compatible `crs:` + private `ph:`).
 - **v0.5** — Canon R5 / R6 II profiles, semantic scene classification, AI
   sharpen (Real-ESRGAN ×2-then-downsample), DirectML/CUDA acceleration,

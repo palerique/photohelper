@@ -38,7 +38,7 @@
 
 ### What is not yet in place
 - No real application code yet — only stubs. The full v0.1 scope (AI culling,
-  SCUNet denoise, develop, export, watermark) ships across sessions 01-N per
+  AI denoise (model TBD pending session-04 plan-review), develop, export, watermark) ships across sessions 01-N per
   the bootstrap plan at
   `/Users/ph/.claude/plans/first-create-a-structure-warm-shell.md`.
 - No fixture CR3s committed yet; session 02 introduces a small CC0 RAW pack
