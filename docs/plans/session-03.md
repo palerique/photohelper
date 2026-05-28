@@ -107,9 +107,11 @@ semantics are verified empirically (PR1-T5 remediation)**.
     Runtime grep + ort GitHub Security Advisories for any open CVE
     affecting the chosen version. ABORT if any open CVE.
   - **§ NIMA model provenance**: source URL + author + license (must be
-    permissive: MIT / Apache-2.0 / CC-BY-4.0; reject CC-BY-NC or
-    research-only); SHA-256 verified; ONNX opset version; input shape;
-    output range.
+    permissive: MIT / Apache-2.0 / CC-BY-4.0). **ABORT if license is
+    not in {MIT, Apache-2.0, CC-BY-4.0}** (e.g. CC-BY-NC or research-only
+    → halt D0 through D4). **ABORT if model file SHA-256 cannot be
+    verified** (corrupted download or Git LFS corruption). Record SPDX
+    license ID; ONNX opset version; input shape; output range.
   - **§ Threading semantics (PR1-T5 remediation)**: spawn two rayon
     workers both calling `session.run()` on the same `Arc<Session>`;
     record whether it compiles and is deterministic. Verify whether
@@ -126,6 +128,11 @@ semantics are verified empirically (PR1-T5 remediation)**.
   - **§ Per-photo wall-clock**: measure actual decode + infer + downsample
     time on the two CC0 fixtures (acceptance criterion 3 is based on this
     measurement, not a fixed "30 min" bound).
+- **ABORT procedure**: if any D0 ABORT fires (open CVE, license violation,
+  SHA-256 failure, inference failure, threading incompatibility), session
+  03 narrows to D5 (TD-010 closure) + D6 (stub messages) + D7 (docs) only.
+  No ort dep is wired; no model binary is committed. File a blocker
+  discovery note and halt D0 through D4.
 - **Pre-flight output**: commit `crates/photohelper-ai/models/manifest.toml`
   skeleton (SHA-256 + source URL + license + opset + input-shape, all
   string-keyed by model name). Model binary (`models/<name>.onnx`)
@@ -134,6 +141,7 @@ semantics are verified empirically (PR1-T5 remediation)**.
   (Deliverable 0)` commit. **No D1d or D4 commit may land before this.**
 - **Verification surface**: commit message MUST include
   `cve-posture: clean (versus RustSec + OSV.dev YYYY-MM-DD)` AND
+  `license: <SPDX-id> (verified)` AND
   `inference: 2/2 fixtures, scores [a, b]` AND
   `threading: per-worker-session (option-b)`.
 
@@ -148,11 +156,10 @@ commits the model binary.
   - `[dependencies] ort = { workspace = true }` (workspace dep added).
   - Re-add `photohelper-core` workspace dep; add `photohelper-raw` for
     `RgbImage` input.
-  - Feature flag `default = ["ai-culling"]` (`ai-denoise` / `ai-sharpen`
-    stay deferred). Gate is for downstream crates wanting to skip ort
-    linkage (`default-features = false`); no v0.1 downstream consumer
-    exists yet. If the flag provides no current value, drop it and make
-    ort a hard dep — simpler. Decision at impl time.
+  - **No feature flag**: `ort` is a hard dependency. The `ai-culling`
+    gate is dropped (no v0.1 downstream consumer exists; per CLAUDE.md
+    "Don't design for hypothetical future requirements"). Add the gate
+    only when a downstream consumer needs `default-features = false`.
 - `crates/photohelper-ai/src/lib.rs`: replace stub with module
   declarations + crate-level rustdoc.
 - New `crates/photohelper-ai/src/error.rs`: domain `Error` enum
@@ -179,21 +186,28 @@ commits the model binary.
   - `fn load(&self, name: &str) -> Result<LoadedModel>` — resolves name
     to the bundled model file, calls `VerifiedModelBytes::from_manifest`,
     then `LoadedModel::from_verified`.
-- **`VerifiedModelBytes` type-state (PR1-T10 remediation)**: two-phase
-  constructor:
+- **`VerifiedModelBytes` type-state (PR1-T10 + T5 remediation)**: two-phase
+  constructor designed for per-worker Session reuse:
   1. `VerifiedModelBytes::from_manifest(model_dir: &Path, name: &str) ->
-     Result<Self>` — reads `manifest.toml`, reads model file, checks
-     SHA-256, returns typed-verified bytes. This is the attestation step.
-  2. `LoadedModel::from_verified(bytes: VerifiedModelBytes) ->
-     Result<Self>` — creates `ort::Session` from the verified bytes,
-     stores model metadata (input shape, output shape, opset). No
-     re-SHA-256-check at this point — the type system prevents unverified
-     bytes from reaching this constructor.
-- `LoadedModel` newtype wraps `ort::Session` (private) with model
-  metadata. Private fields; accessors for metadata only.
-- **`--model-path` is NOT in v0.1 scope.** Deferred per PR1-T27
-  (resolving the SHA trust boundary of user-supplied models is non-trivial;
-  see TD-015).
+     Result<Self>` — reads `manifest.toml`, reads model file into
+     `Arc<[u8]>`, checks SHA-256, returns typed-verified bytes wrapping
+     `Arc<[u8]>`. This is the attestation step. `model_dir` resolves to
+     `[binary-sibling-directory]/models/` for installed builds, or
+     `OUT_DIR/models/` for `cargo-test` runs (configurable via
+     `PHOTOHELPER_MODEL_DIR` env-var for tests).
+  2. `LoadedModel::from_verified(bytes: &VerifiedModelBytes) ->
+     Result<Self>` — takes a BORROW (not move); reads the `Arc<[u8]>` to
+     construct a new `ort::Session` via `SessionBuilder::commit_from_memory`.
+     Each rayon worker independently calls `LoadedModel::from_verified(&bytes)`
+     to get its own `ort::Session`. `VerifiedModelBytes::clone()` is cheap
+     (reference-counts the `Arc`).
+  3. `VerifiedModelBytes: Clone` (clones the `Arc`, not the bytes).
+  — This design allows N rayon workers each constructing their own
+  `ort::Session` from the same verified bytes without re-reading or
+  re-verifying the model file.
+- `LoadedModel` wraps `ort::Session` (private) with model metadata
+  (input shape, output shape, opset). Private fields; accessors only.
+- **`--model-path` is NOT in v0.1 scope.** Deferred per PR1-T27 (see TD-015).
 
 ##### 1c — NIMA scorer + new photohelper-raw entry point
 
@@ -205,25 +219,41 @@ Rust. PR1-T6 remediation: no `Scorer` trait; D4 takes concrete `&Nima`.)**
   `libraw_dcraw_process` + `libraw_dcraw_make_mem_image`. `RgbImage` type
   (analogous to existing `RawImage`) in `crates/photohelper-raw/src/decode.rs`
   exposes `width`, `height`, `pixels_rgb: Vec<u8>` (8-bit sRGB, 3 channels)
-  for NIMA preprocessing. File DN-023 (demosaic algorithm choice: v0.1
+  for NIMA preprocessing. File DN-022 (demosaic algorithm choice: v0.1
   uses LibRaw's default AHD; session 04+ develop pipeline may select
   AMaZE, AAHD, or VNG4). File TD-012 (stop-gap: AHD demosaic algorithm).
+  `RgbImage` constructor validates `pixels_rgb.len() == width * height * 3`
+  returning `Err(Error::RawImageDimensionMismatch)` on mismatch (analogous
+  to `BayerPlane::new` at `decode.rs:158-178`).
+  `assert_impl_all!(RgbImage: Send, Sync)` at module scope (required:
+  `RgbImage` crosses rayon worker threads).
+  Add `just nima-regenerate-golden` recipe to `justfile`: runs NIMA inference
+  on `tests/fixtures/cr3/CRAW_FULL_FRAME.CR3`, writes output distribution
+  to `crates/photohelper-ai/tests/fixtures/nima/golden_cr3_fixture1.bin`.
+  First run creates the file; subsequent runs overwrite (recovery path for
+  failing golden-vector test).
 - `crates/photohelper-ai/src/nima.rs`: `Nima` struct holds a
   `LoadedModel`; `Nima::score(rgb: &RgbImage) -> Result<NimaScore>` is
   the public entry. `NimaScore` newtype wraps `f32` constrained to
   `[1.0, 10.0]` (fallible constructor; reject NaN, ±∞, out-of-range).
-  - **NimaScore traits (PR1-T31 remediation)**: `Copy + Clone + Debug +
-    PartialOrd` (NOT `Eq` — f32 equality is floating-point, not natural
-    equality). `NimaScore::from_catalog_f64(f64) -> Result<Self>`:
-    separate saturating constructor for read-back from SQLite `REAL` column
-    (tolerates rounding-error push past boundary; analogous to `clamp_mtime`
-    at `model.rs:206`).
+  - **NimaScore traits (PR1-T31 + T23/T20 remediation)**:
+    `Copy + Clone + Debug + PartialOrd + Ord` (NaN rejected at construction
+    → total order guaranteed; `Ord` implementation:
+    `fn cmp(&self, other: &Self) -> Ordering { self.0.partial_cmp(&other.0).expect("NimaScore is NaN-free") }`
+    — avoids `unwrap_used = "warn"` clippy lint in downstream sort calls).
+    NOT `Eq` (f32 equality is floating-point, not natural equality).
+    `NimaScore::from_catalog_f64(f64) -> Result<Self>`: separate saturating
+    constructor for read-back from SQLite `REAL` column; emits
+    `tracing::warn!` when `|value - clamped| > 1e-6` (rounding-error
+    epsilon) so callers can detect catalog corruption vs. IEEE-754 round-trip
+    noise.
 - Preprocessing pipeline: `RgbImage` (from `read_raw_rgb`) → bilinear
   downsample to 224×224 → normalize per NIMA's ImageNet stats (mean
   `[0.485, 0.456, 0.406]`, std `[0.229, 0.224, 0.225]`; per ANL-002 §
-  NIMA model provenance). Optional `nima_postproc.rs` for the score-
-  distribution → single-scalar reduction (NIMA outputs a 10-bin
-  distribution; weighted mean gives the scalar).
+  NIMA model provenance). The 10-bin distribution → scalar weighted-mean
+  reduction is implemented as a private function in `nima.rs` (or optionally
+  extracted into `nima_postproc.rs` for readability — implementer's choice);
+  the reduction is required for every inference call.
 - **No `Scorer` trait in v0.1**. D4 takes a concrete `scorer: &Nima`
   parameter. Defer the trait to session 04 when ARNIQA lands as the
   second impl (per CLAUDE.md "don't design for hypothetical future
@@ -300,10 +330,26 @@ that rollback itself errors:
 block gets `foreign_keys = ON` appended). This is required for the
 `cull_scores.photo_id REFERENCES photos(id)` FK to be enforced.
 
-**Recovery integration test**: open a v1-catalog fixture with a partial
-`cull_scores` table (simulating a half-applied migration), call
-`Catalog::open`; assert it succeeds (idempotent re-run) and
-`user_version = 2`.
+**PRAGMA user_version transactionality**: `PRAGMA user_version = N` writes
+to the database header page (byte offset 60), which is covered by SQLite's
+WAL. It is therefore atomic with the `CREATE TABLE` statements in the same
+transaction. A crash before `tx.commit()` rolls back both the new tables
+and the version bump together. The two-transaction approach for fresh DBs
+(`init_schema` then `apply_v1_to_v2`) is crash-safe: a crash between them
+leaves `user_version = 1`, correctly handled by the `1 =>` arm on re-open.
+
+**Recovery integration test** (T16 remediation — construct state
+programmatically): in the test, open `v1.db`, directly execute
+`CREATE TABLE IF NOT EXISTS cull_scores (...)` via `conn.execute_batch()`
+without bumping `user_version`, then re-open via `Catalog::open`. Assert
+`user_version = 2` and no error — idempotent `IF NOT EXISTS` handles
+the already-existing table correctly.
+
+**Update existing test** (T8 remediation): `catalog.rs:499`
+`open_schema_version_too_new_returns_error` currently uses
+`PRAGMA user_version = 2`. After SCHEMA_VERSION bumps to 2, update to
+`PRAGMA user_version = 3` and assert
+`Error::CatalogSchemaTooNew { found: 3, expected: 2 }`. (~2 lines.)
 
 **Future**: when v3 migration arrives AND is non-trivial (multi-step or
 data-migrating), promote to a `Migration` trait + version-registry.
@@ -354,11 +400,19 @@ non-existent `photo_id`; assert the FK violation error is returned (not
 silently ignored).
 
 **Automated integration test (replaces manual REPL inspection)**:
-- Commit a v1-catalog fixture at `tests/fixtures/catalogs/v1.db`.
+- Commit a v1-catalog fixture at `tests/fixtures/catalogs/v1.db` (T11
+  remediation — creation method specified):
+  Add `just create-v1-fixture` recipe that creates the fixture
+  deterministically: open a new DB, execute `INIT_SQL` (from
+  `schema.rs`), insert one representative `photos` row, set
+  `PRAGMA user_version = 1`. v1.db is < 20 KB; committed directly to
+  Git (no LFS needed). Fixture lifecycle: persists across v3+ to test
+  chained migration; regenerate via `just create-v1-fixture` if v1
+  schema DDL changes.
 - Integration test: open the v1 fixture with `Catalog::open`, query
   `PRAGMA user_version` (assert = 2), query
   `SELECT name FROM sqlite_master WHERE type='table'` (assert `cull_scores`
-  present), assert an existing v1 `photos` row is preserved.
+  present), assert the existing v1 `photos` row is preserved.
 
 ##### 2c — Decision-doc 0002
 
@@ -370,6 +424,13 @@ silently ignored).
   MobileCLIP arrives).
 - Cross-link to ANL-002 (the NIMA model is what the `cull_scores` rows
   reference via `scorer`).
+- **(T9 remediation)** Amend `docs/decisions/0001-catalog-schema-v1.md`
+  §Migration policy lines 133-136: replace `"Vec<&'static dyn Migration>`
+  and a per-version applier; session 03 adds it + adds migration v1→v2
+  alongside the cull-score + dup-group tables"` with `"a match-arm extension
+  in Catalog::open (per decision-doc 0002; Migration trait deferred until
+  v3 migration is non-trivial); session 03 adds cull_scores table (dup_groups
+  deferred per DN-024)"`. (~3-line amendment.)
 
 #### Deliverable 3 — Fixture additions
 
@@ -379,21 +440,32 @@ silently ignored).
   — binary golden-vector fixture for inference-regression tests (the
   output distribution for one CR3); `just nima-regenerate-golden` recipe
   overwrites it.
-- **ONNX sanitize-check (PR1-T28 remediation)**: ONNX files are
+- **ONNX sanitize-check (PR1-T28 + T1 remediation)**: ONNX files are
   Protobuf-encoded; `exiftool` does not know ONNX fields. What ONNX files
   DO carry: `producer_name`, `doc_string`, `metadata_props` key-value
   strings which may leak training-environment absolute paths or internal
   identifiers. Extend `scripts/sanitize-check.sh` with an ONNX-aware
-  check:
+  check gated on `onnx` availability:
   ```bash
+  python3 -c "import onnx" 2>/dev/null \
+    || { echo "ERROR: onnx not installed (pip install onnx)"; exit 1; }
   python3 -c "import onnx; m = onnx.load('$ONNX_FILE');
     print(m.producer_name, m.doc_string, [str(p) for p in m.metadata_props])"
   ```
   Allow-list: `producer_name` in known frameworks (PyTorch, ONNX exporter,
   TensorFlow ONNX); reject absolute paths in `doc_string` or
   `metadata_props`; reject email addresses or internal hostnames.
+  **CI setup (T1 remediation)**: Add to `.github/workflows/ci.yml` test
+  job before the sanitize-check step:
+  ```yaml
+  - uses: actions/setup-python@v5
+    with: { python-version: '3.x' }
+  - run: pip install onnx
+  ```
+  Add `pip install onnx` to README § Development prerequisites.
 - Commit a pre-built v1 SQLite catalog fixture at
-  `tests/fixtures/catalogs/v1.db` for D2b's automated migration test.
+  `tests/fixtures/catalogs/v1.db` for D2b's automated migration test
+  (created via `just create-v1-fixture` per D2b spec).
 
 #### Deliverable 4 — `cull` subcommand rewire
 
@@ -405,12 +477,17 @@ duplicated in cull.rs.)**
 - `crates/photohelper-cli/src/commands/cull.rs` — new file (replaces
   inline stub in `main.rs`):
   ```rust
-  pub fn run_cull(catalog: &Catalog, scorer: &Nima, opts: &CullOpts)
-      -> Result<CullStats, Error>
+  pub fn run_cull(cli: &Cli, args: &CullArgs, scorer: &Nima)
+      -> anyhow::Result<u8>   // matches run_ingest(&Cli, &IngestArgs) pattern
   ```
-  No `Scorer` trait; concrete `&Nima`. This decision is correct for v0.1
-  (one scorer); session 04 introduces `Scorer` trait when ARNIQA is the
-  second impl.
+  No `Scorer` trait; concrete `&Nima`. No `CullOpts` struct (≤2 fields;
+  pass `&CullArgs` directly per the existing `run_ingest` precedent).
+  No `--threshold-warn` flag (deferred to session 05+ per §Out of scope).
+
+- **`CullStats` type (T3 remediation)**: uses `AtomicU64` for all per-photo
+  counters (parallel to `IngestStats` at `ingest.rs:87`). Shared via
+  `Arc<CullStats>` across rayon workers. `Ordering::Relaxed` is correct —
+  counters are only read after the rayon fork-join barrier completes.
 
 - **SELECT with supersede filter and source_path (PR1-T12 + PR1-T18)**:
   ```sql
@@ -420,13 +497,30 @@ duplicated in cull.rs.)**
     AND id NOT IN (SELECT photo_id FROM cull_scores WHERE scorer = ?1)
   ```
 
-- **ort concurrency model (PR1-T5)**: one `ort::Session` per rayon
-  worker thread (option b). Each worker constructs its own `Nima` from
-  the shared `LoadedModel`'s model bytes. No `Mutex` wrapping; no async.
-  This is verified by D0 §Threading semantics. Memory cost: N workers ×
-  ~50 MB model = ~400 MB on 8-core apple-silicon (acceptable for v0.1).
+- **ort concurrency model (PR1-T5 + T5 remediation)**: one `ort::Session`
+  per rayon worker thread (option b). Each worker calls
+  `LoadedModel::from_verified(&verified_bytes)` independently to construct
+  its own `ort::Session` from the shared `Arc<[u8]>` in `VerifiedModelBytes`
+  (no re-verification; no re-read from disk). No `Mutex` wrapping; no async.
+  Memory cost: N workers × ~50 MB model = ~400 MB on 8-core apple-silicon
+  (acceptable for v0.1). OOM diagnostic: if `inference_failed == num_workers`
+  at run completion, emit session-level WARN: "All N inference workers failed
+  at session init; if inference_failed matches worker count, check available
+  memory (N workers × ~50 MB each)."
 
-- **Per-photo error dispatch table (PR1-T13 + PR1-T14 remediation)**:
+- **Per-photo pipeline (T6 remediation — content_changed detection)**:
+  for each `(catalog_id, source_path)` row, BEFORE calling `read_raw_rgb`:
+  ```rust
+  let current_id = PhotoId::derive(&source_path)?;
+  if current_id != catalog_id {
+      stats.content_changed.fetch_add(1, Relaxed);
+      tracing::warn!(...);
+      continue; // skip; do not decode or score
+  }
+  ```
+  `PhotoId::derive` reads ~128 KB per file — negligible vs. full decode + inference.
+
+- **Per-photo error dispatch table (PR1-T13 + PR1-T14 + T7 remediation)**:
 
   | Error class | `CullStats` counter | `--strict` behavior |
   |-------------|---------------------|---------------------|
@@ -437,14 +531,23 @@ duplicated in cull.rs.)**
   | `read_raw_rgb` → `RawDecodeError` | `decode_failed` | FAIL if `decode_failed > 0` |
   | `read_raw_rgb` → file not found | `file_missing` | warn, skip (not a failure) |
   | re-derived PhotoId mismatch (content changed) | `content_changed` | warn, skip |
+  | FK violation (photo deleted between SELECT and INSERT) | `catalog_inconsistency` | warn, skip (not a strict failure) |
   | `cull_scores` row already exists | (skip, no counter) | no-op, not an error |
 
   Low aesthetic score does NOT fail `--strict` (it's a feature, not an
-  error — a 1.0-scoring photo is a valid result).
+  error — a 1.0-scoring photo is a valid result). FK violation maps
+  `ErrorCode::ConstraintViolation` from `insert_cull_score` to a skip
+  (one deleted row should not abort a 370-photo run).
 
-  Integration test per case (6 total: model-missing, SHA-mismatch,
-  per-photo decode fail, per-photo inference fail, file-missing, existing
-  score).
+  **Per-case test fixture construction (T13 remediation)**:
+  | Case | Fixture construction |
+  |------|---------------------|
+  | model-missing | `ModelRegistry::with_test_model_dir(empty_tempdir)` |
+  | SHA-mismatch | `with_test_model_dir(dir)` containing dummy `.onnx` + `manifest.toml` with wrong SHA-256 |
+  | per-photo decode fail | catalog row pointing at a `.txt` file (not a CR3) |
+  | inference-fail | `with_test_model_dir(dir)` containing a zero-byte `nima.onnx` (ort fails to parse → `InferenceFailed`) |
+  | file-missing | catalog row pointing at a non-existent path |
+  | existing score | pre-insert a `cull_scores` row before calling `run_cull` |
 
 - **TD-006 closed inline (PR1-T13 + PR1-T24)**: session 03 cull IS the
   TD-006 trigger consumer (first consumer of `decode::read_raw` /
@@ -459,8 +562,8 @@ duplicated in cull.rs.)**
 
 - `crates/photohelper-cli/src/commands/mod.rs` — register `cull` module;
   CLI clap subcommand wired with real opts (`catalog path` inherits,
-  `--scorer nima` default, `--threshold-warn <N>` for informational
-  output, `--strict` extension).
+  `--scorer nima` default, `--strict` extension).
+  No `--threshold-warn <N>` (deferred to session 05+ per §Out of scope).
 
 #### Deliverable 5 — TD-010 full closure (Deliverable-6 test infrastructure)
 
@@ -482,21 +585,33 @@ Per `TECH-DEBT.md § TD-010`, ship every sub-item:
       op: "rollback-after-worker-panic", source: Box::new(e) }),
   ```
   NOT matching on the message string (fragile across rusqlite versions).
-- **5c Heartbeat death test — restructured (PR1-T2 remediation)**: no
-  panic site ever in `heartbeat_loop`; the `cfg!(debug_assertions)` env-var
-  approach is dropped entirely.
+- **5c Heartbeat death test — restructured (PR1-T2 + T2 remediation)**:
+  no panic site ever in `heartbeat_loop`; the `cfg!(debug_assertions)` env-var
+  approach is dropped entirely. `force_heartbeat_panic_in_thread(handle:
+  &JoinHandle<()>)` is NOT implementable in safe Rust (`JoinHandle` has no
+  API to inject a panic into a running thread from outside). Instead:
   - **5c-i** Create `crates/photohelper-test-helpers` (dev-deps only)
-    with `pub fn force_heartbeat_panic_in_thread(handle: &JoinHandle<()>)`
-    helper. This crate is `[dev-dependencies]` only in
-    `photohelper-cli/Cargo.toml`. No env-var path added to production code.
-  - **5c-ii** Wire the heartbeat-death-WARN regression test via the
-    helper — subprocess integration test or in-process `is_finished()`
-    predicate. NO `panic!()` macro in `heartbeat_loop`. TD-005 closed.
-  - **5c E2E** (per PR1-T34 remediation): verify `photohelper-test-helpers`
-    is `[dev-dependencies]` only (not `[dependencies]`) via `cargo metadata
-    --format-version 1 | jq '.packages[] | select(.name == "photohelper-cli")
-    | .dependencies | map(select(.name == "photohelper-test-helpers"))'` and
-    assert `kind = "dev"`. No `objdump` needed.
+    with a `HeartbeatDeathTrigger` struct wrapping `Arc<AtomicBool>`. A
+    DEDICATED test thread (NOT `heartbeat_loop`) reads the flag and panics
+    when signalled. The test verifies the system's RESPONSE to a panicked
+    worker thread (Mutex poison recovery path), not a panicked heartbeat
+    thread. `heartbeat_loop` itself remains panic-free.
+  - **5c-ii** Wire the heartbeat-death-WARN regression test via the helper:
+    spawn the `HeartbeatDeathTrigger` thread; signal it; verify the WARN
+    fires and summary still prints via `JoinHandle::is_finished()` poll.
+    NO `panic!()` macro in `heartbeat_loop`. TD-005 closed.
+  - **5c E2E** (per PR1-T34 + T2 remediation): verify
+    `photohelper-test-helpers` is `[dev-dependencies]` only via
+    `cargo metadata --format-version 1 | jq '...'` and assert `kind = "dev"`.
+    No `objdump` needed.
+  - **D5e row 4 parameterization (T2 + PR1-T37 remediation)**: the
+    `[heartbeat-death-WARN]` test uses an env-var
+    `PHOTOHELPER_HEARTBEAT_POISON_TICKS=1` checked in the
+    `HeartbeatDeathTrigger` helper thread (NOT `heartbeat_loop`), causing
+    that thread to panic after N ticks. The subprocess integration test
+    spawns `photohelper ingest` (or `cull`) with this env-var set. The
+    parameterization over `[ingest, cull]` covers both subcommands' heartbeat
+    teardown paths. Production code remains panic-free.
 - **5d DN-008 6 rows** (relabeled from "DN-008 12 rows" per PR1-T29
   remediation — these are TD-010's 6-of-12-row subset; rows 12, 13, 14,
   18, 19, 34 deferred with companion binding trigger in TECH-DEBT.md):
@@ -606,6 +721,10 @@ Changes:
   a known owner in TD-010's revised ledger entry.
 - **Cull-decision UI** — session 05+.
 - **Per-cull-run audit trail** — deferred per TD-013.
+- **`--threshold-warn <N>` CLI flag** — deferred to session 05+ when the
+  cull-decision UI workflow is defined. Not a v0.1 requirement.
+- **`ai-culling` feature gate** — dropped from v0.1; add when a downstream
+  consumer needs `default-features = false`.
 
 ### How each deliverable is tested
 
@@ -614,7 +733,8 @@ Changes:
 | D0 pre-flight | n/a | n/a | manual + ANL-002 artifact + commit-message gate (`cve-posture:`, `inference:`, `threading:`) |
 | D1a scaffolding | trybuild for new lints | `cargo test -p photohelper-ai --no-run` compiles | n/a |
 | D1b registry | `VerifiedModelBytes` rejects SHA mismatch; `LoadedModel` rejects unverified bytes | `ModelRegistry::load` returns Err on missing model; round-trips on success | n/a |
-| D1c NIMA scorer | `NimaScore::new` rejects NaN/∞/out-of-range; `from_catalog_f64` saturates at boundary; preprocessing dimension assertions | inference against the CC0 CR3 fixtures (~1s/inference acceptable); score within ±1e-3 of golden on apple-silicon; band `[3.0, 9.0]` on Linux | `cull` writes a row whose score matches the golden fixture vector |
+| D1c `read_raw_rgb` | `assert_impl_all!(RgbImage: Send, Sync)`; `RgbImage::new` validates `pixels_rgb.len() == width*height*3` | `read_raw_rgb` on both CC0 CR3 fixtures returns correct width, height, pixel buffer length; `read_raw_rgb` on invalid file returns `Err` | n/a |
+| D1c NIMA scorer | `NimaScore::new` rejects NaN/∞/out-of-range; `from_catalog_f64` saturates at boundary + emits WARN when `\|delta\| > 1e-6`; `NimaScore: Ord` sorts correctly without unwrap; preprocessing dimension assertions | inference against the CC0 CR3 fixtures (~1s/inference acceptable); score within ±1e-3 of golden on apple-silicon; band `[3.0, 9.0]` on Linux | `cull` writes a row whose score matches the golden fixture vector |
 | D1d model file | `models/manifest.toml` SHA-256 matches actual file (verified by build.rs) | sanitize-check (ONNX-aware) passes on the model file | n/a |
 | D2a migration | `apply_v1_to_v2` idempotency (run twice, second is no-op per IF NOT EXISTS); ROLLBACK error propagated vs ApiMisuse silenced | `Catalog::open` on a v1-DB upgrades to v2; existing rows preserved; half-applied-migration recovery | `photohelper ingest` on a v1-DB upgrades it transparently |
 | D2b v2 schema | FK violation test: non-existent `photo_id` rejected; trybuild for type-mismatch | automated integration test: v1 fixture → user_version=2, `cull_scores` present, existing rows intact | n/a |
@@ -632,7 +752,7 @@ Changes:
 
 | When | Checkpoint | Agents | Artifact |
 |------|-----------|--------|----------|
-| Now (after plan v2 commit) | **Plan review Round 2** (Tier 5, full suite) | 8 + 9th verifier | `docs/code-reviews/session-03-plan-round2.md` |
+| After plan v3 commit | **Plan review Round 3** (Tier 5, full suite) | 8 + 9th verifier | `docs/code-reviews/session-03-plan-round3.md` |
 | After D1a + D1b + D1c land | Sub-component review | 3–5 agents (Cadence A Tier 4) | `docs/code-reviews/session-03-photohelper-ai-round{1,2}.md` |
 | After D2a + D2b land | Sub-component review | 3–5 agents | `docs/code-reviews/session-03-catalog-migration-round{1,2}.md` |
 | After all deliverables land + `just ci` green | **Session-end review** (Tier 5, full suite) | 8 + 9th verifier | `docs/code-reviews/session-03-round{1,2,3?}.md` |
@@ -653,8 +773,9 @@ Changes:
    per PR1-T21 remediation — NOT a fixed "30 min" bound).
 4. `cargo audit --deny warnings` clean on the bumped workspace
    (now includes ort).
-5. ANL-002 records CVE-posture clean + NIMA license verified +
-   2/2 fixture inference success + threading semantics verified.
+5. ANL-002 records CVE-posture clean + NIMA license verified
+   (`license: <SPDX-id>` in D0 commit message) + 2/2 fixture inference
+   success + threading semantics verified.
 6. TD-010 closed in `TECH-DEBT.md`; TD-005 + TD-006 closed in lockstep.
 7. DN-005 + DN-020 closed in `docs/discovery-notes.md`.
 8. Decision-doc 0002 lands authoritative for catalog v2.
@@ -672,7 +793,7 @@ Changes:
   ONNX export quality varies; plan-review may surface an alternative.
 - **Demosaic algorithm**: v0.1 uses LibRaw's default AHD; if D0's
   inference results are clearly degraded vs LibRaw's full dcraw
-  pipeline, upgrade to AMaZE or AAHD within D1c scope. See DN-023.
+  pipeline, upgrade to AMaZE or AAHD within D1c scope. See DN-022.
 - **cull_scores supersede semantics**: composite PK `(photo_id,
   scorer)` is the bet; decision-doc 0002 records this choice.
 - **ort RC stability**: 2.0.0-rc.12 (or whichever RC D0 pins) may
@@ -748,3 +869,43 @@ with companion TD entries. "None" was incorrect.)*
   - **PR1-T41**: R3-T3 citation corrected to "per R3-T3 remediation
     option (c)" (moot: D5c now structured differently).
   - **PR1-T42**: empty plan-revisions-log section removed from v1.
+- **v3** (2026-05-28) — R2 remediation. Closes 3 CRITICAL + 10 HIGH + 9 MEDIUM
+  from Round 2:
+  - **T1 (CRIT)**: D3 adds CI `pip install onnx` + `sanitize-check.sh` gates
+    on `onnx` availability + README prerequisites.
+  - **T2 (CRIT)**: D5c drops `force_heartbeat_panic_in_thread`; uses
+    `HeartbeatDeathTrigger` struct (dedicated test thread, not heartbeat_loop);
+    D5e parameterization via `PHOTOHELPER_HEARTBEAT_POISON_TICKS` env-var.
+  - **T3 (CRIT)**: D4 `CullStats` specifies `AtomicU64` + `Arc<CullStats>` +
+    `Ordering::Relaxed`.
+  - **T4**: DN-022 / DN-023 cross-references corrected (D1c + Discovery items
+    + TECH-DEBT.md TD-012).
+  - **T5**: D1b `VerifiedModelBytes` wraps `Arc<[u8]>`; `from_verified` takes
+    `&VerifiedModelBytes` (borrow); `model_dir` source specified; per-worker
+    Session construction path unambiguous.
+  - **T6**: D4 per-photo pipeline adds explicit `PhotoId::derive` + compare
+    step BEFORE `read_raw_rgb`.
+  - **T7**: D4 dispatch table adds FK violation row; `insert_cull_score` error
+    propagation specified.
+  - **T8**: D2a specifies update to `open_schema_version_too_new` test
+    (user_version = 3, expected = 2).
+  - **T9**: D2c adds amendment to `docs/decisions/0001-catalog-schema-v1.md`
+    §Migration policy.
+  - **T10**: D0 adds ABORT for license rejection and SHA-256 failure; ABORT
+    procedure specified; `license:` line in Verification surface.
+  - **T11**: D2b adds `just create-v1-fixture` recipe + LFS note + lifecycle.
+  - **T12**: D1c adds `read_raw_rgb` test row + `RgbImage` invariant spec +
+    `assert_impl_all!(RgbImage: Send, Sync)` + `just nima-regenerate-golden`
+    as explicit deliverable.
+  - **T13**: D4 adds fixture-construction table for all 6 per-case tests.
+  - **T14**: D2a adds PRAGMA `user_version` transactionality documentation.
+  - **T16**: D2a recovery test construction is now programmatic.
+  - **T17**: `nima_postproc.rs` "Optional" label clarified.
+  - **T18**: `ai-culling` feature gate dropped; `ort` is a hard dep.
+  - **T19**: `--threshold-warn <N>` dropped from D4; added to §Out of scope.
+  - **T20**: `NimaScore::from_catalog_f64` emits WARN when delta > 1e-6.
+  - **T21**: D4 adds OOM diagnostic WARN when inference_failed == num_workers.
+  - **T22**: RgbImage dimension invariant and Send+Sync consolidated into T12.
+  - **T23**: `NimaScore: Ord` implemented (NaN-free total order).
+  - **T24**: `just nima-regenerate-golden` added as explicit D1c sub-item.
+  - **T25**: `CullOpts` replaced with `&CullArgs` in `run_cull` signature.
