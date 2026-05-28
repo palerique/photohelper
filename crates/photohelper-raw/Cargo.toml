@@ -50,3 +50,4 @@ struct_field_names = "allow"
 
 [dependencies]
 photohelper-core = { path = "../photohelper-core" }
+thiserror.workspace = true
