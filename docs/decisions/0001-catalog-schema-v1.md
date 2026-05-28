@@ -1,8 +1,10 @@
 # Decision 0001 — Catalog schema v1
 
-**Status**: Accepted (session 01, 2026-05-28)
-**Owners**: this session (v1 minimal schema); session 02 (v1 → v2
-migration when cull-score + dup-group tables land per DN-005).
+**Status**: Accepted (session 01, 2026-05-28); v1 → v2 migration ownership
+amended (session 02, 2026-05-28 — see § Amendments).
+**Owners**: session 01 (v1 minimal schema); **session 03** (v1 → v2
+migration when cull-score + dup-group tables land per DN-005;
+rescheduled from session 02 per amendment below).
 **Authoritative for**: `crates/photohelper-catalog/src/schema.rs`.
 
 ## Context
@@ -120,21 +122,55 @@ previous row when content at the same `source_path` changes.
 ## Migration policy
 
 v1 stays at `PRAGMA user_version = 1` forever. The next change
-(v1 → v2 in session 02) introduces the migration FRAMEWORK
-simultaneously with adding tables, because:
+(v1 → v2 in **session 03**, rescheduled from session 02 per
+§ Amendments) introduces the migration FRAMEWORK simultaneously with
+adding tables, because:
 
 - A single-statement migration doesn't justify framework overhead.
 - Two-step migrations (add column → migrate data → drop old column)
   benefit from per-step idempotency tracking, which IS what a
   framework gives you.
 - The framework lives in `photohelper-catalog::migrations` as a
-  `Vec<&'static dyn Migration>` and a per-version applier; session 02
-  adds it + adds migration `v1 → v2`.
+  `Vec<&'static dyn Migration>` and a per-version applier; **session 03**
+  adds it + adds migration `v1 → v2` alongside the cull-score + dup-group
+  tables (DN-005).
+
+Session 02 (`libraw-cr3-decode`) does NOT touch the schema shape — it
+populates existing-NULL CR3 columns (`make`/`model`/`capture_time_unix_seconds`/`width`/`height`/`exif_orientation`)
+with real LibRaw-extracted values. No new columns; no
+`PRAGMA user_version` bump; no migration framework needed. The
+NULL-population path is DML, not DDL.
 
 ## Trigger to revisit
 
-- DN-005 closure: this slice is closed; session 02 reopens for the
-  cull/dup-group additions.
+- DN-005 closure: this slice is closed; **session 03** reopens for the
+  cull/dup-group additions and the v1 → v2 migration framework.
 - If real Canon R8 fixtures (session 02) surface new EXIF fields we
   want to catalog (e.g. lens make/model, ISO, shutter speed), file a
-  DN-NNN and add columns under a new migration.
+  DN-NNN and add columns under the session-03 migration.
+
+## Amendments
+
+### 2026-05-28 (session 02) — v1 → v2 migration framework rescheduled from session 02 to session 03
+
+Rationale: session 02 (`libraw-cr3-decode`) ships LibRaw FFI for Canon R8
+CR3 — EXIF read (the DN-011 critical-path remediation: kamadak-exif
+fails 370/370 real CR3s) plus RAW pixel decode plus the TD-002 rusqlite
+0.32 → 0.40 bump. The migration-framework + cull-score + dup-group
+table work belongs to the `cull` subcommand pipeline (session 03), not
+the RAW-pipeline session. Bundling it with LibRaw would double session
+02's scope without architectural payoff (the LibRaw FFI surface is
+orthogonal to schema migration).
+
+Surfaced by `docs/code-reviews/session-02-plan-round1.md § PR1-T8` (4
+agents converged: plan defers migration framework to session 03 while
+this decision doc committed session 02 — internal contradiction). Plan
+v2 + this amendment land in lockstep.
+
+Session 02's schema interaction is limited to: (a) populating
+previously-NULL columns for CR3 rows via `Catalog::upsert` (no SQL
+changes), (b) the TD-002 rusqlite version bump (no SQL changes).
+Session 03's first plan commit MUST include "migration framework v1 →
+v2" as a §Deliverables item; if it doesn't, the session-03 plan-review
+must reject. (Identical binding-trigger discipline to DN-011's
+session-02 LibRaw EXIF requirement.)

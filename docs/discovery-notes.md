@@ -21,12 +21,12 @@
 
 ---
 
-### DN-001 — LibRaw LGPL static-link distribution mechanics (2026-05-27, session 0)
+### DN-001 — LibRaw LGPL static-link distribution mechanics (2026-05-27, session 0; LGPL clause corrected 2026-05-28, session 2)
 
 - **Observed**: The plan locks LibRaw 0.21+ as the RAW decoder (CR3 support for Canon R8). LibRaw is dual-licensed LGPL-2.1 / CDDL-1.0; we plan to statically link the LGPL build. LGPL static linking requires the distributor to offer "the means to relink" — typically a tarball of object files or build inputs alongside each release binary.
-- **Why it matters**: We need to know what artifact (e.g. `vendor/libraw-X.Y.Z.tar.gz` per release) ships in GitHub Releases to satisfy LGPL §6(b). Affects the release workflow and the release notes template.
-- **Owner**: session that introduces `photohelper-raw` LibRaw FFI (likely session 02) + the eventual release-engineering session.
-- **Status**: open
+- **Why it matters**: We need to know what artifact (e.g. `vendor/libraw-X.Y.Z.tar.gz` per release) ships in GitHub Releases to satisfy **LGPL-2.1 §6(a)** (the "complete corresponding machine-readable source code … so that the user can relink to produce a modified executable" clause). Affects the release workflow and the release notes template. *Originally cited §6(b) in error; §6(b) is the alternative shared-library mechanism, which we are NOT taking. Corrected per session-02 plan-review `PR1-T17`.*
+- **Owner**: session that introduces `photohelper-raw` LibRaw FFI (session 02 owns the decision-doc + build-mechanism choice; the release-engineering session owns the GitHub Release workflow that actually ships the tarball alongside binaries).
+- **Status**: open (decision-doc 0002 will record the §6(a) artifact shape this session; release-workflow wiring deferred).
 
 ### DN-002 — Watermark configuration scope (CLI flags vs `photohelper.toml` vs sidecar) (2026-05-27, session 0)
 
@@ -107,3 +107,26 @@
 - **Why it matters**: If a future harness sync from fox lands a `session-pause` upgrade, the path translation has to be re-applied. Document the divergence point.
 - **Owner**: future harness sync.
 - **Status**: open (informational; no action required this session).
+
+### DN-013 — Windows LibRaw cross-compile audit deferred to v0.2 (2026-05-28, session 2)
+
+- **Observed**: Session 02 lands LibRaw FFI for Canon R8 CR3 on Linux x86_64 + macOS arm64. Windows cross-compile from macOS arm64 → `x86_64-pc-windows-msvc` is non-trivial: LibRaw uses C++ idioms that depend on the MSVC C++ standard library (`libcxx` vs MSVC STL ABI differences), and the LibRaw build system (autoconf + custom Makefile alternatives) is GNU-toolchain-shaped, not MSBuild-shaped. The plan's §Out of scope row defers Windows to v0.2; this DN records the binding trigger so the work isn't lost.
+- **Why it matters**: v0.1 ships Linux + macOS binaries only. Windows users have no path until v0.2. Documenting the deferral with a binding trigger prevents "v0.2 silently slips because nobody owns it" failure mode the No-Acceptable-Trade-offs Policy is designed to catch.
+- **Owner**: v0.2 release-planning session OR first Windows-using contributor.
+- **Binding trigger**: by v0.2 cut OR first PR from a contributor with `target = x86_64-pc-windows-msvc` in their CI matrix, whichever first. The audit MUST cover: (a) does LibRaw 0.21+ cross-compile cleanly from macOS arm64 with `cargo build --target x86_64-pc-windows-msvc` + the chosen build mechanism (vendored cmake vs system pkg-config), (b) does the resulting binary statically link LibRaw (verifiable via `objdump`), (c) Windows path-encoding boundary: `open_file_w` with `\\?\` prefix for paths >MAX_PATH (260 chars) (cross-ref to PR1-T20's FFI path encoding finding from `docs/code-reviews/session-02-plan-round1.md`).
+- **Status**: open
+
+### DN-014 — Other RAW formats (CR2 / NEF / ARW / RAF / ORF / RW2 / DNG) deferred to first non-Canon camera profile (2026-05-28, session 2)
+
+- **Observed**: `crates/photohelper-cli/src/commands/ingest.rs:27` declares `RAW_EXTS = &["cr3", "cr2", "arw", "nef", "raf", "orf", "rw2", "dng"]` — the walker admits 8 RAW extensions but v0.1 supports only Canon R8 CR3. Session-02 plan-review `PR1-T1` flagged that the original `parse_exif_for(path, extension)` dispatch silently routes non-CR3 RAW to kamadak-exif (which can't parse any of them on DN-006/DN-011's evidence). Plan v2 narrows `RAW_EXTS` to `["cr3"]` for v0.1 (OR routes all through LibRaw — TBD per PR1-T1 remediation); this DN records the binding trigger for re-expanding `RAW_EXTS` when the next camera profile lands.
+- **Why it matters**: If the dispatch decision is "narrow RAW_EXTS to `["cr3"]`," then adding a Sony camera profile (which uses ARW) requires re-expanding `RAW_EXTS` to `["cr3", "arw"]` AND verifying LibRaw extracts EXIF for the fixture set AND writing the camera-registry entry AND adding integration tests. Without a tracked binding trigger, the re-expansion gets forgotten and the new camera silently routes through whatever placeholder branch the dispatcher has.
+- **Owner**: session that adds the second `CameraProfile` (likely a Sony / Nikon / Fuji body in v0.3 or v0.4).
+- **Binding trigger**: first session whose plan includes a `CameraProfile` implementation other than `CanonR8`. The plan-review for that session MUST include "expand `RAW_EXTS` to include `<new format ext>` AND verify LibRaw EXIF on fixtures of that format AND add integration test for the new dispatch path" as a §Deliverables item.
+- **Status**: open
+
+### DN-015 — Heartbeat-thread `.join()` cleanup binding trigger fired by session 02 plan-review (2026-05-28, session 2)
+
+- **Observed**: TD-003 (heartbeat thread not `.join()`-ed at end of `run_ingest`) has a binding trigger including "test-flake surfaces on CI from stderr-ordering instability." Session-02 plan-review `PR1-T4` surfaced a related concern (R2-T18's heartbeat-death WARN path lacks regression-test coverage because the `panic_for_testing` knob was deferred). The session-02 plan v2 commits the `panic_for_testing` knob (closing R2-T18 fully) but TD-003's `.join()` cleanup itself is NOT fired by this session — we're not touching `run_ingest`'s post-walk teardown. Recording for cross-reference clarity so a future audit doesn't conflate the two concerns.
+- **Why it matters**: Distinguishes the `panic_for_testing` knob (session 02 ships this — tests the heartbeat-death WARN path) from TD-003's `.join()` cleanup (session 04+ — eliminates the zombie-output race). Both touch the heartbeat thread but at different abstraction levels.
+- **Owner**: session 04+ per TD-003's existing binding trigger; this DN is informational.
+- **Status**: open (informational; no action required this session; cross-references TD-003).
