@@ -116,10 +116,10 @@ CVE-clean.
   - `crates/photohelper-raw/Cargo.toml [lints]` REMOVES `workspace = true`
     and ADDS explicit per-key: `[lints.rust] unsafe_code = { level = "allow", priority = 1 }` + RESTATES every workspace lint (`missing_docs = "warn"` from `[lints.rust]`; `pedantic`, `unwrap_used`, `expect_used`, `panic`, `indexing_slicing`, plus the existing allow overrides from `[lints.clippy]`) explicitly per-crate. Cargo lint inheritance does NOT merge with per-key overrides per the [Cargo manifest reference](https://doc.rust-lang.org/cargo/reference/manifest.html#the-lints-section); restating preserves R2-T8's intent (no enforcement loss on clippy lints).
   - `src/ffi.rs` head: `#![deny(unsafe_op_in_unsafe_fn)]` — every `unsafe fn` body still requires inner `unsafe { ... }` with `// SAFETY:` comment.
-  - `src/exif.rs`, `src/decode.rs`, `src/lib.rs` heads: `#![forbid(unsafe_code)]` (NOT `deny`; the `forbid` ratchet cannot be downgraded by inner attributes, so new modules accidentally adding `unsafe` fail at compile time).
+  - `src/exif.rs`, `src/decode.rs` heads: `#![forbid(unsafe_code)]` (NOT `deny`; the `forbid` ratchet cannot be downgraded by inner attributes, so new modules accidentally adding `unsafe` fail at compile time). **Plan-v3.2 correction (per Deliverable 1a scaffolding commit)**: `src/lib.rs` does NOT carry the file-level `forbid` even though earlier plan revisions listed it. Reason: inner attributes at the crate root (`lib.rs`) propagate to every submodule, and `forbid` cannot be downgraded — `#![forbid(unsafe_code)]` at `lib.rs` would make `ffi.rs`'s `unsafe` blocks fail to compile no matter what attribute `ffi.rs` carries. The Cargo.toml crate-level `allow` is the lib.rs baseline; the file-level `forbid` lives on `exif.rs`/`decode.rs` (and any future non-FFI source files); the CI grep gate below is the third defense layer.
   - Workspace `Cargo.toml` `[workspace.lints.clippy]` adds `undocumented_unsafe_blocks = "deny"`.
   - **CI grep gate** (defense-in-depth for new files inheriting crate-level
-    `allow`): `just ci` runs `! rg "unsafe\s*\{|unsafe\s+fn" crates/photohelper-raw/src/ --glob '!ffi.rs'` and fails if any match.
+    `allow`): `just ci` runs `scripts/check-unsafe-isolation.sh` (a wrapper around `rg --type rust --glob '!ffi.rs' '\bunsafe\s*(\{|fn\b|trait\b|impl\b)' crates/photohelper-raw/src/`) and fails if any match.
 - **Path encoding (per PR1-T20)**:
   - `pub(crate) struct RawPath` newtype wrapping a `&Path`: NUL-byte
     interior → `Err(Error::RawPath { reason: "interior-nul-byte" })`;

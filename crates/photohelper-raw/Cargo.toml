@@ -8,11 +8,45 @@ repository.workspace = true
 authors.workspace = true
 description = "RAW (CR3 / CR2 / …) decode pipeline via LibRaw"
 
-[lints]
-# Override workspace-level `unsafe_code = "forbid"` — libraw FFI requires
-# `unsafe` blocks (scoped to one module). The lint stays `deny` at file scope
-# via `#![deny(unsafe_op_in_unsafe_fn)]` once we wire libraw.
-workspace = true
+# Cargo lint inheritance does NOT merge with per-key overrides (see the
+# Cargo manifest reference's `[lints]` section). We need to override the
+# workspace `unsafe_code = "forbid"` to `allow` for the FFI module while
+# preserving every other workspace gate, so we drop `workspace = true`
+# and restate the rest explicitly. New workspace lints MUST be mirrored
+# here or the gate is silently lost in this crate.
+[lints.rust]
+# Crate-level baseline: allow unsafe so `src/ffi.rs` can contain it.
+# Defense-in-depth: `src/exif.rs`, `src/decode.rs`, `src/error.rs` carry
+# their own `#![forbid(unsafe_code)]` so accidentally landing `unsafe`
+# outside `ffi.rs` fails at compile time. NOTE: `src/lib.rs` does NOT
+# carry the file-level forbid (the plan's v3.2 design listed it but the
+# `forbid` ratchet at the crate root would propagate to `ffi.rs` —
+# rustc disallows downgrading `forbid` in any submodule). The justfile
+# `ci` recipe runs a `rg`-based grep gate against non-`ffi.rs` files
+# as the third layer of defense.
+unsafe_code = { level = "allow", priority = 1 }
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+undocumented_unsafe_blocks = "deny"
+doc_markdown = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+redundant_closure_for_method_calls = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+struct_field_names = "allow"
 
 [dependencies]
 photohelper-core = { path = "../photohelper-core" }

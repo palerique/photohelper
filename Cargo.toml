@@ -85,6 +85,11 @@ unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
 indexing_slicing = "warn"
+# Defense-in-depth for `photohelper-raw`'s FFI module: every `unsafe`
+# block must carry a `// SAFETY:` comment justifying why the contract is
+# upheld. Workspace-level so the moment any new crate ever opts in to
+# `unsafe_code = allow`, the SAFETY-comment requirement comes for free.
+undocumented_unsafe_blocks = "deny"
 # Pedantic-class style preferences relaxed at workspace level — the
 # meaningful production-correctness gates above (unwrap/expect/panic/
 # indexing) are what `CLAUDE.md § Rust-specific gates` actually requires.
