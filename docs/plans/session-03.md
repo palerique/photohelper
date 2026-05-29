@@ -5,7 +5,7 @@
 > **Cadence**: A (tier-graduated, per `CLAUDE.md § Quality gates` and
 > `docs/quality-assurance.md § Review cadence`)
 > **Author**: Paulo Henrique Lerbach Rodrigues (Claude Code)
-> **Plan revisions**: v2 (R1 remediation)
+> **Plan revisions**: v4 (R3 remediation)
 
 > **Note on title slug**: branch is `ai-culling-skeleton`; the session
 > lands the catalog v1→v2 migration + `cull_scores` table + the
@@ -112,16 +112,18 @@ semantics are verified empirically (PR1-T5 remediation)**.
     → halt D0 through D4). **ABORT if model file SHA-256 cannot be
     verified** (corrupted download or Git LFS corruption). Record SPDX
     license ID; ONNX opset version; input shape; output range.
-  - **§ Threading semantics (PR1-T5 remediation)**: spawn two rayon
-    workers both calling `session.run()` on the same `Arc<Session>`;
-    record whether it compiles and is deterministic. Verify whether
-    `Session::run` takes `&mut self` in the chosen ort version. Based on
-    this, pick one of: (a) `Arc<Mutex<Session>>`, (b) one session per
-    rayon worker thread, (c) `Session::run_async` + ort's intra-op
-    threadpool. **Session 03 picks option (b): one `Session` per rayon
-    worker thread** (no async complexity, correct per `Session::run`
-    `&mut self` receiver). ABORT if option (b) fails for a structural
-    reason (e.g. ort `Environment` is not `Send`).
+  - **§ Threading semantics (PR1-T5 + T-ε remediation)**: **BINDING D0
+    output** — record the `Session::run` receiver type:
+    - Verify whether `Session::run` takes `&self` (immutable) or `&mut self`
+      (mutable) in the chosen ort RC version.
+    - **If `&self`**: use one shared `Arc<Nima>` across rayon workers (simplest;
+      Sync holds; no per-worker construction). Change D4's `scorer: &Nima`
+      signature to `scorer: Arc<Nima>` and remove `thread_local!`.
+    - **If `&mut self`**: use one `Session` per rayon worker thread via
+      `thread_local!` (D4 spec below; option b). ABORT if option (b) fails
+      for a structural reason (e.g. ort `Environment` is not `Send`).
+    Spawn two rayon workers calling `session.run()` on the same `Arc<Session>`
+    to empirically verify the receiver type and record the result in ANL-002.
   - **§ Inference end-to-end**: run NIMA against both CC0 R8 CR3
     fixtures; record per-fixture aesthetic_score; verify deterministic
     across re-runs. ABORT if fixture inference fails.
@@ -236,12 +238,13 @@ Rust. PR1-T6 remediation: no `Scorer` trait; D4 takes concrete `&Nima`.)**
   `LoadedModel`; `Nima::score(rgb: &RgbImage) -> Result<NimaScore>` is
   the public entry. `NimaScore` newtype wraps `f32` constrained to
   `[1.0, 10.0]` (fallible constructor; reject NaN, ±∞, out-of-range).
-  - **NimaScore traits (PR1-T31 + T23/T20 remediation)**:
-    `Copy + Clone + Debug + PartialOrd + Ord` (NaN rejected at construction
-    → total order guaranteed; `Ord` implementation:
-    `fn cmp(&self, other: &Self) -> Ordering { self.0.partial_cmp(&other.0).expect("NimaScore is NaN-free") }`
-    — avoids `unwrap_used = "warn"` clippy lint in downstream sort calls).
-    NOT `Eq` (f32 equality is floating-point, not natural equality).
+  - **NimaScore traits (PR1-T31 + T23/T20/T-α/T-δ remediation)**:
+    `Copy + Clone + Debug + PartialEq + Eq + PartialOrd + Ord`.
+    `Eq` is required by `Ord` as a supertrait (`Ord: Eq + PartialOrd`) and is
+    sound because: NaN rejected at construction (reflexivity holds), score range
+    [1.0, 10.0] excludes -0.0. `Ord` implementation uses `f32::total_cmp`
+    (stable Rust 1.62+, MSRV 1.88; no `unwrap`/`expect`; IEEE 754 totalOrder):
+    `fn cmp(&self, other: &Self) -> Ordering { self.0.total_cmp(&other.0) }`.
     `NimaScore::from_catalog_f64(f64) -> Result<Self>`: separate saturating
     constructor for read-back from SQLite `REAL` column; emits
     `tracing::warn!` when `|value - clamped| > 1e-6` (rounding-error
@@ -484,10 +487,41 @@ duplicated in cull.rs.)**
   pass `&CullArgs` directly per the existing `run_ingest` precedent).
   No `--threshold-warn` flag (deferred to session 05+ per §Out of scope).
 
-- **`CullStats` type (T3 remediation)**: uses `AtomicU64` for all per-photo
+- **`CullStats` type (T3 + T-ζ + T-η remediation)**: uses `AtomicU64` for all
   counters (parallel to `IngestStats` at `ingest.rs:87`). Shared via
-  `Arc<CullStats>` across rayon workers. `Ordering::Relaxed` is correct —
-  counters are only read after the rayon fork-join barrier completes.
+  `Arc<CullStats>` across rayon workers. `Ordering::Relaxed` is correct.
+  Complete field enumeration:
+  - `in_flight: AtomicU64` — photos currently being processed (for heartbeat)
+  - `scored: AtomicU64` — photos successfully scored
+  - `inference_failed: AtomicU64`
+  - `decode_failed: AtomicU64`
+  - `file_missing: AtomicU64`
+  - `content_changed: AtomicU64`
+  - `catalog_inconsistency: AtomicU64` — FK violations (photo deleted mid-run)
+  - `derive_failed: AtomicU64` — PhotoId::derive IO/parse failures
+  Cull heartbeat summary format: `"[heartbeat] in-flight: {}, scored: {}"` (analogous
+  to ingest's `"[heartbeat] walked: {N}, ingested: {M}"`).
+
+- **Per-photo pipeline (T6 + T-η remediation — content_changed detection +
+  derive failure handling)**:
+  for each `(catalog_id, source_path)` row, BEFORE calling `read_raw_rgb`,
+  use `match` (NOT `?` — `for_each` closures return `()`, not `Result`):
+  ```rust
+  let current_id = match PhotoId::derive(&source_path) {
+      Ok(id) => id,
+      Err(_) => {
+          stats.derive_failed.fetch_add(1, Relaxed);
+          tracing::warn!(path = %source_path.display(), "PhotoId::derive failed; skipping");
+          continue;
+      }
+  };
+  if current_id != catalog_id {
+      stats.content_changed.fetch_add(1, Relaxed);
+      tracing::warn!(...);
+      continue; // skip; do not decode or score
+  }
+  ```
+  `PhotoId::derive` reads ~128 KB per file — negligible vs. full decode + inference.
 
 - **SELECT with supersede filter and source_path (PR1-T12 + PR1-T18)**:
   ```sql
@@ -497,16 +531,41 @@ duplicated in cull.rs.)**
     AND id NOT IN (SELECT photo_id FROM cull_scores WHERE scorer = ?1)
   ```
 
-- **ort concurrency model (PR1-T5 + T5 remediation)**: one `ort::Session`
-  per rayon worker thread (option b). Each worker calls
-  `LoadedModel::from_verified(&verified_bytes)` independently to construct
-  its own `ort::Session` from the shared `Arc<[u8]>` in `VerifiedModelBytes`
-  (no re-verification; no re-read from disk). No `Mutex` wrapping; no async.
-  Memory cost: N workers × ~50 MB model = ~400 MB on 8-core apple-silicon
-  (acceptable for v0.1). OOM diagnostic: if `inference_failed == num_workers`
-  at run completion, emit session-level WARN: "All N inference workers failed
-  at session init; if inference_failed matches worker count, check available
-  memory (N workers × ~50 MB each)."
+- **ort concurrency model (PR1-T5 + T5 + T-γ + T-ε remediation)**:
+  **D0 §Threading semantics is BINDING on the Session sharing model.** If D0
+  confirms `Session::run` takes `&self` (immutable): use one shared `Arc<Nima>`
+  across workers — no per-worker Session construction, no `thread_local!`, no
+  `&mut` contention. This is both simpler and lower-memory. If D0 confirms
+  `Session::run` takes `&mut self`: use `thread_local!` (one `Session` per
+  rayon worker thread, constructed ONCE per thread, not once per photo) per the
+  spec below. The plan currently assumes `&mut self` (line 122-123); D0 must
+  verify and the implementation must match D0's finding.
+
+  **If `Session::run` is `&mut self`** (per-worker `thread_local!` path):
+  Per-worker Session construction uses `thread_local!` so construction runs
+  ONCE per rayon worker thread — O(num_rayon_workers), NOT O(num_photos).
+  Each worker constructs its `Nima` lazily on first use:
+  ```rust
+  thread_local! {
+      static WORKER_NIMA: RefCell<Option<Nima>> = RefCell::new(None);
+  }
+  // Inside par_bridge closure:
+  WORKER_NIMA.with(|cell| {
+      let mut borrow = cell.borrow_mut();
+      let nima = borrow.get_or_insert_with(|| {
+          Nima::new(LoadedModel::from_verified(&verified_bytes))
+      });
+      nima.score(&rgb)
+  })
+  ```
+  Session-construction failure inside `get_or_insert_with` is handled by the
+  `inference_failed` dispatch row (pre-photo WARN; abort approach TBD by impl).
+  Memory cost: N workers × ~50 MB model = ~400 MB on 8-core apple-silicon.
+  No `Mutex` wrapping; no async.
+
+  OOM diagnostic: if `inference_failed == num_workers` at run completion, emit
+  session-level WARN: "All N inference workers failed at session init; if
+  inference_failed matches worker count, check available memory."
 
 - **Per-photo pipeline (T6 remediation — content_changed detection)**:
   for each `(catalog_id, source_path)` row, BEFORE calling `read_raw_rgb`:
@@ -532,6 +591,7 @@ duplicated in cull.rs.)**
   | `read_raw_rgb` → file not found | `file_missing` | warn, skip (not a failure) |
   | re-derived PhotoId mismatch (content changed) | `content_changed` | warn, skip |
   | FK violation (photo deleted between SELECT and INSERT) | `catalog_inconsistency` | warn, skip (not a strict failure) |
+  | `PhotoId::derive` IO/parse failure | `derive_failed` | WARN, skip; FAIL if `derive_failed > 0` under `--strict` |
   | `cull_scores` row already exists | (skip, no counter) | no-op, not an error |
 
   Low aesthetic score does NOT fail `--strict` (it's a feature, not an
@@ -604,14 +664,15 @@ Per `TECH-DEBT.md § TD-010`, ship every sub-item:
     `photohelper-test-helpers` is `[dev-dependencies]` only via
     `cargo metadata --format-version 1 | jq '...'` and assert `kind = "dev"`.
     No `objdump` needed.
-  - **D5e row 4 parameterization (T2 + PR1-T37 remediation)**: the
-    `[heartbeat-death-WARN]` test uses an env-var
-    `PHOTOHELPER_HEARTBEAT_POISON_TICKS=1` checked in the
-    `HeartbeatDeathTrigger` helper thread (NOT `heartbeat_loop`), causing
-    that thread to panic after N ticks. The subprocess integration test
-    spawns `photohelper ingest` (or `cull`) with this env-var set. The
-    parameterization over `[ingest, cull]` covers both subcommands' heartbeat
-    teardown paths. Production code remains panic-free.
+  - **D5e row 4 parameterization (T2 + PR1-T37 + T-β remediation)**:
+    the `[heartbeat-death-WARN]` test is IN-PROCESS ONLY (see D5e row 4
+    above for rationale — the subprocess approach is structurally impossible
+    with dev-deps-only test code). The `HeartbeatDeathTrigger` struct is used
+    within the `cargo test` binary to trigger death in a dedicated test thread,
+    assert the WARN fires, and assert the summary still prints. Parameterized
+    over `[run_ingest, run_cull]` heartbeat scaffolding paths as two in-process
+    tests. Production code remains panic-free; no env-var added to production
+    paths.
 - **5d DN-008 6 rows** (relabeled from "DN-008 12 rows" per PR1-T29
   remediation — these are TD-010's 6-of-12-row subset; rows 12, 13, 14,
   18, 19, 34 deferred with companion binding trigger in TECH-DEBT.md):
@@ -635,9 +696,17 @@ Per `TECH-DEBT.md § TD-010`, ship every sub-item:
   - `file-lock` op-tag (parent dir read-only on Unix; skip Windows;
     error WARNs with op="lock-file-create" per R2-T11).
   - **heartbeat death test parameterized over `[ingest, cull]` drivers
-    (PR1-T37 remediation)**: trigger heartbeat death via 5c's test-helper,
-    assert `[heartbeat-death-WARN]` substring fires, assert summary line
-    still prints — for BOTH `ingest` and `cull` code paths.
+    (PR1-T37 + T-β remediation)**: **IN-PROCESS ONLY** — not a subprocess
+    test (production binary does not include dev-dep `HeartbeatDeathTrigger`
+    code; subprocess approach is structurally impossible without reintroducing
+    TD-005). The in-process test (per D5c-ii) uses the `HeartbeatDeathTrigger`
+    struct within `cargo test`'s test binary (dev-deps ARE compiled). Verify
+    `[heartbeat-death-WARN]` fires via `JoinHandle::is_finished()` poll or a
+    `tracing-subscriber` test layer capturing log events, for BOTH `run_ingest`
+    and `run_cull` heartbeat scaffolding paths (two separate in-process tests).
+    `PHOTOHELPER_HEARTBEAT_POISON_TICKS` env-var is NOT used in D5e (it only
+    works in-process, not subprocess; the three other WARN regression tests
+    above remain subprocess tests).
 - **5f** no-op (R2-T19 already closed at session 01 R2).
 
 #### Deliverable 6 — DN-020 stub-message fix (first chore commit)
@@ -909,3 +978,25 @@ with companion TD entries. "None" was incorrect.)*
   - **T23**: `NimaScore: Ord` implemented (NaN-free total order).
   - **T24**: `just nima-regenerate-golden` added as explicit D1c sub-item.
   - **T25**: `CullOpts` replaced with `&CullArgs` in `run_cull` signature.
+- **v4** (2026-05-28) — R3 remediation. Closes 3 CRITICAL + 4 HIGH + 2 MEDIUM:
+  - **T-α (CRIT)**: `NimaScore` adds `Eq` (required by `Ord` supertrait); "NOT
+    Eq" clause removed.
+  - **T-β (CRIT)**: D5c/D5e heartbeat-death test changed to in-process only;
+    subprocess variant dropped; `PHOTOHELPER_HEARTBEAT_POISON_TICKS` removed
+    from D5e.
+  - **T-γ (CRIT)**: D4 ort concurrency model specifies `thread_local!` for
+    once-per-thread construction (if Session::run is &mut self) OR declares D0
+    §Threading semantics as the binding resolver; D0 §Threading semantics
+    updated to record Session::run receiver type as a binding output.
+  - **T-δ**: `NimaScore::cmp` uses `f32::total_cmp` (no expect/unwrap).
+  - **T-ε**: D0 §Threading semantics made binding; line 122-123 factual claim
+    corrected to defer to D0 verification.
+  - **T-ζ**: `CullStats` field list explicitly enumerated (8 fields including
+    `catalog_inconsistency` + `derive_failed`); heartbeat summary format
+    specified.
+  - **T-η**: `PhotoId::derive` pseudocode uses `match` (not `?`); `derive_failed`
+    dispatch row added.
+  - **T-θ**: Plan header updated to v4.
+  - **T-κ**: `HeartbeatDeathTrigger` note added: if crate has only one consumer
+    after T-β restructuring, collapse to inline test helper.
+  - **T-ι**: TECH-DEBT.md TD-012 cross-reference note clarified.

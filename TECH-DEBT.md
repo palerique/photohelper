@@ -222,7 +222,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Binding trigger**: session 04+'s develop pipeline OR user-reported NIMA score bias traceable to demosaic quality. Cross-reference DN-022 + DN-023.
 - **Scope estimate**: ~30 LoC (FFI binding + enum + API extension + tests) / low risk.
 - **Consequence of inaction**: v0.1 NIMA scores are computed from AHD-demosaiced images; if the NIMA model's training distribution assumed a different demosaic algorithm, scores may be systematically shifted. For v0.1 this is acceptable (no baseline comparison exists); for v0.2+ quality benchmarking it becomes measurable.
-- **Related**: `docs/discovery-notes.md § DN-022` (demosaic algorithm selection); `docs/plans/session-03.md § D1c`.
+- **Related**: `docs/discovery-notes.md § DN-022` (demosaic algorithm selection); `docs/plans/session-03.md § D1c`. (Note: DN-023 is unrelated to this TD — it covers ON DELETE CASCADE absence, not demosaic.)
 
 ---
 
