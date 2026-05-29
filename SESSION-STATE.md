@@ -19,13 +19,18 @@ hit network errors on first launch attempt).
 **Goal**: Session 05 — duplicate-detection pipeline (DN-024 MobileCLIP embeddings +
 dup_clusters). Plan at `docs/plans/session-05.md`.
 
-**Action**: Resume plan-review — run `/plan-review` on `docs/plans/session-05.md`.
-Plan v1 is committed; fire Round 1 agent suite, remediate, fire Round 2. Do NOT
-begin implementation until Round 2 is clean.
+**Action**: Begin implementation — D0 pre-flight first (MobileCLIP license audit + inference probe).
+Commit `docs/analysis/ANL-003-mobileclip-preflight.md` before any model binary.
+If D0 ABORT: close session as D0-ABORT per plan.
 
-**Status (session 05 so far)**: Plan v1 committed (`docs/plans/session-05.md`).
-`just ci` GREEN (143 tests — no code changes from main). Plan-review Round 1 NOT
-yet fired (network errors on 2026-05-29; retry in fresh context).
+**Status (session 05 so far)**: Plan-review COMPLETE (R1+R2). Plan v3 committed (CLEAN).
+- R1: 3 CRITICAL + 13 HIGH + 8 MEDIUM + 5 LOW → plan v2
+- R2: 0 CRITICAL + 0 HIGH + 3 MEDIUM + 3 LOW → plan v3 (CLEAN; all R1 watch-list 16/16 CLOSED)
+`just ci` GREEN (143 tests — no code changes from main).
+
+**Plan-review history (session 05 — COMPLETE)**:
+- R1 → 3 CRITICAL + 13 HIGH + 8 MEDIUM + 5 LOW → plan v2
+- R2 → 0 CRITICAL + 0 HIGH + 3 MEDIUM + 3 LOW → plan v3 (CLEAN)
 
 **Plan-review history (session 04 — COMPLETE)**:
 - R1 → 6 CRITICAL + 13 HIGH + 10 MEDIUM + 3 LOW → plan v2
