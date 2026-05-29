@@ -21,13 +21,19 @@ closure) → D1a (ort dep) → D1b/c (VerifiedModelBytes + Nima + NimaScore) →
 D1d (ONNX via LFS) → D1e (read_raw_rgb) → D2a/b (catalog v2 migration +
 cull_scores + insert_cull_score) → D3 (run_cull + cull subcommand).
 
-**Action**: **BEGIN IMPLEMENTATION.** First commit: `chore(ai): D0-prime — ANL-002
-addendum + DN-026 CLOSED` (run verify-nima-d0-prime.sh; record fixture scores;
-update docs). Then D1a → D1b → D1c → D1d → D1e → D2a → D2b → D3.
-Sub-component reviews at D1c + D2b boundaries.
+**Action**: **CONTINUE IMPLEMENTATION.** D1e (read_raw_rgb FFI) → D2a/b (catalog
+v2 migration + cull_scores + insert_cull_score) → D3 (run_cull + cull subcommand).
+Sub-component review at D2b boundary per plan checkpoints. Then session-end R1+R2.
 
-**Status**: `just ci` GREEN (133 tests). Branch is plan + plan-review artifacts
-only; no implementation code yet.
+**Status**: `just ci` GREEN (133 tests; +0 new tests yet in session-04 beyond D0').
+Completed: D0' (ANL-002+DN-026), D1a (ort dep), D1b+D1c (RgbImage+VerifiedModelBytes
++NimaScore+Nima+Error), D1d (ONNX via LFS + verify-model-sha256 gate).
+Remaining: D1e (read_raw_rgb in photohelper-raw), D2a/b (catalog migration),
+D3 (cull subcommand), tests, sub-component review at D2b, session-end review.
+
+**Plan-review history (session 04 — COMPLETE)**:
+- R1 → 6 CRITICAL + 13 HIGH + 10 MEDIUM + 3 LOW → plan v2
+- R2 → 3 HIGH + 5 MEDIUM + 2 LOW → plan v3 (CLEAN)
 
 **Plan-review history (session 03 — COMPLETE)**:
 - R1 → 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW → plan v2 (dc95639)
