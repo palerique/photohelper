@@ -127,10 +127,14 @@ hooks-run-all:
 # `ci` runs exactly what .github/workflows/ci.yml runs, in the same order, so
 # `just ci` passing locally is equivalent to CI passing. Keep this list in
 # sync with the workflow file.
-ci: fmt-check lint test audit unsafe-isolation sanitize-check test-helpers-dev-only
+ci: fmt-check lint test audit unsafe-isolation sanitize-check test-helpers-dev-only verify-model-sha256
     @./scripts/verify-state.sh
     @prek run --all-files
     @prek run --all-files --hook-stage pre-push
+
+# D1d: verify NIMA ONNX model SHA-256 matches manifest.toml (LFS pointer detection included).
+verify-model-sha256:
+    @./scripts/verify-model-sha256.sh
 
 # D5c E2E: verify photohelper-test-helpers appears only as a dev-dependency.
 # Any non-dev consumer is a policy violation — test helpers must not be linked
