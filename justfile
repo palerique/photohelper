@@ -41,6 +41,19 @@ test:
 audit:
     cargo audit --deny warnings
 
+# LibRaw CVE monitoring via osv-scanner (TD-004, session 06).
+# Advisory only — not wired into `just ci` until GitHub Actions runner has osv-scanner.
+# Run locally: `just audit-libraw`
+audit-libraw:
+    @if command -v osv-scanner >/dev/null 2>&1; then \
+        echo "osv-scanner: checking vendor/libraw-0.22.1.tar.gz"; \
+        osv-scanner --config .osv-scanner.toml .; \
+    else \
+        echo "audit-libraw: osv-scanner not found (install: https://github.com/google/osv-scanner)"; \
+        echo "LibRaw CVE monitoring is manual until osv-scanner is in PATH"; \
+        exit 0; \
+    fi
+
 build:
     cargo build --release --all-features --workspace
 
