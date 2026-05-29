@@ -176,22 +176,24 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
-### TD-010 — Deliverable 6 test infrastructure (poison_for_testing, R2-T18 4-WARN regressions, DN-008 rows) deferred from session 02 to a follow-up
+### TD-010 — PARTIALLY CLOSED. 2 sub-items remain (build_global + heartbeat-death-WARN in-process tests)
 
-- **Status**: Open
+- **Status**: PARTIALLY CLOSED (6a, 6b, 6c, 6d, 6e-rows-2+3, 6f all done in session 03). Remaining: 6e rows 1 + 4.
 - **Opened**: 2026-05-28 (session 2, Deliverable 6 deferral)
-- **Stop-gap location**: gap, not a commit — the items below were planned for session 02 per `docs/plans/session-02.md § Deliverable 6` but ship NOT done so the session goal (LibRaw FFI for CR3) could land on schedule.
-- **Fundamental fix**: a focused follow-up session lands every Deliverable 6 sub-item in the plan-locked order:
-  1. **6a `poison_for_testing` knob** on `Catalog` (3 tests: `poison_propagates_as_catalog_poisoned_error`, `poison_rollback_discards_panicked_workers_partial_insert`, `poison_recovery_admits_subsequent_inserts`).
-  2. **6b R2-M8 silent-ROLLBACK fix** (explicit match on "cannot rollback - no transaction is active" vs real errors).
-  3. **6c Heartbeat panic-for-testing env-var** (`PHOTOHELPER_HEARTBEAT_PANIC_FOR_TESTING=1`; debug_assertions-gated per R3-T3; subprocess integration test asserts `[heartbeat-death-WARN]` substring per R3-T7).
-  4. **6d DN-008 6 rows**: `{6, 17, 39, 42, 43, 49}` — trybuild compile-fail for `assert_send_sync!(Arc<Catalog>)`, hardlink dedup, --strict on CR3-only dir, walker edge cases (mtime future / nested / broken symlinks), mtime_anomalous flag round-trip, fatal exit codes (catalog locked / permission denied / disk full).
-  5. **6e R2-T18 4 WARN regression tests** (`build_global already initialized`, `wal_checkpoint recovered N frames`, `file-lock` op-tag, heartbeat death via env-var).
-  6. **6f R2-T19** already closed at session 01 R2; no action.
-- **Binding trigger**: opens the next session that touches `photohelper-catalog::Catalog` for any reason OR before session 04+ develop pipeline lands OR by 2026-08-01 — whichever first. R2-T18 is the most operator-facing gap and ranks highest if cherry-picking.
-- **Scope estimate**: ~400 LoC of test infrastructure / low-to-medium risk (mostly mechanical wiring; the `poison_for_testing` knob brushes against the catalog's `Send + Sync` invariants and warrants careful review).
-- **Consequence of inaction**: the safety-net tests R2-T18 invested in (specifically the heartbeat-death observability path) are absent — if heartbeat thread regressions slip in, operators lose their liveness signal without CI catching it. Acceptable for v0.1 (the manual smoke `photohelper ingest "$HOME/Pictures/tests" --strict` proved the heartbeat works end-to-end) but a real future risk.
-- **Related**: `docs/plans/session-02.md § Deliverable 6`; `docs/code-reviews/session-02-plan-round{2,3}.md § R2-T18 / R2-T3 / R3-T3 / R3-T7`.
+- **Partial closure (session 03)**: The following sub-items landed in session 03 D5a–D5e commits:
+  1. **6a `poison_for_testing` knob** — CLOSED. Commit D5a: `Catalog::poison_for_testing(&Arc<Self>)` + 3 poison tests.
+  2. **6b R2-M8 silent-ROLLBACK fix** — CLOSED. Commit D5b: explicit match on `extended_code == 1` (SQLITE_ERROR), propagates unexpected rollback failures. Note: plan cited `ApiMisuse` (rc=21); empirical test shows SQLite returns SQLITE_ERROR (rc=1).
+  3. **6c HeartbeatDeathTrigger** — CLOSED. Commit D5c: `crates/photohelper-test-helpers` crate + `HeartbeatDeathTrigger` struct + D5c-ii smoke test in catalog + D5c-E2E `just test-helpers-dev-only` check. The env-var approach (T3-T7) was replaced per plan v4 with this in-process helper.
+  4. **6d DN-008 6 rows** — CLOSED. Commit D5d: rows 17 (hardlink), 39 (strict+real-CR3), 42a (nested-dirs), 42b (broken-symlinks), 43 (mtime_anomalous), 49a (EX_TEMPFAIL), 49b (EX_NOPERM). Row 6 (assert_send_sync!) covered by existing static_assertions in catalog tests.
+  5. **6e rows 2+3 (wal_checkpoint + file-lock op-tag)** — CLOSED. Commit D5e.
+  6. **6f R2-T19** — already closed at session 01 R2.
+- **Remaining stop-gap location**: `ingest.rs` — `rayon::build_global` WARN (row 1) and heartbeat-death-WARN (row 4) have no regression tests.
+- **Remaining fundamental fix** (2 tests):
+  - **6e row 1** (`build_global already initialized`): requires calling `run_ingest` directly from a test binary (not subprocess), so the rayon global pool persists across the two calls. Pattern: add a `#[cfg(test)]` test module in `ingest.rs` that calls `run_ingest(...)` twice. OR: refactor ingest.rs to expose a `build_rayon_pool()` function that tests can call twice. ~20 LoC.
+  - **6e row 4** (heartbeat-death-WARN in-process): requires `run_ingest` to be callable in a test context where the heartbeat thread can be made to die before the walk finishes. Approach: extend `HeartbeatStop` with a `kill_for_test()` method (non-signal panic trigger), OR expose a test seam in `run_ingest` that replaces the heartbeat thread factory. ~30–50 LoC.
+- **Binding trigger**: next session that touches `commands/ingest.rs` for any reason. Both tests are small (<50 LoC combined) and low-risk once the test seam is identified.
+- **Consequence of inaction**: `build_global` WARN and heartbeat-death WARN have no automated regression coverage. The heartbeat-death WARN is the more operator-critical gap (operators rely on `[heartbeat]` liveness; a silent death would go undetected). Still acceptable for v0.1.
+- **Related**: `docs/plans/session-03.md § D5c-ii / D5e`; `docs/code-reviews/session-02-plan-round{2,3}.md § R2-T18`.
 
 ---
 

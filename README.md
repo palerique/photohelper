@@ -6,9 +6,11 @@ configurable long-edge resize plus orientation-aware watermarks. Lightroom /
 Aftershoot / DxO PureRAW-class workflow as a single binary on Linux, macOS,
 and Windows.
 
-> **Project status**: bootstrap — engineering protocol scaffolded; no
-> application code shipped yet. See `SESSION-STATE.md` for the next session
-> and the bootstrap plan for full architecture / roadmap.
+> **Project status**: v0.1 in progress — `ingest` is implemented and
+> fully tested (CR3 EXIF via LibRaw 0.22.1, BLAKE3 content IDs,
+> SQLite catalog with file-lock + WAL). `cull`, `develop`, `export`,
+> and the other subcommands are planned for session 04+ (see § Roadmap
+> below for the full scope and timeline).
 >
 > This repo follows the **eng-protocol** — a session-based engineering
 > discipline (see `CLAUDE.md` and `docs/quality-assurance.md`). Changes land
@@ -71,17 +73,44 @@ Read-only against the SQLite catalog at `<ingest-dir>/.photohelper/catalog.db`.
 Pass `--catalog <db-path>` instead of a directory for a custom location.
 Run `just list-catalog --help` for the full flag list.
 
-## Roadmap (per the bootstrap plan)
+### Cull a catalog (planned — session 04+)
 
-- **v0.1 (AI-first MVP)** — Canon R8 (CR3) ingest, AI culling (NIMA/ARNIQA
-  quality + SCRFD/MediaPipe face & eye-state + MobileCLIP dup grouping → auto
-  1-5 star rating), classical develop (demosaic, WB, exposure, tone curve),
-  AI RGB denoise (model TBD pending session-04 plan-review), JPEG export
-  with long-edge resize + watermarks, XMP
-  sidecars (Lightroom-compatible `crs:` + private `ph:`).
+AI culling (`photohelper cull`) is not yet implemented. The `cull` subcommand
+exits with a "not yet implemented in v0.1" message. Planned scope for session
+04+: NIMA aesthetic scorer (requires an ONNX model with a clear MIT/Apache-2.0
+license — see `docs/analysis/ANL-002-ort-nima-preflight.md` for the blocker and
+resolution paths) + `cull_scores` catalog table + per-photo star assignment.
+
+### Avoiding the two-shell PATH drift footgun
+
+If you use Claude Code in one terminal and a separate shell in another, remember
+to `git pull --ff-only origin main` in your own shell after every PR merge.
+Scripts and binaries added in a session (e.g. `scripts/photohelper-clean-catalog.sh`)
+live on `main` only after the PR merges, so a shell that hasn't pulled yet will
+get `zsh: no such file or directory` when trying to run them.
+
+## Roadmap
+
+### Shipped (as of session 03 / 2026-05-28)
+
+| Subcommand | Status | Notes |
+|---|---|---|
+| `ingest` | **Shipped** | CR3 via LibRaw 0.22.1, BLAKE3 content IDs, SQLite catalog |
+| `cull` | Planned (session 04+) | Blocked on NIMA ONNX model with clear license (DN-026) |
+| `develop` | Planned (session 05+) | Demosaic, WB, exposure, tone curve, XMP sidecars |
+| `export` | Planned (session 05+) | Long-edge resize, orientation-aware watermarks, mozjpeg |
+| `run` | Planned (session 06+) | Orchestrate ingest → cull → develop → export |
+| `models` | Planned (session 04+) | Manage AI model bundles |
+| `camera` | Planned (session 04+) | Inspect camera profiles |
+
+### Planned milestones
+
+- **v0.1 (AI-first MVP)** — `ingest` ✓ + AI culling (NIMA aesthetic + ARNIQA
+  technical quality + MobileCLIP dup grouping → auto 1–5 star rating) + classical
+  develop (demosaic, WB, exposure, tone curve) + AI RGB denoise + JPEG export +
+  XMP sidecars (Lightroom-compatible `crs:` + private `ph:`).
 - **v0.5** — Canon R5 / R6 II profiles, semantic scene classification, AI
-  sharpen (Real-ESRGAN ×2-then-downsample), DirectML/CUDA acceleration,
-  per-camera noise calibration command.
+  sharpen, DirectML/CUDA acceleration, per-camera noise calibration.
 - **v1.0** — per-camera Bayer-domain denoise (PMRID/ELD fine-tuned per body)
   with community calibration — the differentiating moat versus DxO PureRAW
   and Aftershoot.

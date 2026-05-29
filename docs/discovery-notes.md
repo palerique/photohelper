@@ -40,7 +40,7 @@
 - **Observed**: v0.1 wires `ort` v2.0 (ONNX Runtime) directly inside `photohelper-cli`. A model crash on photo N takes down the run, losing progress on photos N+1…M. Subprocess sandbox (a tiny helper binary per inference) would be more robust at the cost of IPC overhead. The plan defers this to v0.5 reassessment.
 - **Why it matters**: Large-batch users (thousands of photos) are exactly the audience that benefits from crash isolation, but they're also exactly the audience that pays the IPC overhead per photo. Need real-world crash-rate data before committing.
 - **Owner**: future session if crash reports surface from real users.
-- **Status**: open
+- **Status**: **CLOSED** (addendum, session 03 D7). Session 03 decides in-process for v0.1 — subprocess IPC overhead is unacceptable before crash-rate data exists. Reassessment trigger: 5+ GitHub issues tagged `crash:ort-inference` OR 2026-12-01, whichever first. ADR-0003 dropped from scope (a deferral with a reassessment trigger is not a binding architectural decision).
 
 ### DN-004 — Sidecar conflict UX when user edited in Lightroom after photohelper processed (2026-05-27, session 0)
 
@@ -178,7 +178,7 @@
 - **Why it matters**: Two-shell workflows (Claude Code in one window, the user's daily terminal in another) silently diverge unless the user remembers to `git pull --ff-only origin main` after every merge. The current Quickstart in `README.md` does not call this out.
 - **Owner**: future Quickstart-section refinement (session 03 docs-pass or whenever the README is touched next). One-paragraph addition under § Development would suffice.
 - **Binding trigger**: next README touch OR next operator-reported "no such file or directory" repro (informational tracking only).
-- **Status**: open (informational; no immediate harm beyond the user's confusion in this one session).
+- **Status**: **CLOSED** — session 03 D7 added a `### Avoiding the two-shell PATH drift footgun` callout to `README.md § Quickstart`. Users are now directed to `git pull --ff-only origin main` after every PR merge when operating dual-shell.
 
 ### DN-022 — LibRaw demosaic algorithm selection for NIMA preprocessing (2026-05-28, session 03)
 
