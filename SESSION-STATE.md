@@ -16,40 +16,35 @@ script + `just clean-catalog`) and PR #4 merge `1d31316` (list script
 + `just list-catalog`). Session 02 post-merge two-block handoff WAS
 rendered (per the previous context window's session-end response).
 
-**Current session**: **03** (`ai-culling-skeleton`) — **PLAN V2
-COMMITTED; ROUND 2 PENDING.** Branch: `session-03/ai-culling-skeleton`.
-Plan v1 at `319a25d`; Round-1 artifact at `7fd1dea`; plan v2 committed
-at `dc95639` (R1 remediation of 10 CRITICAL + 18 HIGH + 5 MEDIUM).
+**Current session**: **03** (`ai-culling-skeleton`) — **PLAN-REVIEW
+COMPLETE; READY FOR IMPLEMENTATION.** Branch:
+`session-03/ai-culling-skeleton`. Plan v4 (final) at HEAD. Plan-review
+ran 4 rounds (R1 → R2 → R3 → R4), all converging to 0 CRITICAL, 0 HIGH.
 
 **Goal** (session 03): End-to-end AI culling pipeline (NIMA aesthetic
 scorer + catalog v1→v2 migration + `cull_scores` table + cull subcommand
 rewire) plus full TD-010 closure (Deliverable-6 test infrastructure)
-plus DN-020 stub-message fix. `dup_groups` deferred to session 04+
-(PR1-T30).
+plus DN-020 stub-message fix. `dup_groups` deferred to session 04+.
 
-**Action**: **PLAN V2 READY FOR ROUND 2.** Plan v2 committed at
-`dc95639`. Next: fire plan-review Round 2 (full 8-agent suite) →
-remediate R2 findings → commit plan v3 → Round 3 if CRITICAL → begin
-implementation.
+**Action**: **BEGIN IMPLEMENTATION.** Start with D6 (first-chore commit:
+DN-020 stub-message fix) then D0 (pre-flight: ort + NIMA audit, binding
+on Session::run receiver type) then D1a → D1b/c → D1d → D2a/b/c → D3 →
+D4 → D5 → D7. Sub-component reviews fire at D1c (photohelper-ai) and
+D2b (catalog migration) boundaries per the plan checkpoints table.
 
 **Status**: `just ci` GREEN on branch `session-03/ai-culling-skeleton`.
-118 workspace tests pass (unchanged from main). Branch is docs/plan
-artifacts only; no implementation code. 4 commits on branch:
-- `319a25d` — docs(session-03): plan contract (top block, v1)
-- `79be4d4` — chore(session-03): save intermediate state for context refresh
-- `7fd1dea` — docs(session-03): plan-review Round 1 artifact
-- `dc95639` — docs(session-03): plan v2 — R1 remediation (10 CRITICAL + 18 HIGH)
+118 workspace tests pass (unchanged from main). Branch is docs/plan +
+review artifacts only; no implementation code yet. Plan-review COMPLETE.
 
-**Plan-review history (session 03)**:
-R1 surfaced 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW = 43 themes.
-All 34 CRITICAL+HIGH findings verified by 9th-agent (0 hallucinated).
-Plan v2 (dc95639) closes all 10 CRITICAL + 18 HIGH + 5 MEDIUM.
-Key structural changes: D0 resequenced first; no Migration trait (match arm);
-dup_groups deferred; no Scorer trait (concrete &Nima); VerifiedModelBytes type-state;
-per-worker ort Session; D5c restructured (no panic in heartbeat_loop);
-read_raw_rgb via LibRaw dcraw_process; 5 new TDs (TD-012–TD-016);
-4 new DNs (DN-022–DN-025).
-R2 fires against plan v2 next.
+**Plan-review history (session 03 — COMPLETE)**:
+- R1 → 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW → plan v2 (dc95639)
+- R2 → 3 CRITICAL + 10 HIGH + 9 MEDIUM + 4 LOW → plan v3 (285675e)
+- R3 → 3 CRITICAL + 4 HIGH + 2 MEDIUM + 1 LOW → plan v4 (a9f7152 + fixups)
+- R4 → 0 CRITICAL + 0 HIGH + 2 MEDIUM (resolved inline) → CLEAN
+All CRITICAL findings across all 4 rounds: 0 hallucinated; discard_rate=0.00.
+Plan v4 (final): D6 first-chore → D0 pre-flight (binding on Session::run
+receiver: &self=Arc<Nima>, &mut self=thread_local!) → D1a–D1d → D2a–D2c →
+D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 
 ---
 
