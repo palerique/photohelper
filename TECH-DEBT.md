@@ -283,7 +283,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-020 — CLIP preprocessing uses bilinear 1:1 resize instead of bicubic center-crop
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-29, session 06 D2e). Replaced `nima::bilinear_resize(rgb, 224, 224)` with `clip_preprocess(rgb)` in `mobileclip.rs`. `clip_preprocess` implements Catmull-Rom bicubic resize (shorter edge → 256px) + center-crop (224×224), matching the CLIP training preprocessing used by OpenCLIP. `bilinear_resize` in `nima.rs` demoted from `pub(crate)` to `fn` (NIMA-only, file-private). Integration test `clip_embed_two_fixtures_golden_cosine_similarity` threshold tightened from ≥0.80 to ≥0.90 and passes.
 - **Opened**: 2026-05-29 (session 05, D1c — `MobileClip::embed`)
 - **Stop-gap location**:
   - `crates/photohelper-ai/src/mobileclip.rs:82` — calls `nima::bilinear_resize(rgb, 224, 224)` @ commit (session 05 D1c). In-source: `// TD-020: bicubic center-crop deferred`.

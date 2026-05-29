@@ -73,11 +73,11 @@ fn clip_embed_cc0_fixture_dim_and_norm() {
 ///
 /// Empirical results (Apple Silicon CPU):
 /// - Python + PIL bicubic (D0 probe): cosine_sim ≈ 0.923
-/// - Rust + bilinear (this implementation): cosine_sim ≈ 0.843
+/// - Rust + bicubic center-crop (TD-020 fix, session 06): cosine_sim ≥ 0.90
 ///
-/// The Rust bilinear resize (TD-020 stop-gap) produces lower-quality
-/// preprocessed images than PIL's bicubic, hence the lower similarity.
-/// Threshold 0.80 provides margin for cross-platform f32 variation (DN-027).
+/// Threshold tightened from ≥0.80 (bilinear stop-gap) to ≥0.90 (bicubic,
+/// matching Python OpenCLIP reference more closely). Cross-arch f32 variation
+/// (DN-027) is absorbed by the 0.90 lower bound.
 /// Lower bound of 0.98 guards against identical-image false positives.
 #[test]
 fn clip_embed_two_fixtures_golden_cosine_similarity() {
@@ -96,9 +96,10 @@ fn clip_embed_two_fixtures_golden_cosine_similarity() {
         .expect("same-model embeddings must have equal dim");
 
     // Similar Canon R8 scenes → meaningful (not random) embedding similarity.
+    // Threshold tightened from ≥0.80 (bilinear TD-020 stop-gap) to ≥0.90 (bicubic).
     assert!(
-        sim >= 0.80,
-        "cosine_sim(CRAW, RAW) must be ≥ 0.80; got {sim:.6}"
+        sim >= 0.90,
+        "cosine_sim(CRAW, RAW) must be ≥ 0.90 (bicubic preprocessing); got {sim:.6}"
     );
     // Distinct images (different exposures / content) → not identical.
     assert!(
