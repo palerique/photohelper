@@ -83,7 +83,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-005 — Heartbeat env-var-triggered panic site is a test-affordance in a production-path function
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-29, session 06 D2c). Session 05 D4 extracted `heartbeat_loop` to `crates/photohelper-cli/src/heartbeat.rs` as `run_heartbeat_loop`. The `PHOTOHELPER_HEARTBEAT_PANIC_FOR_TESTING` env-var panic site is fully gone — it does not exist anywhere in the codebase. The TD-010 test seam (`spawn_dying_heartbeat` in `heartbeat.rs:91`) is `#[cfg(test)]`-gated, not an env-var trigger. Production code path is panic-free. Fundamental fix delivered organically by session 05 D4; TD-005 was not explicitly tracked for closure at that time.
 - **Opened**: 2026-05-28 (session 2, R3-T3)
 - **Stop-gap location**: `crates/photohelper-cli/src/commands/ingest.rs::heartbeat_loop` @ commit (session 02 implementation). Panic site is `#[allow(clippy::panic, reason = "...")]`-annotated AND `cfg!(debug_assertions)`-gated; release builds compile out the env-var read entirely so the panic surface is unreachable in production. Test-only.
 - **Fundamental fix**: factor the heartbeat-death-WARN regression test (R2-T18 path 4) into a dev-deps-only utility crate `photohelper-test-helpers` that exposes a `pub fn force_heartbeat_panic_in_thread(handle: &JoinHandle<()>)` helper. The production `heartbeat_loop` becomes panic-free; the test-helper crate is `[dev-dependencies]`-only in `photohelper-cli/Cargo.toml`. Removes the `#[allow(clippy::panic)]` site.
