@@ -660,11 +660,21 @@ impl Catalog {
         dim: usize,
         embedded_at_unix_seconds: i64,
     ) -> Result<InsertEmbeddingOutcome, Error> {
+        // Rust-level guard mirrors insert_cull_score's score-range check: INSERT OR IGNORE
+        // silently swallows ALL SQLite constraint violations (UNIQUE, CHECK, NOT NULL), so
+        // a dim outside [1, 65536] would return AlreadyEmbedded instead of an error.
+        if dim == 0 || dim > 65536 {
+            return Err(Error::CatalogInsert {
+                photo_id,
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("dim {dim} is outside valid range [1, 65536]"),
+                )),
+            });
+        }
         let mut guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
             path: self.canonical_path.clone(),
         })?;
-        // dim is guaranteed > 0 by ImageEmbedding's constructor invariant, but the
-        // CHECK(dim > 0) in the schema enforces it at the DB layer regardless.
         let id_bytes = photo_id.as_bytes().to_vec();
         let tx = guard
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -693,8 +703,9 @@ impl Catalog {
 
     /// Load all embeddings for `model_slug` as raw f32 LE byte slices.
     ///
-    /// Returns `(PhotoId, embedding_bytes)` pairs; the caller (CLI clustering
-    /// pass) constructs `ImageEmbedding` via `ImageEmbedding::from_f32_le_bytes`.
+    /// Returns `(PhotoId, embedding_bytes, dim)` triples; the caller (CLI clustering
+    /// pass) constructs `ImageEmbedding` via `ImageEmbedding::from_f32_le_bytes` and
+    /// validates `dim == bytes.len() / 4` to catch corruption early.
     /// Loaded in a single query for the O(n²) clustering pass.
     ///
     /// # Errors
@@ -702,12 +713,12 @@ impl Catalog {
     pub fn all_embeddings_for_model(
         &self,
         model_slug: &str,
-    ) -> Result<Vec<(PhotoId, Vec<u8>)>, Error> {
+    ) -> Result<Vec<(PhotoId, Vec<u8>, usize)>, Error> {
         let guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
             path: self.canonical_path.clone(),
         })?;
         let mut stmt = guard
-            .prepare("SELECT photo_id, embedding FROM embeddings WHERE model_slug = ?1")
+            .prepare("SELECT photo_id, embedding, dim FROM embeddings WHERE model_slug = ?1")
             .map_err(|e| Error::CatalogOpen {
                 path: self.canonical_path.clone(),
                 source: Box::new(e),
@@ -716,7 +727,8 @@ impl Catalog {
             .query_map(rusqlite::params![model_slug], |row| {
                 let id_bytes: Vec<u8> = row.get("photo_id")?;
                 let embedding: Vec<u8> = row.get("embedding")?;
-                Ok((id_bytes, embedding))
+                let dim: i64 = row.get("dim")?;
+                Ok((id_bytes, embedding, dim))
             })
             .map_err(|e| Error::CatalogOpen {
                 path: self.canonical_path.clone(),
@@ -724,7 +736,7 @@ impl Catalog {
             })?;
         let mut out = Vec::new();
         for r in rows {
-            let (id_bytes, embedding) = r.map_err(|e| Error::CatalogOpen {
+            let (id_bytes, embedding, dim_i64) = r.map_err(|e| Error::CatalogOpen {
                 path: self.canonical_path.clone(),
                 source: Box::new(e),
             })?;
@@ -740,7 +752,7 @@ impl Catalog {
                         )),
                     })?;
             let photo_id = photohelper_core::catalog_glue::photo_id_from_row_bytes(id_arr);
-            out.push((photo_id, embedding));
+            out.push((photo_id, embedding, dim_i64 as usize));
         }
         Ok(out)
     }
@@ -994,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_fresh_db_initializes_to_v2() {
+    fn catalog_fresh_db_initializes_to_v3() {
         let dir = tempfile::tempdir().unwrap();
         let cat = dir.path().join("fresh.db");
         let c = Catalog::open(&cat, 1).unwrap();
@@ -1170,7 +1182,7 @@ mod tests {
     // =========================================================
 
     #[test]
-    fn migration_v2_to_v3_is_idempotent() {
+    fn migration_v2_to_v3_reopen_succeeds() {
         // Build a v2 DB, open twice — second open must not fail or change version.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("v2.db");
@@ -1513,18 +1525,17 @@ mod tests {
         let results = cat.all_embeddings_for_model("clip-v1").unwrap();
         assert_eq!(results.len(), 2, "must retrieve both embeddings");
 
-        // Verify bytes round-trip correctly.
-        let map: std::collections::HashMap<_, _> = results.into_iter().collect();
-        assert_eq!(
-            map[&p1.photo_id()],
-            emb1,
-            "p1 embedding bytes must round-trip"
-        );
-        assert_eq!(
-            map[&p2.photo_id()],
-            emb2,
-            "p2 embedding bytes must round-trip"
-        );
+        // Verify bytes + dim round-trip correctly.
+        let map: std::collections::HashMap<_, _> = results
+            .into_iter()
+            .map(|(pid, bytes, dim)| (pid, (bytes, dim)))
+            .collect();
+        let (bytes1, dim1) = &map[&p1.photo_id()];
+        assert_eq!(bytes1, &emb1, "p1 embedding bytes must round-trip");
+        assert_eq!(*dim1, 512_usize, "p1 dim must round-trip");
+        let (bytes2, dim2) = &map[&p2.photo_id()];
+        assert_eq!(bytes2, &emb2, "p2 embedding bytes must round-trip");
+        assert_eq!(*dim2, 512_usize, "p2 dim must round-trip");
 
         // Different model → empty result.
         let empty = cat.all_embeddings_for_model("other-model").unwrap();
@@ -1562,6 +1573,60 @@ mod tests {
         assert_eq!(
             cluster_id, 7,
             "INSERT OR REPLACE must overwrite previous assignment"
+        );
+    }
+
+    #[test]
+    fn insert_embedding_dim_zero_rejects_with_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("dim.db"), 1).unwrap();
+        let photo = make_test_photo(dir.path(), 1);
+        cat.upsert(&photo, 0).unwrap();
+
+        // dim=0 must be caught by the Rust-level guard before INSERT OR IGNORE
+        // can swallow the CHECK constraint violation.
+        let err = cat
+            .insert_embedding(photo.photo_id(), "clip-v1", &[0u8; 0], 0, 1000)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogInsert { .. }),
+            "dim=0 must return CatalogInsert, not AlreadyEmbedded"
+        );
+    }
+
+    #[test]
+    fn insert_embedding_fk_violation_with_nonexistent_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("fk2.db"), 1).unwrap();
+        let fake_pid = photo_id_from_row_bytes([0xFFu8; 32]);
+        let emb = make_unit_embedding_bytes(512);
+
+        // SQLite docs: ON CONFLICT clause (OR IGNORE) does NOT apply to FOREIGN KEY
+        // constraints — only to UNIQUE, NOT NULL, CHECK, and ROWID. So a FK violation
+        // with INSERT OR IGNORE still fires as a ConstraintViolation error.
+        let err = cat
+            .insert_embedding(fake_pid, "clip-v1", &emb, 512, 1000)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogInsert { .. }),
+            "FK violation must surface as CatalogInsert, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn insert_dup_cluster_with_missing_embedding_fails() {
+        // API-level test: insert_dup_cluster without matching embeddings row.
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("dcfk.db"), 1).unwrap();
+        let photo = make_test_photo(dir.path(), 1);
+        cat.upsert(&photo, 0).unwrap();
+        // No embedding inserted → FK violation in dup_clusters.
+        let err = cat
+            .insert_dup_cluster(photo.photo_id(), "clip-v1", 0, 0.95, 1000)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogInsert { .. }),
+            "FK violation must surface as CatalogInsert, got: {err:?}"
         );
     }
 

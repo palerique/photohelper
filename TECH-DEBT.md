@@ -299,6 +299,34 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-017 — O(n²) union-find clustering; O(n × dim) memory for clustering pass
+
+- **Status**: Open (prospective — `dedup.rs` not yet created; D3 deferred)
+- **Opened**: 2026-05-29 (session 05, D2b planning — stop-gap S1)
+- **Stop-gap location**: Prospective — `crates/photohelper-cli/src/commands/dedup.rs::threshold_cluster` will be the stop-gap location when D3 lands. Will carry in-source `// TD-017: O(n²) clustering stop-gap` at the call site.
+- **Fundamental fix**: replace the O(n²) union-find pairwise-comparison clustering with DBSCAN (density-based spatial clustering) or hierarchical agglomerative clustering. Both support cosine distance, have O(n log n) variants, and avoid materializing the full n×n similarity matrix. A k-NN index (e.g. FAISS or hnswlib via ort or a Rust crate) would reduce the similarity computation from O(n²) to O(n · k · log n).
+- **Binding trigger**: n > 10K photos in a real user corpus OR user request for faster/lower-memory clustering. At n=10K × 512 dims × 4 bytes ≈ 20 MB embedding memory + 100M pairwise comparisons.
+- **Scope estimate**: ~100 LoC (DBSCAN impl or k-NN integration) / medium risk (changes clustering output; must verify cluster stability).
+- **Consequence of inaction**: wall-clock clustering time grows as O(n²); for n=10K photos this is ~25 seconds (estimated); for n=100K photos this is ~40 minutes.
+- **Related**: plan `docs/plans/session-05.md § threshold_cluster`; DN-027 (cross-platform embedding tolerance for clustering threshold).
+
+---
+
+### TD-018 — Embedding stored as raw f32 LE bytes; quantization='f32' hardcoded
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 05, D2b — `insert_embedding` + `MIGRATE_V2_TO_V3_SQL`)
+- **Stop-gap location**:
+  - `crates/photohelper-catalog/src/schema.rs` (`quantization TEXT NOT NULL DEFAULT 'f32'` in `MIGRATE_V2_TO_V3_SQL`) @ session 05 D2a commit. In-source: none yet (schema constant).
+  - `crates/photohelper-catalog/src/catalog.rs::insert_embedding` (hardcodes `'f32'` literal in SQL) @ session 05 D2b commit. In-source: `// TD-018: embedding stored as raw f32 LE bytes; quantization='f32' hardcoded.`
+- **Fundamental fix**: extend `insert_embedding` to accept a `quantization: &str` parameter; update `all_embeddings_for_model` to read the `quantization` column and dispatch deserialization accordingly (f32 LE, int8, f16). Add `EmbeddingBlob { photo_id, bytes, dim, quantization }` as the return type of `all_embeddings_for_model` to carry the full context. Requires no migration (the column already exists in v3 with DEFAULT 'f32').
+- **Binding trigger**: first user request for int8/f16 quantization or storage-size complaint.
+- **Scope estimate**: ~30 LoC in catalog (parameter + dispatch) + CLI call-site updates / low risk.
+- **Consequence of inaction**: all embeddings stored as f32 (4 bytes × dim). At 512 dims and 370 photos, this is ~750 KB — negligible for v0.1. At 100K photos it becomes ~200 MB. int8 would halve the storage.
+- **Related**: `docs/decisions/0003-catalog-schema-v3.md § Stop-gaps`; `crates/photohelper-catalog/src/catalog.rs::insert_embedding`.
+
+---
+
 ### TD-019 — No per-dedup-run audit trail (`dedup_runs` table absent from v3 schema)
 
 - **Status**: Open
