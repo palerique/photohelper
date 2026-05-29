@@ -61,19 +61,19 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
-    /// Walk a directory + catalog RAW photos. Real work this session.
+    /// Walk a directory + catalog RAW photos.
     Ingest(IngestArgs),
-    /// AI culling (planned for session 03+).
+    /// AI culling (planned for v0.1; blocked on NIMA model license — see docs/analysis/ANL-002).
     Cull,
-    /// Apply develop settings via XMP sidecars (planned for session 04+).
+    /// Apply develop settings via XMP sidecars (planned for v0.1).
     Develop,
-    /// Export to JPEG with resize + watermark (planned for session 05).
+    /// Export to JPEG with resize + watermark (planned for v0.1).
     Export,
-    /// Run ingest → cull → develop → export (planned for session 06+).
+    /// Run ingest → cull → develop → export (planned for v0.1).
     Run,
-    /// Manage AI model bundles (planned for session 03+).
+    /// Manage AI model bundles (planned for v0.1).
     Models,
-    /// Inspect / list known camera profiles (planned for session 02+).
+    /// Inspect / list known camera profiles (planned for v0.1).
     Camera,
 }
 
@@ -99,8 +99,26 @@ mod exit_code {
     pub const EX_USAGE: u8 = 64;
     /// Fatal IO / catalog / config errors.
     pub const EX_IOERR: u8 = 74;
+    /// Catalog lock held by another process (retry later).
+    pub const EX_TEMPFAIL: u8 = 75;
+    /// Permission denied (read-only filesystem or missing write access).
+    pub const EX_NOPERM: u8 = 77;
     /// `--strict` escalation (POSIX generic failure).
     pub const EX_STRICT_FAIL: u8 = 1;
+}
+
+/// Map a fatal `anyhow::Error` (which wraps a `photohelper_core::Error` on the
+/// ingest path) to the appropriate POSIX exit code.
+fn exit_code_for_error(err: &anyhow::Error) -> u8 {
+    use photohelper_core::Error;
+    err.downcast_ref::<Error>()
+        .map_or(exit_code::EX_IOERR, |e| match e {
+            Error::CatalogLockHeld { .. } => exit_code::EX_TEMPFAIL,
+            Error::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied => {
+                exit_code::EX_NOPERM
+            }
+            _ => exit_code::EX_IOERR,
+        })
 }
 
 fn main() -> ExitCode {
@@ -112,20 +130,23 @@ fn main() -> ExitCode {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
                 tracing::error!("{err:#}");
-                ExitCode::from(exit_code::EX_IOERR)
+                ExitCode::from(exit_code_for_error(&err))
             }
         },
-        Command::Cull => stub("cull", "session 03"),
-        Command::Develop => stub("develop", "session 04"),
-        Command::Export => stub("export", "session 05"),
-        Command::Run => stub("run", "session 06"),
-        Command::Models => stub("models", "session 03"),
-        Command::Camera => stub("camera", "session 02"),
+        Command::Cull => stub("cull"),
+        Command::Develop => stub("develop"),
+        Command::Export => stub("export"),
+        Command::Run => stub("run"),
+        Command::Models => stub("models"),
+        Command::Camera => stub("camera"),
     }
 }
 
-fn stub(name: &str, planned_in: &str) -> ExitCode {
-    eprintln!("photohelper {name}: not yet implemented (planned for {planned_in})");
+fn stub(name: &str) -> ExitCode {
+    eprintln!(
+        "photohelper {name}: not yet implemented in v0.1 (ingest only); \
+         see README.md for the current scope."
+    );
     ExitCode::from(exit_code::EX_UNAVAILABLE)
 }
 

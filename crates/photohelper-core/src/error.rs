@@ -116,6 +116,16 @@ pub enum Error {
         path: PathBuf,
     },
 
+    /// A catalog-level transaction operation failed unexpectedly (e.g. ROLLBACK
+    /// returning an error other than "no active transaction").
+    #[error("catalog transaction error during {op}: {source}")]
+    CatalogTransaction {
+        /// Short tag describing the operation (e.g. `"rollback-after-worker-panic"`).
+        op: &'static str,
+        /// Underlying rusqlite error.
+        source: BoxedSourceError,
+    },
+
     /// A walked path canonicalized to outside the ingestion root.
     #[error("path escapes ingestion root: {path} not under {root}")]
     PathEscapesRoot {

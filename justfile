@@ -14,6 +14,12 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set dotenv-load := false
 
+# Ensure cargo subcommands (cargo-fmt, cargo-clippy, etc.) are on PATH.
+# When rustup is installed via Homebrew the toolchain bin isn't symlinked into
+# /opt/homebrew/bin, so `just` recipes that invoke `cargo fmt` fail with
+# "no such command: fmt" unless we prepend the active toolchain's bin directory.
+export PATH := `rustup which cargo 2>/dev/null | xargs -I{} dirname {} 2>/dev/null || echo ""` + ":" + env('PATH', '')
+
 # Default recipe — lists the others so bare `just` shows help.
 default:
     @just --list --unsorted
@@ -121,10 +127,16 @@ hooks-run-all:
 # `ci` runs exactly what .github/workflows/ci.yml runs, in the same order, so
 # `just ci` passing locally is equivalent to CI passing. Keep this list in
 # sync with the workflow file.
-ci: fmt-check lint test audit unsafe-isolation sanitize-check
+ci: fmt-check lint test audit unsafe-isolation sanitize-check test-helpers-dev-only
     @./scripts/verify-state.sh
     @prek run --all-files
     @prek run --all-files --hook-stage pre-push
+
+# D5c E2E: verify photohelper-test-helpers appears only as a dev-dependency.
+# Any non-dev consumer is a policy violation — test helpers must not be linked
+# into release artifacts.
+test-helpers-dev-only:
+    @./scripts/check-test-helpers-dev-only.sh
 
 # Sanitization gate for tests/fixtures/cr3/*.CR3 — every fixture must
 # contain only the asserted-survivor EXIF tag set (no GPS / lens serial

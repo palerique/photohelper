@@ -40,7 +40,7 @@
 - **Observed**: v0.1 wires `ort` v2.0 (ONNX Runtime) directly inside `photohelper-cli`. A model crash on photo N takes down the run, losing progress on photos N+1…M. Subprocess sandbox (a tiny helper binary per inference) would be more robust at the cost of IPC overhead. The plan defers this to v0.5 reassessment.
 - **Why it matters**: Large-batch users (thousands of photos) are exactly the audience that benefits from crash isolation, but they're also exactly the audience that pays the IPC overhead per photo. Need real-world crash-rate data before committing.
 - **Owner**: future session if crash reports surface from real users.
-- **Status**: open
+- **Status**: **CLOSED** (addendum, session 03 D7). Session 03 decides in-process for v0.1 — subprocess IPC overhead is unacceptable before crash-rate data exists. Reassessment trigger: 5+ GitHub issues tagged `crash:ort-inference` OR 2026-12-01, whichever first. ADR-0003 dropped from scope (a deferral with a reassessment trigger is not a binding architectural decision).
 
 ### DN-004 — Sidecar conflict UX when user edited in Lightroom after photohelper processed (2026-05-27, session 0)
 
@@ -55,6 +55,7 @@
 - **Why it matters**: First session that writes catalog rows (session 01 for the `ingest` slice) needs at least a `photos` table; a half-baked schema becomes a migration headache.
 - **Owner**: session 01 (minimal schema) + session 02 (full schema once `cull` adds dup-group and culling-score tables).
 - **Status**: partially resolved 2026-05-28 — session 01 lands v1 single-table `photos` schema; authoritative spec at `docs/decisions/0001-catalog-schema-v1.md`. Session 02 still owes cull-score + dup-group tables + the migration framework v1 → v2 (per the decision doc's "Migration policy" section).
+  - **Update (2026-05-28, session 03 plan-review R1 remediation — PR1-T36)**: session 03 owns the v1→v2 migration + `cull_scores` table per decision-doc 0001 § Amendments 2026-05-28. `dup_groups` table deferred to session 04+ (DN-024). "Session 02" owner above crossed out; session 03 is the authoritative owner. DN-005 will be fully closed when session 03's PR merges.
 
 ### DN-006 — kamadak-exif cannot parse Canon R8 CR3 (both synthetic AND real CR3 fixtures) (2026-05-28, session 1; upgraded 2026-05-28 by DN-011)
 
@@ -169,7 +170,7 @@
 - **Why it matters**: Operators run these to see what's available and get a stale promise. Trust erodes.
 - **Owner**: session 03's first chore commit. One-line edit per stub source file — drop "planned for session 02" or replace with "not yet implemented; see SESSION-STATE.md for the current roadmap".
 - **Binding trigger**: session 03 session-start sweep — the SESSION-STATE.md Goal block surfaces this as a quick-win first-commit candidate.
-- **Status**: open (informational; deferred to session 03's first chore commit by binding trigger).
+- **Status**: **CLOSED** — session 03 D6 commit (`chore(cli): refresh stub-subcommand messages (closes DN-020)`). `stub()` rewritten (final wording after R1 review T-H remediation): `"not yet implemented in v0.1 (ingest only); see README.md for the current scope."` (`"ingest + cull only"` was the D6 draft; corrected to `"ingest only"` in R1 remediation because `cull` is also a stub). `planned_in` parameter removed; 6 call sites updated; test assertions tightened to the new wording; negative test added confirming `cull --help` does not show the stub message.
 
 ### DN-021 — Two-shell PATH drift footgun: scripts merged on `main` but invisible to a separate terminal session that hasn't pulled (2026-05-28, session 02.5)
 
@@ -177,4 +178,46 @@
 - **Why it matters**: Two-shell workflows (Claude Code in one window, the user's daily terminal in another) silently diverge unless the user remembers to `git pull --ff-only origin main` after every merge. The current Quickstart in `README.md` does not call this out.
 - **Owner**: future Quickstart-section refinement (session 03 docs-pass or whenever the README is touched next). One-paragraph addition under § Development would suffice.
 - **Binding trigger**: next README touch OR next operator-reported "no such file or directory" repro (informational tracking only).
-- **Status**: open (informational; no immediate harm beyond the user's confusion in this one session).
+- **Status**: **CLOSED** — session 03 D7 added a `### Avoiding the two-shell PATH drift footgun` callout to `README.md § Quickstart`. Users are now directed to `git pull --ff-only origin main` after every PR merge when operating dual-shell.
+
+### DN-022 — LibRaw demosaic algorithm selection for NIMA preprocessing (2026-05-28, session 03)
+
+- **Observed**: Session 03 adds `photohelper-raw::read_raw_rgb(path) -> Result<RgbImage>` via LibRaw's `dcraw_process` + `dcraw_make_mem_image` pipeline. LibRaw's default demosaic algorithm is AHD (Adaptive Homogeneity-Directed). NIMA was trained on consumer JPEGs produced by camera-native demosaic (typically a high-quality algorithm); the choice of demosaic algorithm may shift NIMA's score distribution slightly. LibRaw exposes alternative algorithms: AMaZE, AAHD, VNG4, DCB, and others via `imgdata.params.user_qual` (0=linear, 1=VNG, 2=PPG, 3=AHD, 11=AMaZE, 12=AAHD).
+- **Why it matters**: v0.1 uses the LibRaw default (AHD). If a future session's NIMA score distribution comparison vs. camera-native output shows systematic bias, the demosaic choice is the most likely cause. The develop pipeline (session 04+) may also want explicit algorithm selection for quality rendering.
+- **Owner**: session 04+ develop pipeline OR any session whose plan-review surfaces NIMA score bias as a quality regression. Cross-reference TD-012 (stop-gap for AHD default).
+- **Binding trigger**: session 04+'s first plan commit MUST include "demosaic algorithm selection for develop pipeline" as a §Deliverables item; if not, deferral rolls. Alternatively fires if NIMA score regression is documented in user feedback before session 04.
+- **Status**: open (informational; v0.1 uses LibRaw default AHD; TD-012 is the stop-gap tracker).
+
+### DN-023 — `cull_scores.photo_id` ON DELETE CASCADE absent from v2 schema (2026-05-28, session 03)
+
+- **Observed**: `cull_scores.photo_id REFERENCES photos(id)` with no `ON DELETE CASCADE`. In v0.1 there is no delete path for `photos` rows, so this is deliberately absent. If a future session adds photo deletion (`photohelper purge` or similar), orphan `cull_scores` rows would accumulate silently unless a delete path is also added to `cull_scores`. The FK *without* CASCADE means deletion of a `photos` row would fail (FK violation), which is actually a safer default for v0.1 — it prevents accidental orphaning.
+- **Why it matters**: If a delete path for photos is added, the `cull_scores` FK behavior must be explicitly decided: (a) `ON DELETE CASCADE` (scores auto-deleted with the photo), (b) `ON DELETE SET NULL` (scores orphaned for audit), or (c) keep the violating FK (the delete path must also clean `cull_scores` first). No correct answer exists without the delete use-case defined.
+- **Owner**: session that adds a delete path for `photos` rows. Decision-doc 0002 records this as a known open choice.
+- **Binding trigger**: first session whose plan includes `photohelper purge` or any `DELETE FROM photos` path. The plan-review for that session MUST include a resolution for `cull_scores.photo_id` FK behavior.
+- **Status**: open (informational; no v0.1 delete path exists; documented in decision-doc 0002).
+
+### DN-024 — MobileCLIP dup-detection compute deferred to session 04+ (2026-05-28, session 03)
+
+- **Observed**: Session 02's plan originally scoped `dup_groups` as a v2 schema table. Session 03 plan-review Round 1 (PR1-T30) found the table was under-specified (no dimension, no float-format, no model-identity column) and would ship with no writer — a schema-only stop-gap with no current value. Per decision-doc 0001:129 ("A single-statement migration doesn't justify framework overhead"), shipping a table with zero consumers also violates the spirit of the v2 migration: every table in v2 should have at least one producer session 03 can point to.
+- **Why it matters**: When MobileCLIP (or an alternative embedding model) arrives in session 04+, the schema design can be done correctly with the consumer's actual shape known. A premature schema must be migrated again (v3+), wasting a migration slot. Session 03 ships only `cull_scores` in v2.
+- **Owner**: session 04+ that adds the MobileCLIP producer. That session's plan MUST include: embedding table schema (`model_slug TEXT`, `dim INTEGER`, `quantization TEXT`, `embedding BLOB`), dimension validation at insert time, `dup_clusters` table for group assignment (separate from per-photo embeddings), and `v2→v3` migration.
+- **Binding trigger**: session 04+'s first plan commit IF MobileCLIP dup-detection is in scope for that session. If not, defers until the session that introduces the first embedding producer.
+- **Status**: open (dup_groups deferred from session 03 per PR1-T30 remediation; schema will be defined when the compute arrives).
+
+### DN-025 — NIMA cross-platform score tolerance (apple-silicon vs Linux x86_64) (2026-05-28, session 03)
+
+- **Observed**: ort CPU inference is deterministic per binary (same arch, same model, same ort version → same f32 output). However, f32 arithmetic is NOT bit-identical across CPU architectures: apple-silicon (arm64) and Linux x86_64 may produce NIMA scores differing by ~1e-3 due to FMA instruction presence/absence, SIMD lane ordering, and compiler vectorization differences. The golden-vector fixture committed on apple-silicon will not match the x86_64 CI score exactly.
+- **Why it matters**: If the Linux x86_64 CI runner asserts `score == golden` (exact), the test flakes non-deterministically across ort RC updates that change instruction scheduling. Session 03 mitigates with: (a) `±1e-3` tolerance on apple-silicon golden, (b) band assertion `score ∈ [3.0, 9.0]` on Linux x86_64 CI (based on actual D0 fixture scores ± safety margin). This is a known limitation of cross-arch f32 inference.
+- **Owner**: session that adds a second target architecture to CI (e.g., Linux arm64 or Windows x86_64). That session must extend the golden-vector fixture or switch to distribution-based assertions (e.g., assert that the score percentile within the NIMA training distribution is within ±5th percentile across architectures).
+- **Binding trigger**: first session adding a second native CI runner OR a user bug report of NIMA test flaking on a specific arch. OR by 2027-01-01 if the band assertion on Linux x86_64 CI fails 3+ consecutive runs (likely means the band is too tight for the chosen model's score range).
+- **Status**: open (informational; session 03 mitigates with tolerance + band; cross-arch full convergence deferred).
+
+### DN-026 — No NIMA ONNX model with explicit permissive license found (2026-05-28, session 03 D0 ABORT)
+
+- **Observed**: Session 03 D0 pre-flight (ANL-002) searched for a NIMA ONNX model with an explicitly stated MIT, Apache-2.0, or CC-BY-4.0 license to use as the photohelper-ai aesthetic scorer. Platforms searched: HuggingFace (ONNX+aesthetic filter, ONNX+nima filter), GitHub (nima+onnx query), PINTO0309 model zoo, ONNX Model Zoo. Only one candidate found: `cromsc/nima-mobilenet-aesthetic` on HuggingFace (file: `nima_mobilenet_aesthetic.onnx`, uploaded 2026-03-31). This model has **no license file, no license tag, and no model card** — provenance to the weight source is unconfirmed. Under copyright law, absent an explicit license, the work is all-rights-reserved.
+- **Why it matters**: `docs/plans/session-03.md § D0` requires "a NIMA ONNX model with a clear license + provenance + reproducible SHA-256" and ABORTs if the license is not in {MIT, Apache-2.0, CC-BY-4.0}. Without a clear license, the ABORT condition fires: session 03 cannot wire ort, commit the model binary, implement D1–D4 (AI culling pipeline), or implement D2 (catalog v1→v2 migration with cull_scores). See ANL-002 for full analysis.
+- **Owner**: session 04+ that adds the AI culling pipeline. That session MUST resolve this blocker before any ort dep is wired. Two resolution paths:
+  - **Path A (recommended)**: Export `idealo/image-quality-assessment` (Apache-2.0) MobileNet aesthetic Keras weights to ONNX via `tf2onnx` (also Apache-2.0). Record derivation script + SHA-256 sidecar + explicit Apache-2.0 license alongside the model binary. This path is self-sufficient and reproducible.
+  - **Path B**: Contact `cromsc` on HuggingFace requesting an explicit Apache-2.0 or MIT license declaration. Proceed only after the LICENSE file is confirmed live in the repository.
+- **Binding trigger**: session 04+ plan-review Round 1 MUST include a §D0 resolution with either (A) the `tf2onnx` export commit SHA + SHA-256 verified or (B) the `cromsc` license-confirmed commit SHA. No ort dep may land until this fires.
+- **Status**: **BLOCKER** — D0 ABORT triggered. AI culling pipeline (D1–D4) halted until resolved. ANL-002 records the full pre-flight findings (CVE-posture = clean, threading-semantics = `&mut self` confirmed).

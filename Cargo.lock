@@ -587,6 +587,7 @@ version = "0.0.0"
 dependencies = [
  "fs4",
  "photohelper-core",
+ "photohelper-test-helpers",
  "rusqlite",
  "static_assertions",
  "tempfile",
@@ -601,6 +602,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "filetime",
+ "fs4",
  "num_cpus",
  "photohelper-cameras",
  "photohelper-catalog",
@@ -644,6 +646,10 @@ dependencies = [
 
 [[package]]
 name = "photohelper-sidecar"
+version = "0.0.0"
+
+[[package]]
+name = "photohelper-test-helpers"
 version = "0.0.0"
 
 [[package]]

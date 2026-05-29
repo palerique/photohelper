@@ -176,22 +176,24 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
-### TD-010 — Deliverable 6 test infrastructure (poison_for_testing, R2-T18 4-WARN regressions, DN-008 rows) deferred from session 02 to a follow-up
+### TD-010 — PARTIALLY CLOSED. 2 sub-items remain (build_global + heartbeat-death-WARN in-process tests)
 
-- **Status**: Open
+- **Status**: PARTIALLY CLOSED (6a, 6b, 6c, 6d, 6e-rows-2+3, 6f all done in session 03). Remaining: 6e rows 1 + 4.
 - **Opened**: 2026-05-28 (session 2, Deliverable 6 deferral)
-- **Stop-gap location**: gap, not a commit — the items below were planned for session 02 per `docs/plans/session-02.md § Deliverable 6` but ship NOT done so the session goal (LibRaw FFI for CR3) could land on schedule.
-- **Fundamental fix**: a focused follow-up session lands every Deliverable 6 sub-item in the plan-locked order:
-  1. **6a `poison_for_testing` knob** on `Catalog` (3 tests: `poison_propagates_as_catalog_poisoned_error`, `poison_rollback_discards_panicked_workers_partial_insert`, `poison_recovery_admits_subsequent_inserts`).
-  2. **6b R2-M8 silent-ROLLBACK fix** (explicit match on "cannot rollback - no transaction is active" vs real errors).
-  3. **6c Heartbeat panic-for-testing env-var** (`PHOTOHELPER_HEARTBEAT_PANIC_FOR_TESTING=1`; debug_assertions-gated per R3-T3; subprocess integration test asserts `[heartbeat-death-WARN]` substring per R3-T7).
-  4. **6d DN-008 6 rows**: `{6, 17, 39, 42, 43, 49}` — trybuild compile-fail for `assert_send_sync!(Arc<Catalog>)`, hardlink dedup, --strict on CR3-only dir, walker edge cases (mtime future / nested / broken symlinks), mtime_anomalous flag round-trip, fatal exit codes (catalog locked / permission denied / disk full).
-  5. **6e R2-T18 4 WARN regression tests** (`build_global already initialized`, `wal_checkpoint recovered N frames`, `file-lock` op-tag, heartbeat death via env-var).
-  6. **6f R2-T19** already closed at session 01 R2; no action.
-- **Binding trigger**: opens the next session that touches `photohelper-catalog::Catalog` for any reason OR before session 04+ develop pipeline lands OR by 2026-08-01 — whichever first. R2-T18 is the most operator-facing gap and ranks highest if cherry-picking.
-- **Scope estimate**: ~400 LoC of test infrastructure / low-to-medium risk (mostly mechanical wiring; the `poison_for_testing` knob brushes against the catalog's `Send + Sync` invariants and warrants careful review).
-- **Consequence of inaction**: the safety-net tests R2-T18 invested in (specifically the heartbeat-death observability path) are absent — if heartbeat thread regressions slip in, operators lose their liveness signal without CI catching it. Acceptable for v0.1 (the manual smoke `photohelper ingest "$HOME/Pictures/tests" --strict` proved the heartbeat works end-to-end) but a real future risk.
-- **Related**: `docs/plans/session-02.md § Deliverable 6`; `docs/code-reviews/session-02-plan-round{2,3}.md § R2-T18 / R2-T3 / R3-T3 / R3-T7`.
+- **Partial closure (session 03)**: The following sub-items landed in session 03 D5a–D5e commits:
+  1. **6a `poison_for_testing` knob** — CLOSED. Commit D5a: `Catalog::poison_for_testing(&Arc<Self>)` + 3 poison tests.
+  2. **6b R2-M8 silent-ROLLBACK fix** — CLOSED. Commit D5b: explicit match on `extended_code == 1` (SQLITE_ERROR), propagates unexpected rollback failures. Note: plan cited `ApiMisuse` (rc=21); empirical test shows SQLite returns SQLITE_ERROR (rc=1).
+  3. **6c HeartbeatDeathTrigger** — CLOSED. Commit D5c: `crates/photohelper-test-helpers` crate + `HeartbeatDeathTrigger` struct + D5c-ii smoke test in catalog + D5c-E2E `just test-helpers-dev-only` check. The env-var approach (T3-T7) was replaced per plan v4 with this in-process helper.
+  4. **6d DN-008 6 rows** — CLOSED. Commit D5d: rows 17 (hardlink), 39 (strict+real-CR3), 42a (nested-dirs), 42b (broken-symlinks), 43 (mtime_anomalous), 49a (EX_TEMPFAIL), 49b (EX_NOPERM). Row 6 (assert_send_sync!) covered by existing static_assertions in catalog tests.
+  5. **6e rows 2+3 (wal_checkpoint + file-lock op-tag)** — CLOSED. Commit D5e.
+  6. **6f R2-T19** — already closed at session 01 R2.
+- **Remaining stop-gap location**: `ingest.rs` — `rayon::build_global` WARN (row 1) and heartbeat-death-WARN (row 4) have no regression tests.
+- **Remaining fundamental fix** (2 tests):
+  - **6e row 1** (`build_global already initialized`): requires calling `run_ingest` directly from a test binary (not subprocess), so the rayon global pool persists across the two calls. Pattern: add a `#[cfg(test)]` test module in `ingest.rs` that calls `run_ingest(...)` twice. OR: refactor ingest.rs to expose a `build_rayon_pool()` function that tests can call twice. ~20 LoC.
+  - **6e row 4** (heartbeat-death-WARN in-process): requires `run_ingest` to be callable in a test context where the heartbeat thread can be made to die before the walk finishes. Approach: extend `HeartbeatStop` with a `kill_for_test()` method (non-signal panic trigger), OR expose a test seam in `run_ingest` that replaces the heartbeat thread factory. ~30–50 LoC.
+- **Binding trigger**: next session that touches `commands/ingest.rs` for any reason. Both tests are small (<50 LoC combined) and low-risk once the test seam is identified.
+- **Consequence of inaction**: `build_global` WARN and heartbeat-death WARN have no automated regression coverage. The heartbeat-death WARN is the more operator-critical gap (operators rely on `[heartbeat]` liveness; a silent death would go undetected). Still acceptable for v0.1.
+- **Related**: `docs/plans/session-03.md § D5c-ii / D5e`; `docs/code-reviews/session-02-plan-round{2,3}.md § R2-T18`.
 
 ---
 
@@ -210,6 +212,71 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Scope estimate**: ~1 focused session (the full 8-agent suite + R2) / low-to-medium risk depending on what surfaces. The most likely findings categories: silent-failure patterns in the FFI error paths; type-design feedback on the `RawDecodeCause` cross-class dispatch (already filed as TD-006); test-coverage gaps for D6 already covered by TD-010.
 - **Consequence of inaction**: the safety-net the 8-agent review provides at session boundaries is absent for this PR. Any subtle design issue or silent-failure pattern in the substantial new LibRaw FFI surface (~700 LoC of unsafe-adjacent code) lands without the multi-perspective check the plan-review rounds invested in. The local CI (fmt + clippy + tests + audit + unsafe-isolation + sanitize-check) catches the gross issues; the agent review catches the subtle ones.
 - **Related**: `docs/plans/session-02.md § Quality gates`; `docs/quality-assurance.md § Double-review protocol`; this session's plan-review R1/R2/R3 artifacts (which DID fire — only the SESSION-END double-review is deferred).
+
+---
+
+### TD-012 — LibRaw AHD demosaic algorithm stop-gap for NIMA preprocessing
+
+- **Status**: Open
+- **Opened**: 2026-05-28 (session 3, D1c plan-review R1 remediation — PR1-T20)
+- **Stop-gap location**: `crates/photohelper-raw/src/decode.rs::read_raw_rgb` + `crates/photohelper-ai/src/nima.rs` preprocessing call @ session 03 D1c commit. In-source: `// TD-012: AHD demosaic stop-gap`.
+- **Fundamental fix**: expose `imgdata.params.user_qual` in the LibRaw FFI shim; add a `DemosaicAlgorithm` enum to `photohelper-raw`; extend `read_raw_rgb(path, alg)` to accept the algorithm selector. The develop pipeline (session 04+) requires explicit algorithm choice (AMaZE or AAHD for quality rendering); NIMA may benefit from a specific algorithm to more closely match camera-native output.
+- **Binding trigger**: session 04+'s develop pipeline OR user-reported NIMA score bias traceable to demosaic quality. Cross-reference DN-022 + DN-023.
+- **Scope estimate**: ~30 LoC (FFI binding + enum + API extension + tests) / low risk.
+- **Consequence of inaction**: v0.1 NIMA scores are computed from AHD-demosaiced images; if the NIMA model's training distribution assumed a different demosaic algorithm, scores may be systematically shifted. For v0.1 this is acceptable (no baseline comparison exists); for v0.2+ quality benchmarking it becomes measurable.
+- **Related**: `docs/discovery-notes.md § DN-022` (demosaic algorithm selection); `docs/plans/session-03.md § D1c`. (Note: DN-023 is unrelated to this TD — it covers ON DELETE CASCADE absence, not demosaic.)
+
+---
+
+### TD-013 — Per-cull-run audit trail absent from `cull_scores`
+
+- **Status**: Open
+- **Opened**: 2026-05-28 (session 3, stop-gap declaration — PR1-T7)
+- **Stop-gap location**: `crates/photohelper-catalog/src/catalog.rs::insert_cull_score` + `cull_scores` schema @ session 03 D2b commit. In-source: `// TD-013: per-cull-run audit trail absent`.
+- **Fundamental fix**: add a `cull_run_id INTEGER` column to `cull_scores` referencing a new `cull_runs` table (`id`, `scorer`, `ort_version`, `model_sha256`, `started_at`, `finished_at`, `config_json`). Each `photohelper cull` invocation creates one `cull_runs` row; each `cull_scores` row references its run. This lets users see "I ran cull 3 times; what changed between run 1 and run 3?"
+- **Binding trigger**: first user report of "I ran cull twice but can't see what changed" OR before v0.3 (when cull is expected to be a recurring workflow, not a one-shot). Requires a v2→v3 catalog migration.
+- **Scope estimate**: ~80 LoC (`cull_runs` table + `cull_run_id` FK + `run_cull` transaction wrapping + query path extension + tests) / medium risk (touches `Catalog` API + per-insert hot path).
+- **Consequence of inaction**: users running cull repeatedly cannot compare run outcomes or trace which model version produced which score. v0.1 single-run assumption is codified in the schema; changing it later requires a migration.
+- **Related**: `docs/plans/session-03.md § §Stop-gap declarations`; `docs/decisions/0002-catalog-schema-v2.md`.
+
+---
+
+### TD-014 — ort RC pin requires upgrade to stable 2.0.0
+
+- **Status**: Open
+- **Opened**: 2026-05-28 (session 3, D1a plan-review R1 remediation — PR1-T11)
+- **Stop-gap location**: `Cargo.toml` `[workspace.dependencies]` `ort = { version = "=<pin-from-D0>", ... }` (exact RC pin from ANL-002) @ session 03 D1a commit. In-source: `// TD-014: ort RC pin; upgrade to stable 2.0.0 when released`.
+- **Fundamental fix**: when ort 2.0.0 stable is published on crates.io, update `Cargo.toml` to `ort = { version = "=2.0.0" }`, run `cargo test --all-features --workspace`, and resolve any API breaks between the RC and stable. Test the golden-vector fixture to confirm inference determinism is preserved across the version bump.
+- **Binding trigger**: ort 2.0.0 stable tag exists on crates.io OR before the first GitHub Release tag is cut (whichever first). Monitor: `cargo update -p ort --dry-run` in `just ci` or a separate periodic audit session.
+- **Scope estimate**: ~5 LoC (version pin bump + maybe minor API fixups) / low-to-medium risk depending on ort stable's API delta from the RC.
+- **Consequence of inaction**: shipping a v0.1 release binary linked against an ort RC is acceptable for early adopters but not for a stable release; RC APIs may change or RC builds may have known bugs that the stable release fixes.
+- **Related**: `docs/plans/session-03.md § D1a`; `docs/analysis/ANL-002-ort-nima-preflight.md § ort version`.
+
+---
+
+### TD-015 — `--model-path` power-user override dropped from v0.1
+
+- **Status**: Open (prospective — `cull.rs` not yet created; D4 deferred due to D0 ABORT + DN-026)
+- **Opened**: 2026-05-28 (session 3, D1b plan-review R1 remediation — PR1-T27)
+- **Stop-gap location**: Prospective — `crates/photohelper-cli/src/commands/cull.rs` will be the stop-gap location when D4 lands. The file does not exist yet (session 03 D0 ABORTed before D4 was implemented). This TD becomes actionable when DN-026 is resolved and the AI culling pipeline (D1–D4) is implemented in a future session.
+- **Fundamental fix**: add `--model-path <path>` + `--model-sha256 <hex>` CLI flags to `cull`. `VerifiedModelBytes::from_path_with_sha256(path, expected_sha256)` constructor validates user-supplied models. Both flags must be provided together (model without SHA = unverified; reject). Update `ModelRegistry::load_from_path_with_sha256`.
+- **Binding trigger**: first user request to supply a custom NIMA model (e.g. a fine-tuned model or a different aesthetic scorer) OR before v0.2 if power-user workflows are anticipated.
+- **Scope estimate**: ~50 LoC (new constructor + CLI flag pair + validation + tests) / low risk (the verification architecture already handles this via `VerifiedModelBytes`).
+- **Consequence of inaction**: users cannot supply custom ONNX models for `photohelper cull` in v0.1. Acceptable for the first release (bundled model only); becomes a UX limitation for power users in v0.2.
+- **Related**: `docs/plans/session-03.md § D1b`; `docs/code-reviews/session-03-plan-round1.md § PR1-T27`.
+
+---
+
+### TD-016 — `HeartbeatStop` + `heartbeat_loop` duplicated in `cull.rs`
+
+- **Status**: Open (prospective — `cull.rs` not yet created; D4 deferred due to D0 ABORT + DN-026)
+- **Opened**: 2026-05-28 (session 3, D4 plan-review R1 remediation — PR1-T33)
+- **Stop-gap location**: Prospective — `crates/photohelper-cli/src/commands/cull.rs` will carry the duplicate when D4 lands. The file does not exist yet (session 03 D0 ABORTed before D4 was implemented). This TD becomes actionable when the AI culling pipeline is implemented in a future session.
+- **Fundamental fix**: extract `HeartbeatStop`, `HeartbeatHandle`, and `heartbeat_loop` into a `crates/photohelper-cli/src/heartbeat.rs` module. Both `ingest.rs` and `cull.rs` import from that module. The module is `pub(crate)`. If the `develop` or `export` subcommand (session 04–05) also needs a heartbeat, that is the trigger for the refactor.
+- **Binding trigger**: session that adds a heartbeat to the `develop`, `export`, or `run` subcommand. Three consumers is the threshold for extracting the abstraction (CLAUDE.md "Three similar lines is better than a premature abstraction").
+- **Scope estimate**: ~30 LoC (new module + two import updates) / zero risk.
+- **Consequence of inaction**: two copies of the heartbeat scaffold drift independently. A bug fix to `ingest.rs::HeartbeatStop` must be manually applied to `cull.rs::HeartbeatStop` also. Acceptable for two consumers; must not extend to three.
+- **Related**: `docs/plans/session-03.md § D4`; `docs/code-reviews/session-03-plan-round1.md § PR1-T33`.
 
 ---
 

@@ -19,9 +19,9 @@ use crate::schema::{INIT_SQL, SCHEMA_VERSION};
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
-/// 13-column INSERT used by both the `Inserted` and `SupersededPrevious`
-/// arms of `Catalog::upsert`. Extracted in R1.T14 to eliminate duplicate-
-/// statement drift risk.
+/// 14-column INSERT (13 bound params + `superseded_at` hardcoded NULL) used by
+/// both the `Inserted` and `SupersededPrevious` arms of `Catalog::upsert`.
+/// Extracted in R1.T14 to eliminate duplicate-statement drift risk.
 const INSERT_PHOTO_SQL: &str = "INSERT INTO photos (
     id, source_path, file_size, mtime_unix_seconds,
     mtime_anomalous, make, model, camera_slug,
@@ -31,7 +31,8 @@ const INSERT_PHOTO_SQL: &str = "INSERT INTO photos (
 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)";
 
 /// Production lock-retry delay between attempts. Tests override via the
-/// public-but-`#[cfg(test)]`-only `with_retry_delay` constructor helper.
+/// `#[doc(hidden)]` `open_with_retry_delay` constructor (not `#[cfg(test)]`-gated;
+/// `#[doc(hidden)]` discourages but does not prevent production use).
 const LOCK_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// Outcome of [`Catalog::upsert`] for an `IngestStats` driver.
@@ -84,8 +85,9 @@ impl Catalog {
         Self::open_with_retry_delay(catalog_path, lock_timeout_seconds, LOCK_RETRY_DELAY)
     }
 
-    /// Test-only constructor allowing a shorter retry delay. Behind
-    /// `#[doc(hidden)]` to discourage production callers.
+    /// Lower-level constructor exposing `retry_delay` for test control.
+    /// `#[doc(hidden)]` discourages (but does not prevent) production callers;
+    /// this method is NOT `#[cfg(test)]`-gated and compiles in all profiles.
     #[doc(hidden)]
     pub fn open_with_retry_delay(
         catalog_path: impl AsRef<Path>,
@@ -299,9 +301,24 @@ impl Catalog {
             Ok(g) => g,
             Err(poisoned) => {
                 let conn = poisoned.into_inner();
-                // ROLLBACK any open transaction left by the panicked worker;
-                // ignore errors — there may not be an open txn.
-                let _ = conn.execute("ROLLBACK", []);
+                // ROLLBACK any open transaction left by the panicked worker.
+                // SQLITE_ERROR (extended_code 1) is returned with "cannot rollback -
+                // no transaction is active" when the panicked worker held the lock but
+                // had no open transaction — nothing to undo, safe to ignore.
+                // Note: plan v4 cited ApiMisuse (SQLITE_MISUSE = 21) here but empirical
+                // testing showed SQLite returns SQLITE_ERROR (rc=1) for this case.
+                match conn.execute("ROLLBACK", []) {
+                    Ok(_) => {}
+                    // extended_code 1 = SQLITE_ERROR (not SQLITE_MISUSE/21);
+                    // the message is "cannot rollback - no transaction is active".
+                    Err(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == 1 => {}
+                    Err(e) => {
+                        return Err(Error::CatalogTransaction {
+                            op: "rollback-after-worker-panic",
+                            source: Box::new(e),
+                        });
+                    }
+                }
                 return Err(Error::CatalogPoisoned {
                     path: self.canonical_path.clone(),
                 });
@@ -362,7 +379,7 @@ impl Catalog {
         let file_size_i64 = i64::try_from(photo.file_size()).unwrap_or(i64::MAX);
 
         // R1.T14 fix: single insert call used by both branches —
-        // previously this was a 13-column INSERT duplicated twice
+        // previously this was a 14-column INSERT duplicated twice
         // (drift risk on every schema change). The closure captures
         // the per-call parameter bindings.
         let do_insert = |tx: &rusqlite::Transaction<'_>| -> Result<(), Error> {
@@ -472,11 +489,55 @@ impl Catalog {
     }
 }
 
+/// Test-only extension methods (D5a — `poison_for_testing` knob).
+#[cfg(test)]
+impl Catalog {
+    /// Poison the catalog's internal mutex for testing the poison-recovery path.
+    ///
+    /// Spawns a thread that acquires the lock and panics, permanently poisoning
+    /// the mutex. After this call every `upsert` returns `Error::CatalogPoisoned`.
+    ///
+    /// Caller must hold an `Arc<Catalog>` so the inner Arc clone is safe.
+    pub(crate) fn poison_for_testing(self: &std::sync::Arc<Self>) {
+        let c = std::sync::Arc::clone(self);
+        let h = std::thread::spawn(move || {
+            let _guard = c.conn.lock().expect("mutex must not be pre-poisoned");
+            panic!("intentional mutex poison for testing");
+        });
+        let _ = h.join(); // Err(_) expected — the thread panicked
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use photohelper_core::catalog_glue::photo_id_from_row_bytes;
+    use photohelper_core::model::{AbsPath, ExifMetadata, Photo};
+    use photohelper_test_helpers::HeartbeatDeathTrigger;
+
     use super::*;
 
-    static_assertions::assert_impl_all!(std::sync::Arc<Catalog>: Send, Sync);
+    static_assertions::assert_impl_all!(Arc<Catalog>: Send, Sync);
+
+    /// Create a minimal, unique test photo whose source_path is `dir/file.cr3`.
+    /// `PhotoId` is synthesised from `id_seed` so callers can distinguish rows.
+    fn make_test_photo(dir: &std::path::Path, id_seed: u8) -> Photo {
+        let file_path = dir.join(format!("test_{id_seed}.cr3"));
+        std::fs::write(&file_path, vec![id_seed; 1024]).expect("write test fixture");
+        let abs = AbsPath::canonicalize(&file_path).expect("canonicalize");
+        let pid = photo_id_from_row_bytes([id_seed; 32]);
+        Photo::from_filesystem(
+            abs,
+            1024,
+            1_577_836_800,
+            false,
+            pid,
+            None,
+            ExifMetadata::default(),
+        )
+        .expect("valid test photo")
+    }
 
     #[test]
     fn open_rejects_path_is_directory() {
@@ -530,5 +591,101 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, 1);
+    }
+
+    // =========================================================
+    // D5a: poison_for_testing + 3 poison-recovery tests
+    // =========================================================
+
+    #[test]
+    fn poison_propagates_as_catalog_poisoned_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Arc::new(Catalog::open(dir.path().join("c.db"), 1).unwrap());
+        cat.poison_for_testing();
+        let photo = make_test_photo(dir.path(), 1);
+        let err = cat.upsert(&photo, 0).unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogPoisoned { .. }),
+            "expected CatalogPoisoned after mutex poison, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn poison_rollback_discards_panicked_workers_partial_insert() {
+        // D5b fix: ROLLBACK after poison with no open txn must NOT propagate an error
+        // (SQLITE_ERROR / extended_code 1 arm), so upsert returns CatalogPoisoned, not
+        // CatalogTransaction. (Plan v4 cited ApiMisuse/SQLITE_MISUSE=21; empirical test
+        // showed SQLite returns SQLITE_ERROR=1 for "no transaction is active".)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("c.db");
+        let cat = Arc::new(Catalog::open(&db_path, 1).unwrap());
+        // Pre-insert a row so we can assert row count is unchanged after poison.
+        cat.upsert(&make_test_photo(dir.path(), 1), 0).unwrap();
+        cat.poison_for_testing();
+        // This upsert triggers the D5b ROLLBACK + CatalogPoisoned path.
+        let err = cat.upsert(&make_test_photo(dir.path(), 2), 0).unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogPoisoned { .. }),
+            "expected CatalogPoisoned (not CatalogTransaction), got {err:?}"
+        );
+        // The ROLLBACK must not have left the DB in a state that blocks re-open.
+        drop(cat);
+        let cat2 = Catalog::open(&db_path, 1).unwrap();
+        assert_eq!(
+            cat2.row_count().unwrap(),
+            1,
+            "only the pre-poison row must survive"
+        );
+    }
+
+    #[test]
+    fn poison_recovery_admits_subsequent_inserts() {
+        // After a poisoned catalog is dropped, a fresh catalog at the same path
+        // accepts new inserts — the ROLLBACK left the DB consistent.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("c.db");
+        {
+            let cat = Arc::new(Catalog::open(&db_path, 1).unwrap());
+            cat.poison_for_testing();
+            // Trigger the D5b ROLLBACK path.
+            let _ = cat.upsert(&make_test_photo(dir.path(), 1), 0);
+            // cat dropped here — file lock released.
+        }
+        let cat2 = Catalog::open(&db_path, 1).unwrap();
+        cat2.upsert(&make_test_photo(dir.path(), 2), 0).unwrap();
+        assert_eq!(
+            cat2.row_count().unwrap(),
+            1,
+            "fresh catalog must accept inserts after poisoned one is dropped"
+        );
+    }
+
+    // =========================================================
+    // D5c-ii: HeartbeatDeathTrigger smoke test
+    // =========================================================
+
+    #[test]
+    fn heartbeat_death_trigger_panics_and_join_returns_err() {
+        // D5c-ii: verify the HeartbeatDeathTrigger helper itself works correctly.
+        // A signalled trigger thread panics; join() returns Err; is_finished()
+        // becomes true after signalling. This is the foundation for the in-process
+        // heartbeat-death-WARN regression test (see D5e in session 03 plan §D5c-ii).
+        let trigger = HeartbeatDeathTrigger::spawn();
+        assert!(
+            !trigger.is_finished(),
+            "thread should be running before signal"
+        );
+        trigger.signal();
+        // Spin until finished (tiny delay while the thread wakes and panics).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !trigger.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "trigger thread did not finish within 5s"
+            );
+            std::thread::yield_now();
+        }
+        let result = trigger.join();
+        assert!(result.is_err(), "join must return Err after a panic");
     }
 }

@@ -7,105 +7,40 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 2 (`libraw-cr3-decode` — 2026-05-28) — **SHIPPED**
-via PR #2, merge commit `67bd882` on `main` (LibRaw FFI for Canon R8
-CR3: EXIF + decode, atomic kamadak-exif removal, vendored LibRaw
-0.22.1, Git LFS CC0 fixtures + integration tests). Two operator
-follow-up sub-sessions also shipped: PR #3 merge `2f22094` (cleanup
-script + `just clean-catalog`) and PR #4 merge `1d31316` (list script
-+ `just list-catalog`). Session 02 post-merge two-block handoff WAS
-rendered (per the previous context window's session-end response).
+**Last session**: 3 (`ai-culling-skeleton` — 2026-05-28) — **IMPLEMENTATION
+COMPLETE (D0 ABORT path); session-end review pending.** Branch:
+`session-03/ai-culling-skeleton`. Session narrowed to D5+D6+D7 after D0
+pre-flight ABORT (no NIMA ONNX model with explicit permissive license found).
+AI culling pipeline (D1–D4) deferred to session 04+ pending DN-026 resolution.
 
-**Current session**: none — ready for session 03. The branch
-`session-02/libraw-cr3-decode` was deleted by `gh pr merge
---delete-branch` after merge.
+**Current session**: **03** (`ai-culling-skeleton`) — **IMPLEMENTATION DONE;
+AWAITING SESSION-END REVIEW (Round 1 → Round 2).** `just ci` GREEN.
+133 tests passing (was 118 at session start; +15 from D5a/b/c/d/e + D6 + D7).
 
-**Goal** (next session — session 03): pick from the TD backlog (TD-002
-full rusqlite bump after an MSRV bump; TD-009 sanitize-check stage 2;
-TD-010 Deliverable 6 test infrastructure carry-over; TD-011 deferred
-session-02 8-agent multi-agent review) OR begin session 03's planned
-scope (AI culling skeleton per DN-005, OR the catalog
-`v1 → v2` migration framework for the upcoming `cull-score` +
-`dup-group` tables). Stub-message audit (the `photohelper camera` /
-`develop` / `export` / `run` / `models` / `cull` subcommands all
-still say "planned for session 02" — drift that needs a one-line fix
-in each). See the `goals` block of the next session's plan when
-authored.
+**Goal** (session 03 — narrowed): D0 pre-flight ABORT → D5 (TD-010 full
+closure except 2 in-process WARN tests → TD-010 PARTIALLY CLOSED) + D6
+(stub-message fix, closes DN-020) + D7 (docs, closes DN-003 + DN-021) +
+ANL-002 (ort CVE-clean, Session::run=&mut self, model license=ABORT).
 
-**Action**: **SHIPPED.** Session 02 + two sub-session follow-ups all
-on `main`. Next session-start writes `docs/plans/session-03.md` and
-declares the session 03 goal; nothing currently in-flight on a branch.
+**Action**: **SESSION-END REVIEW (Round 1 → remediate → Round 2)**. Fire
+`/eight-agent-review` on the session's code changes. Remediate findings.
+Then update SESSION-STATE.md, checkpoint HANDOFF_REPORT.md + discovery-notes,
+commit, push branch, open PR to main, wait for green CI, merge.
 
-**Status**: `just ci` GREEN end-to-end on apple-silicon. 118 workspace
-tests pass; libraw.a builds in ~30s on a clean checkout. End-to-end
-acceptance: `photohelper ingest "$HOME/Pictures/tests" --strict` →
-`walked: 371, ingested: 370, unknown-camera: 0, no-exif: 0, errored: 0`,
-exit code 0. Was `walked: 371, ingested: 0, no-exif: 370` before
-session 02. Workspace state clean. 13 commits this session:
-- `bb87735` — fix(session-02): close TD-003 (heartbeat join) per DN-019 trigger
-- `e6d53fb` — chore: gitignore `.serena/` per-machine MCP state
-- `0d4a7f7` — chore(libraw): pre-flight EXIF + CVE-posture audit (Deliverable 0)
-- `440388a` — chore(session-02): photohelper-raw lint scaffolding + unsafe-isolation gate (D1a setup)
-- `a59ef66` — feat(session-02): Error + RawExifCause + RawDecodeCause enums (D1d)
-- `c42ce2f` — feat(session-02): RawExif type + accessors (D1b types slice)
-- `8b6b9e8` — feat(session-02): RawImage + Bayer-decode companion types with R2-T6 invariants (D1c)
-- `51905be` — feat(libraw): vendor LibRaw 0.22.1 + autoconf build.rs + ADR-0002 LGPL (D2)
-- `092383f` — feat(libraw): FFI + RawPath + read_cr3 EXIF extraction (D1a-exif)
-- `f8238f4` — feat(libraw): read_raw + parse_libraw_image + RawImage::new (D1a-decode; closes TD-008)
-- `7907ca8` — feat(fixtures): Git LFS CC0 R8 CR3 fixtures + sanitize-check + integration tests (D3)
-- `203f58d` — refactor(session-02): atomic kamadak-exif removal + RAW_EXTS narrow + ingest LibRaw rewire (D4; closes DN-006/DN-011)
-- `2323b6b` — chore(deps): rusqlite 0.32 → 0.34 partial bump (D5; TD-002 partial)
-- `63002e5` — chore(session-02): Deliverable 7 polish + Deliverable 6 deferred via TD-010
+**Status**: `just ci` GREEN on branch `session-03/ai-culling-skeleton`.
+133 tests pass. All deliverables (D0 ABORT, D5a–D5e, D6, D7) committed.
+Session-end double-review COMPLETE (R1: 1 CRITICAL + 3 HIGH → closed; R2: 0 CRITICAL + 0 HIGH).
+Ready to ship.
 
-10 plan-review commits remain on the branch from the prior phase:
-- `b377aed` — plan v1
-- `354406f` — plan-review Round 1 artifact
-- `b64425f` — SESSION-STATE.md drift cleanup
-- `5d5dc9a` — R1 remediation cross-doc fixes
-- `69b6a5b` — plan v2 (R1 remediation, closes 16 CRITICAL + 17 HIGH)
-- `c80acf3` — plan-review Round 2 artifact
-- `0e54129` — R2 remediation cross-doc filings (DN-016/017/018 + SCUNet scrub)
-- `dc41dee` — plan v3 (R2 remediation, closes 9 CRITICAL + 14 HIGH)
-- `37373f4` — plan-review Round 3 artifact
-- `dd62166` — R3 remediation plan v3.1 + TD-005/006/007 + SESSION-STATE update
-
-**Plan-review history (3 rounds; diminishing-returns observation)**:
-R1 surfaced 16 CRITICAL + 17 HIGH + 14 MEDIUM + 9 LOW; v2 closed
-most. R2 surfaced 9 CRITICAL + 14 HIGH + 12 MEDIUM + 6 LOW (mostly
-regressions inside R1 remediation); v3 closed most. R3 surfaced 7
-CRITICAL + 9 HIGH + 8 MEDIUM + 4 LOW (mostly regressions inside R2
-remediation including the R2-T1 phantom-ID anti-pattern reborn at
-R3 level — orchestrator self-criticism); v3.1 + TD-005/006/007
-addressed inline + via TD-with-binding-trigger respectively.
-
-**R4 NOT fired** — per agent consensus across R3, "R4 not required
-if R3 remediation cleanly closes R3 CRITICALs." Targeted R3
-remediation landed the audit-trail corrections (R3-T1 phantom IDs;
-R3-T2 fabricated LibRaw symbol) + critical lint coordination
-(R3-T3 panic-lint allow + cfg!(debug_assertions) gate; R3-T4
-trybuild dep coordination) + design fixes (R3-T5 SensorBitDepth
-constructor; R3-T7 assert.success contract clarification; R3-T8
-sanitize-check preview descent; R3-T11 Acceptance 8 wording) and
-filed TD-005/006/007 for the remaining design items (RawDecodeCause
-dispatch; PathBuf empty-path) — session 02 implementation will
-surface and close those in real code.
-
-**Plan amendments this window**: plan v3.1 → v3.2.
-- Deliverable 0 / 2 / Acceptance 7 / Plan revisions log: LibRaw pin
-  escalated `=0.21.4` → `=0.22.1` per Deliverable 0 pre-flight
-  (rationale in `docs/analysis/ANL-001-libraw-cr3-preflight.md` and the
-  `0d4a7f7` commit body); cross-series jump exceeded the implementer's
-  plan-granted authority so user consultation under the No-Acceptable-
-  Trade-offs Policy approved the choice. DN-018 closed.
-- Deliverable 1a § unsafe_code discipline: `src/lib.rs` removed from the
-  list of files carrying file-level `#![forbid(unsafe_code)]`. Plan v3.1
-  prescribed forbid on lib.rs but rustc disallows downgrading `forbid`
-  in submodules, which would make `ffi.rs`'s unsafe blocks fail to
-  compile no matter what attribute `ffi.rs` carries. Crate-level
-  Cargo.toml `allow` is the lib.rs baseline; `exif.rs` / `decode.rs` /
-  any future non-FFI files carry the file-level forbid; the
-  `unsafe-isolation` CI gate is the third defense layer. Folded into
-  the `440388a` scaffolding commit.
+**Plan-review history (session 03 — COMPLETE)**:
+- R1 → 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW → plan v2 (dc95639)
+- R2 → 3 CRITICAL + 10 HIGH + 9 MEDIUM + 4 LOW → plan v3 (285675e)
+- R3 → 3 CRITICAL + 4 HIGH + 2 MEDIUM + 1 LOW → plan v4 (a9f7152 + fixups)
+- R4 → 0 CRITICAL + 0 HIGH + 2 MEDIUM (resolved inline) → CLEAN
+All CRITICAL findings across all 4 rounds: 0 hallucinated; discard_rate=0.00.
+Plan v4 (final): D6 first-chore → D0 pre-flight (binding on Session::run
+receiver: &self=Arc<Nima>, &mut self=thread_local!) → D1a–D1d → D2a–D2c →
+D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 
 ---
 
