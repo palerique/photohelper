@@ -12,12 +12,12 @@
 143 tests. Post-ship: `photohelper-cull.sh` fixed (PHOTOHELPER_MODEL_DIR wired) +
 `photohelper-list-catalog.sh` enhanced (`--sort score` + score column in list mode).
 
-**Current session**: not started — resume from main.
+**Current session**: 5 (`dedup-mobileclip` — 2026-05-29) — branch `session-05/dedup-mobileclip`.
 
-**Goal (next session)**: Session 05 — dedup pipeline (DN-024 MobileCLIP) or
-`develop` pipeline start. Begin with `git switch main && git pull --ff-only origin main`.
+**Goal**: Session 05 — duplicate-detection pipeline (DN-024 MobileCLIP embeddings +
+dup_clusters). Plan at `docs/plans/session-05.md`. Plan-review pending.
 
-**Action**: Start session 05 per the standard protocol.
+**Action**: Run `/plan-review` on `docs/plans/session-05.md`.
 
 **Status**: SHIPPED. `just ci` GREEN (143 tests). Session-end R1+R2 CLEAN.
 Completed this session: D0' (ANL-002+DN-026 closed), D1a (ort dep), D1b+D1c
