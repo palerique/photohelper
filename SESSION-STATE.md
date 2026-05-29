@@ -7,30 +7,27 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 3 (`ai-culling-skeleton` — 2026-05-28) — **IMPLEMENTATION
-COMPLETE (D0 ABORT path); session-end review pending.** Branch:
-`session-03/ai-culling-skeleton`. Session narrowed to D5+D6+D7 after D0
-pre-flight ABORT (no NIMA ONNX model with explicit permissive license found).
-AI culling pipeline (D1–D4) deferred to session 04+ pending DN-026 resolution.
+**Last session**: 3 (`ai-culling-skeleton` — 2026-05-28) — **SHIPPED** via PR #6
+(`64452ad`). Session narrowed to D5+D6+D7 after D0 ABORT. DN-026 resolved
+pre-session-04 via `scripts/convert-nima-to-onnx.sh` (tf2onnx Path A).
 
-**Current session**: **03** (`ai-culling-skeleton`) — **IMPLEMENTATION DONE;
-AWAITING SESSION-END REVIEW (Round 1 → Round 2).** `just ci` GREEN.
-133 tests passing (was 118 at session start; +15 from D5a/b/c/d/e + D6 + D7).
+**Current session**: **04** (`ai-culling-pipeline`) — **PLAN-REVIEW COMPLETE;
+READY FOR IMPLEMENTATION.** Branch: `session-04/ai-culling-pipeline`. Plan v3
+(final) at HEAD. Plan-review ran 2 rounds (R1: 6 CRITICAL + 13 HIGH → closed;
+R2: 3 HIGH + 5 MEDIUM + 2 LOW → closed).
 
-**Goal** (session 03 — narrowed): D0 pre-flight ABORT → D5 (TD-010 full
-closure except 2 in-process WARN tests → TD-010 PARTIALLY CLOSED) + D6
-(stub-message fix, closes DN-020) + D7 (docs, closes DN-003 + DN-021) +
-ANL-002 (ort CVE-clean, Session::run=&mut self, model license=ABORT).
+**Goal** (session 04): Full AI culling pipeline — D0' (ANL-002 addendum + DN-026
+closure) → D1a (ort dep) → D1b/c (VerifiedModelBytes + Nima + NimaScore) →
+D1d (ONNX via LFS) → D1e (read_raw_rgb) → D2a/b (catalog v2 migration +
+cull_scores + insert_cull_score) → D3 (run_cull + cull subcommand).
 
-**Action**: **SESSION-END REVIEW (Round 1 → remediate → Round 2)**. Fire
-`/eight-agent-review` on the session's code changes. Remediate findings.
-Then update SESSION-STATE.md, checkpoint HANDOFF_REPORT.md + discovery-notes,
-commit, push branch, open PR to main, wait for green CI, merge.
+**Action**: **BEGIN IMPLEMENTATION.** First commit: `chore(ai): D0-prime — ANL-002
+addendum + DN-026 CLOSED` (run verify-nima-d0-prime.sh; record fixture scores;
+update docs). Then D1a → D1b → D1c → D1d → D1e → D2a → D2b → D3.
+Sub-component reviews at D1c + D2b boundaries.
 
-**Status**: `just ci` GREEN on branch `session-03/ai-culling-skeleton`.
-133 tests pass. All deliverables (D0 ABORT, D5a–D5e, D6, D7) committed.
-Session-end double-review COMPLETE (R1: 1 CRITICAL + 3 HIGH → closed; R2: 0 CRITICAL + 0 HIGH).
-Ready to ship.
+**Status**: `just ci` GREEN (133 tests). Branch is plan + plan-review artifacts
+only; no implementation code yet.
 
 **Plan-review history (session 03 — COMPLETE)**:
 - R1 → 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW → plan v2 (dc95639)
