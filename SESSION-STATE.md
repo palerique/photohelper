@@ -12,18 +12,11 @@
 (embeddings + dup_clusters), `dedup` subcommand, heartbeat.rs extraction, 182 tests.
 Session-end R1 (2C+3H+9M; 15 retained) → remediated → R2 CLEAN (0 findings; 8/8 closed).
 
-**Current session**: 6 (TBD — 2026-05-29 or later).
+**Current session**: 6 (`td-cleanup-develop-pipeline` — 2026-05-29) — branch `session-06/td-cleanup-develop-pipeline`. **IN FLIGHT** — plan v1 committed; awaiting plan-review.
 
-**Goal**: Session 06 — TBD. Candidates: TD backlog (TD-012 bicubic demosaic, TD-014 ort stable,
-TD-020 CLIP bicubic), `develop` pipeline start (XMP sidecar I/O), export pipeline, or release
-engineering wiring.
+**Goal**: Session 06 — Close TDs with fired binding triggers (TD-001, TD-004, TD-005, TD-009, TD-011, TD-014, TD-020) + deliver fully runnable `develop` subcommand + `photohelper-sidecar` crate (XMP I/O, crs: + ph: namespaces, Lightroom-compatible).
 
-**Action**: Start session 06 per protocol:
-```bash
-git switch main && git pull --ff-only origin main
-git switch -c session-06/<slug>
-just session-start
-```
+**Action**: Fire `/plan-review` on `docs/plans/session-06.md`.
 
 **Status (session 05 — COMPLETE; SHIPPED)**: `just ci` GREEN (182 tests).
 - D0 ✓ CLIP ViT-B/32 LAION2B int8 (85.3MB, MIT, ANL-003, TD-020 filed)
