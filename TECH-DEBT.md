@@ -176,9 +176,10 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
-### TD-010 — PARTIALLY CLOSED. 2 sub-items remain (build_global + heartbeat-death-WARN in-process tests)
+### TD-010 — FULLY CLOSED (session 05 D4)
 
-- **Status**: PARTIALLY CLOSED (6a, 6b, 6c, 6d, 6e-rows-2+3, 6f all done in session 03). Remaining: 6e rows 1 + 4.
+- **Status**: CLOSED (2026-05-29, session 05 D4). All sub-items now closed. Final 2 sub-items: 6e row 1 (build_global WARN) and row 4 (heartbeat-death-WARN). Tests in `commands/ingest.rs::td010_tests` using the `spawn_dying_heartbeat` seam from `heartbeat.rs`.
+- **Remaining: 0**. Previously: PARTIALLY CLOSED (6a, 6b, 6c, 6d, 6e-rows-2+3, 6f all done in session 03). Remaining: 6e rows 1 + 4.
 - **Opened**: 2026-05-28 (session 2, Deliverable 6 deferral)
 - **Partial closure (session 03)**: The following sub-items landed in session 03 D5a–D5e commits:
   1. **6a `poison_for_testing` knob** — CLOSED. Commit D5a: `Catalog::poison_for_testing(&Arc<Self>)` + 3 poison tests.
@@ -256,9 +257,9 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-015 — `--model-path` power-user override dropped from v0.1
 
-- **Status**: Open (prospective — `cull.rs` not yet created; D4 deferred due to D0 ABORT + DN-026)
+- **Status**: Open
 - **Opened**: 2026-05-28 (session 3, D1b plan-review R1 remediation — PR1-T27)
-- **Stop-gap location**: Prospective — `crates/photohelper-cli/src/commands/cull.rs` will be the stop-gap location when D4 lands. The file does not exist yet (session 03 D0 ABORTed before D4 was implemented). This TD becomes actionable when DN-026 is resolved and the AI culling pipeline (D1–D4) is implemented in a future session.
+- **Stop-gap location**: `crates/photohelper-cli/src/commands/cull.rs` (session 04; `--model-path` flag absent, model loaded from `PHOTOHELPER_MODEL_DIR` env only).
 - **Fundamental fix**: add `--model-path <path>` + `--model-sha256 <hex>` CLI flags to `cull`. `VerifiedModelBytes::from_path_with_sha256(path, expected_sha256)` constructor validates user-supplied models. Both flags must be provided together (model without SHA = unverified; reject). Update `ModelRegistry::load_from_path_with_sha256`.
 - **Binding trigger**: first user request to supply a custom NIMA model (e.g. a fine-tuned model or a different aesthetic scorer) OR before v0.2 if power-user workflows are anticipated.
 - **Scope estimate**: ~50 LoC (new constructor + CLI flag pair + validation + tests) / low risk (the verification architecture already handles this via `VerifiedModelBytes`).
@@ -269,7 +270,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-016 — `HeartbeatStop` + `heartbeat_loop` duplicated in `cull.rs`
 
-- **Status**: Open (duplication materialized — `cull.rs` exists as of session 04, commit dcdec49)
+- **Status**: CLOSED (2026-05-29, session 05 D4). `crates/photohelper-cli/src/heartbeat.rs` created with `HeartbeatStop`, `heartbeat_interval()`, `run_heartbeat_loop()` (generic tick closure). Both `ingest.rs` and `cull.rs` import from `heartbeat.rs`; `dedup.rs` (D3) also imports from it (three consumers). TD-010 closed alongside.
 - **Opened**: 2026-05-28 (session 3, D4 plan-review R1 remediation — PR1-T33)
 - **Stop-gap location**: `crates/photohelper-cli/src/commands/cull.rs:127,243` (heartbeat_loop_cull + HeartbeatStop usage) — session 04 commit dcdec49. In-source: `// TD-016: heartbeat_loop_cull duplicates logic from heartbeat_loop in ingest.rs`.
 - **Fundamental fix**: extract `HeartbeatStop`, `HeartbeatHandle`, and `heartbeat_loop` into a `crates/photohelper-cli/src/heartbeat.rs` module. Both `ingest.rs` and `cull.rs` import from that module. The module is `pub(crate)`. If the `develop` or `export` subcommand (session 04–05) also needs a heartbeat, that is the trigger for the refactor.
@@ -277,6 +278,87 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Scope estimate**: ~30 LoC (new module + two import updates) / zero risk.
 - **Consequence of inaction**: two copies of the heartbeat scaffold drift independently. A bug fix to `ingest.rs::HeartbeatStop` must be manually applied to `cull.rs::HeartbeatStop` also. Acceptable for two consumers; must not extend to three.
 - **Related**: `docs/plans/session-03.md § D4`; `docs/code-reviews/session-03-plan-round1.md § PR1-T33`.
+
+---
+
+### TD-020 — CLIP preprocessing uses bilinear 1:1 resize instead of bicubic center-crop
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 05, D1c — `MobileClip::embed`)
+- **Stop-gap location**:
+  - `crates/photohelper-ai/src/mobileclip.rs:82` — calls `nima::bilinear_resize(rgb, 224, 224)` @ commit (session 05 D1c). In-source: `// TD-020: bicubic center-crop deferred`.
+  - `crates/photohelper-ai/src/nima.rs:255` — `bilinear_resize` promoted to `pub(crate)` to enable CLIP reuse. In-source: `// pub(crate) so mobileclip.rs can reuse for CLIP preprocessing (TD-020)`.
+- **Fundamental fix**: Replace the bilinear 1:1 resize with CLIP-canonical preprocessing:
+  1. Resize the shorter edge to 256 pixels (bicubic, preserving aspect ratio).
+  2. Center-crop a 224×224 window.
+  3. This matches the preprocessing used during model training (confirmed via ANL-003 and open_clip source).
+  Implementation: use `image` crate's `FilterType::CatmullRom` (bicubic approximation) and its `crop` utilities, OR implement a ~30 LoC bicubic resize + center-crop in `mobileclip.rs`. Move away from `nima::bilinear_resize` (which is 1:1 aspect-changing).
+- **Binding trigger**: next session touching `MobileClip::embed` preprocessing OR user-reported clustering quality regression traceable to preprocessing (empirical delta: cosine_sim = 0.843 bilinear vs 0.923 Python bicubic on CC0 fixtures). If DBSCAN or k-NN retrieval is added, the embedding quality issue becomes more visible.
+- **Scope estimate**: ~30 LoC (bicubic + center-crop in `mobileclip.rs`; `bilinear_resize` demoted back to `fn` if NIMA stops needing it) / low risk.
+- **Consequence of inaction**: CLIP embeddings computed from bilinear-resized images may have reduced inter-photo similarities vs. the model's intended preprocessing. At the default 0.95 threshold, near-duplicate detection still works for very similar photos; at finer thresholds the quality gap becomes measurable.
+- **Related**: `docs/analysis/ANL-003-mobileclip-preflight.md §Preprocessing Parameters`; DN-027 (cross-platform tolerance); `crates/photohelper-raw/tests/integration_clip.rs` (test threshold 0.80 reflects this stop-gap).
+
+---
+
+### TD-017 — O(n²) union-find clustering; O(n × dim) memory for clustering pass
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 05, D2b planning — stop-gap S1)
+- **Stop-gap location**: `crates/photohelper-cli/src/commands/dedup.rs:347-352` (commit `535210f` — D3).
+  In-source: `// TD-017: O(n²) union-find clustering; O(n × dim) memory.`
+- **Fundamental fix**: replace the O(n²) union-find pairwise-comparison clustering with DBSCAN (density-based spatial clustering) or hierarchical agglomerative clustering. Both support cosine distance, have O(n log n) variants, and avoid materializing the full n×n similarity matrix. A k-NN index (e.g. FAISS or hnswlib via ort or a Rust crate) would reduce the similarity computation from O(n²) to O(n · k · log n).
+- **Binding trigger**: n > 10K photos in a real user corpus OR user request for faster/lower-memory clustering. At n=10K × 512 dims × 4 bytes ≈ 20 MB embedding memory + 100M pairwise comparisons.
+- **Scope estimate**: ~100 LoC (DBSCAN impl or k-NN integration) / medium risk (changes clustering output; must verify cluster stability).
+- **Consequence of inaction**: wall-clock clustering time grows as O(n²); for n=10K photos this is ~25 seconds (estimated); for n=100K photos this is ~40 minutes.
+- **Related**: plan `docs/plans/session-05.md § threshold_cluster`; DN-027 (cross-platform embedding tolerance for clustering threshold).
+
+---
+
+### TD-018 — Embedding stored as raw f32 LE bytes; quantization='f32' hardcoded
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 05, D2b — `insert_embedding` + `MIGRATE_V2_TO_V3_SQL`)
+- **Stop-gap location**:
+  - `crates/photohelper-catalog/src/schema.rs` (`quantization TEXT NOT NULL DEFAULT 'f32'` in `MIGRATE_V2_TO_V3_SQL`) @ session 05 D2a commit. In-source: none yet (schema constant).
+  - `crates/photohelper-catalog/src/catalog.rs:685` (hardcodes `'f32'` literal in INSERT SQL) @ session 05 D2b commit. In-source: `// TD-018: embedding stored as raw f32 LE bytes; quantization='f32' hardcoded.`
+- **Fundamental fix**: extend `insert_embedding` to accept a `quantization: &str` parameter; update `all_embeddings_for_model` to read the `quantization` column and dispatch deserialization accordingly (f32 LE, int8, f16). Add `EmbeddingBlob { photo_id, bytes, dim, quantization }` as the return type of `all_embeddings_for_model` to carry the full context. Requires no migration (the column already exists in v3 with DEFAULT 'f32').
+- **Binding trigger**: first user request for int8/f16 quantization or storage-size complaint.
+- **Scope estimate**: ~30 LoC in catalog (parameter + dispatch) + CLI call-site updates / low risk.
+- **Consequence of inaction**: all embeddings stored as f32 (4 bytes × dim). At 512 dims and 370 photos, this is ~750 KB — negligible for v0.1. At 100K photos it becomes ~200 MB. int8 would halve the storage.
+- **Related**: `docs/decisions/0003-catalog-schema-v3.md § Stop-gaps`; `crates/photohelper-catalog/src/catalog.rs::insert_embedding`.
+
+---
+
+### TD-019 — No per-dedup-run audit trail (`dedup_runs` table absent from v3 schema)
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 05, D2a — `dup_clusters` schema)
+- **Stop-gap location**: `crates/photohelper-catalog/src/schema.rs` (`MIGRATE_V2_TO_V3_SQL`) +
+  `crates/photohelper-catalog/src/catalog.rs` (future `insert_dup_cluster`) @ session 05 D2a commit.
+  In-source: `// TD-019: no per-dedup-run audit trail; similarity_threshold stored per-row as stop-gap.`
+- **Fundamental fix**: add a `dedup_runs` table analogous to the planned `cull_runs` (TD-013):
+  ```sql
+  CREATE TABLE IF NOT EXISTS dedup_runs (
+      id INTEGER PRIMARY KEY,
+      model_slug TEXT NOT NULL,
+      similarity_threshold REAL NOT NULL,
+      started_at_unix_seconds INTEGER NOT NULL,
+      finished_at_unix_seconds INTEGER,
+      cluster_count INTEGER,
+      singleton_count INTEGER
+  );
+  ```
+  Move `similarity_threshold` from `dup_clusters` (per-row stop-gap) into `dedup_runs`.
+  Add `dedup_run_id INTEGER REFERENCES dedup_runs(id)` to `dup_clusters`.
+  Requires a v3→v4 migration (add `dedup_runs`; add `dedup_run_id` to `dup_clusters`).
+- **Binding trigger**: first user report "I ran dedup twice, what changed between runs?" OR
+  before v0.3 (when dedup is expected to be a recurring workflow). Mirrors TD-013 trigger timing.
+- **Scope estimate**: ~80 LoC (`dedup_runs` table + `dedup_run_id` FK + `run_dedup` transaction
+  wrapping + query path extension + tests + v3→v4 migration) / medium risk.
+- **Consequence of inaction**: users running dedup repeatedly cannot compare run outcomes or
+  trace which model version + threshold produced which cluster assignment. v0.1 single-run
+  assumption is codified in the schema; changing it later requires a migration.
+- **Related**: TD-013 (analogous cull-run audit trail gap); `docs/decisions/0003-catalog-schema-v3.md`.
 
 ---
 

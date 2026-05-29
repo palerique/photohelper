@@ -14,5 +14,5 @@ mod catalog;
 mod row;
 mod schema;
 
-pub use catalog::{Catalog, InsertScoreOutcome, UpsertOutcome};
-pub use row::{CullRow, PhotoRow};
+pub use catalog::{Catalog, InsertEmbeddingOutcome, InsertScoreOutcome, UpsertOutcome};
+pub use row::{CullRow, EmbeddingRow, PhotoRow};

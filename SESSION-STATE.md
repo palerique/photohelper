@@ -7,25 +7,36 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 4 (`ai-culling-pipeline` — 2026-05-29) — **SHIPPED** via PR #7
-(`0069dac`). Full AI culling pipeline: NIMA inference, catalog v2, `cull` subcommand,
-143 tests. Post-ship: `photohelper-cull.sh` fixed (PHOTOHELPER_MODEL_DIR wired) +
-`photohelper-list-catalog.sh` enhanced (`--sort score` + score column in list mode).
+**Last session**: 5 (`dedup-mobileclip` — 2026-05-29) — **SHIPPED** via PR #8
+(pending merge). Full dedup pipeline: CLIP ViT-B/32 LAION2B int8 embeddings, catalog v3
+(embeddings + dup_clusters), `dedup` subcommand, heartbeat.rs extraction, 182 tests.
+Session-end R1 (2C+3H+9M; 15 retained) → remediated → R2 CLEAN (0 findings; 8/8 closed).
 
-**Current session**: not started — resume from main.
+**Current session**: 6 (TBD — 2026-05-29 or later).
 
-**Goal (next session)**: Session 05 — dedup pipeline (DN-024 MobileCLIP) or
-`develop` pipeline start. Begin with `git switch main && git pull --ff-only origin main`.
+**Goal**: Session 06 — TBD. Candidates: TD backlog (TD-012 bicubic demosaic, TD-014 ort stable,
+TD-020 CLIP bicubic), `develop` pipeline start (XMP sidecar I/O), export pipeline, or release
+engineering wiring.
 
-**Action**: Start session 05 per the standard protocol.
+**Action**: Start session 06 per protocol:
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-06/<slug>
+just session-start
+```
 
-**Status**: SHIPPED. `just ci` GREEN (143 tests). Session-end R1+R2 CLEAN.
-Completed this session: D0' (ANL-002+DN-026 closed), D1a (ort dep), D1b+D1c
-(RgbImage in core + VerifiedModelBytes+NimaScore+Nima in ai), D1d (ONNX via LFS
-+ verify-model-sha256 CI gate), D1e (read_raw_rgb FFI), D2a (schema v2 migration
-+ FK enforcement), D2b (CullRow, unsuperseded_unscored_rows, insert_cull_score,
-sub-component R1+R2), D3 (commands/cull.rs full pipeline + 3 CLI integration tests).
-DN-024 (dedup) escalated → session 05.
+**Status (session 05 — COMPLETE; SHIPPED)**: `just ci` GREEN (182 tests).
+- D0 ✓ CLIP ViT-B/32 LAION2B int8 (85.3MB, MIT, ANL-003, TD-020 filed)
+- D1a ✓ ImageEmbedding (6 unit tests); D1b ✓ verify-model-sha256.sh multi-model
+- D1c ✓ MobileClip struct (3 integration tests); D1d sub-component review ✓ (CLEAN)
+- D2a ✓ schema v3 embeddings+dup_clusters (TD-019 filed); D2b ✓ catalog API (7 catalog tests)
+- D2c sub-component review ✓ (CLEAN; TD-017+TD-018 filed)
+- D3 ✓ dedup subcommand (threshold_cluster union-find, 3 integration tests, photohelper-dedup.sh)
+- D4 ✓ heartbeat.rs extraction (TD-016 CLOSED, TD-010 CLOSED, 2 TD-010 tests)
+
+**Plan-review history (session 05 — COMPLETE)**:
+- R1 → 3 CRITICAL + 13 HIGH + 8 MEDIUM + 5 LOW → plan v2
+- R2 → 0 CRITICAL + 0 HIGH + 3 MEDIUM + 3 LOW → plan v3 (CLEAN)
 
 **Plan-review history (session 04 — COMPLETE)**:
 - R1 → 6 CRITICAL + 13 HIGH + 10 MEDIUM + 3 LOW → plan v2
@@ -35,9 +46,13 @@ DN-024 (dedup) escalated → session 05.
 - R1 → 1 CRITICAL + 4 HIGH + 5 MEDIUM + 2 LOW → remediated
 - R2 → 2 HIGH + 7 MEDIUM + 3 LOW → remediated → CLEAN
 
-**Session-end review (COMPLETE)**:
+**Session-end review (session 04 — COMPLETE)**:
 - R1 → 1 CRITICAL + 4 HIGH + 9 MEDIUM + 1 LOW → 13 items remediated; just ci GREEN (143 tests)
 - R2 → 0 findings; all 13 watch-list items CLOSED; CLEAN
+
+**Session-end review (session 05 — COMPLETE)**:
+- R1 → 2 CRITICAL + 3 HIGH + 9 MEDIUM + 1 LOW (15 retained; 1 discarded/hallucinated); 8 HIGH+CRITICAL → remediated; all MEDIUM remediated inline; just ci GREEN (182 tests)
+- R2 → 0 findings; all 8 watch-list items CLOSED; CLEAN
 
 **Plan-review history (session 03 — COMPLETE)**:
 - R1 → 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW → plan v2 (dc95639)
@@ -55,14 +70,14 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 
 | Component             | Status                                  | Notes                                                                                                         |
 |-----------------------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------|
-| `photohelper-cli`     | **implemented (session 01)**            | clap v4 + 7 subcommands; `ingest` real; stubs exit 69; heartbeat + summary via eprintln!.                     |
-| `photohelper-core`    | **implemented (session 01)**            | model (PhotoId, AbsPath, CameraId, KnownCamera, ExifOrientation, Aspect, ExifMetadata, IngestOutcome, Photo); error (13 variants); catalog_glue. |
-| `photohelper-raw`     | **implemented (session 02+04)**         | Session 02: LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw, full type suite. Session 04 D1e: decode::read_raw_rgb (dcraw_process pipeline + RgbImage output via 6 new C shim accessors + parse_libraw_rgb_image + extract_rgb_image). 4 integration tests (3 Bayer + 1 RGB). |
-| `photohelper-ai`      | **implemented (session 04)**            | VerifiedModelBytes + NimaScore + Nima (ONNX Runtime 2.0.0-rc.12, thread_local! per-worker Session, SHA-256 model verification). NIMA model in Git LFS. MODEL_SLUG + MODEL_MANIFEST_NAME constants. |
+| `photohelper-cli`     | **implemented (session 01+04+05)**      | clap v4 + 8 subcommands; `ingest`+`cull`+`dedup` real; stubs exit 69. heartbeat.rs shared (TD-016 closed). |
+| `photohelper-core`    | **implemented (session 01+04)**         | model + RgbImage; error (13 variants); catalog_glue. |
+| `photohelper-raw`     | **implemented (session 02+04)**         | LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw_rgb. 4 integration tests + 3 CLIP D1c tests. |
+| `photohelper-ai`      | **implemented (session 04+05)**         | NIMA + CLIP ViT-B/32 int8 (MIT, 85.3 MB). ImageEmbedding, MobileClip, EmbeddingZeroVector+EmbeddingCorruptBytes errors. CLIP_MODEL_SLUG+CLIP_MODEL_MANIFEST_NAME. |
 | `photohelper-sidecar` | scaffolded                              | XMP read/write (crs:/ph: namespaces) lands when `develop` is wired (~session 04).                             |
 | `photohelper-export`  | scaffolded                              | resize + watermark + mozjpeg encode land when `export` is wired (~session 05).                                |
 | `photohelper-cameras` | **implemented (session 01)**            | CameraProfile trait + CanonR8 stub + CameraRegistry::for_exif with normalization.                             |
-| `photohelper-catalog` | **implemented (sessions 01+04)**        | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores table + FK enforcement + SCHEMA_VERSION=2), CullRow (PathBuf, private fields + accessors), InsertScoreOutcome, unsuperseded_unscored_rows (NOT IN SQL filter, ORDER BY ingested_at), insert_cull_score (INSERT OR IGNORE + changes(), range guard, TD-013 labeled). Decision docs 0001 amended + 0002 authored. |
+| `photohelper-catalog` | **implemented (sessions 01+04+05)**     | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores + FK + SCHEMA_VERSION=2), CullRow, InsertScoreOutcome, unsuperseded_unscored_rows, insert_cull_score. Decision docs 0001+0002. Session 05 D2a+D2b: schema v3 (embeddings + dup_clusters + apply_v2_to_v3 + SCHEMA_VERSION=3), EmbeddingRow, InsertEmbeddingOutcome, unembedded_rows, insert_embedding (dim*4==bytes guard), all_embeddings_for_model (superseded excluded), insert_dup_cluster. Decision doc 0003. |
 
 ---
 

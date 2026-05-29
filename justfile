@@ -163,6 +163,10 @@ clean-catalog *ARGS:
 list-catalog *ARGS:
     @./scripts/photohelper-list-catalog.sh {{ARGS}}
 
+# Run `photohelper dedup` with PHOTOHELPER_MODEL_DIR wired to the CLIP model.
+dedup *ARGS:
+    @./scripts/photohelper-dedup.sh {{ARGS}}
+
 # Defense-in-depth: `crates/photohelper-raw` is the only crate allowed to
 # contain `unsafe` code, and only `ffi.rs` inside it. The crate Cargo.toml
 # allows `unsafe_code` for the FFI module; every other source file carries

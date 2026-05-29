@@ -57,6 +57,10 @@ thiserror.workspace = true
 # production build, not just the test profile.
 static_assertions.workspace = true
 
+[dev-dependencies]
+# Used by integration_clip.rs to test CLIP embedding on real CR3 fixtures.
+photohelper-ai = { path = "../photohelper-ai" }
+
 [build-dependencies]
 # `sha2` verifies the vendored LibRaw tarball's SHA-256 at build time
 # (Acceptance criterion 7). Pure-Rust crypto — no system openssl

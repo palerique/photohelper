@@ -918,3 +918,207 @@ cat SESSION-STATE.md
 Candidate scope for session 05: duplicate-detection pipeline (DN-024 MobileCLIP)
 or `develop` pipeline start (XMP sidecar I/O). Review open TDs and DNs at
 session start to decide.
+
+---
+
+## Checkpoint 13 — session 05 PAUSED for context refresh (2026-05-29; plan v1 committed, plan-review pending)
+
+**Status**: PAUSED. Branch: `session-05/dedup-mobileclip`. `just ci` GREEN (143 tests). No code changes from main.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code, session 05 opening window)
+
+### What landed this window
+
+Session 05 started per the eng-protocol:
+- Branch `session-05/dedup-mobileclip` created off `main` (up-to-date).
+- `just session-start` → STATUS: ready.
+- Session-04 Round-2 review confirmed CLEAN (0 findings; all 13 watch-list items closed).
+- Scope chosen by user: **DN-024 duplicate-detection pipeline** (MobileCLIP embeddings + dup_clusters).
+
+**Plan v1 committed** (`docs/plans/session-05.md`):
+
+Plan covers 5 deliverables (D0 pre-flight ABORT gate → D1 MobileCLIP in photohelper-ai →
+D2 catalog v2→v3 migration → D3 dedup subcommand → D4 TD-016 closure → D5 docs).
+
+Key design decisions locked in plan v1:
+1. **D0 ABORT gate first** — MobileCLIP weight license must be explicit (MIT/Apache-2.0/CC-BY-4.0). Search order: `apple/ml-mobileclip` → community ONNX export → `openai/clip-vit-base-patch32` fallback.
+2. **thread_local! per-worker ort Session** (same as Nima) — expected since Session::run is &mut self.
+3. **Schema v3**: `embeddings` (photo_id, model_slug, dim, quantization, embedding BLOB, PRIMARY KEY (photo_id, model_slug)) + `dup_clusters` (cluster_id, photo_id, model_slug, similarity_threshold, FK to embeddings) + `apply_v2_to_v3` idempotent migration.
+4. **Cosine-similarity threshold clustering** via union-find (O(n²) pairwise comparisons; stop-gap S1/TD-017). Warn at n > 5K.
+5. **TD-016 fires** — dedup is the 3rd heartbeat consumer (ingest + cull + dedup) → `heartbeat.rs` extraction is mandatory in D4.
+6. **TD-010 also fires** — D4 touches `ingest.rs` → remaining 2 sub-items (build_global WARN + heartbeat-death-WARN) close in D4.
+7. **3 new stop-gaps declared**: S1 (O(n²) clustering / TD-017), S2 (f32 BLOB / TD-018), S3 (no dedup_runs audit trail / TD-019).
+8. **Target**: ≥ 163 tests (143 + 20 minimum).
+
+### Why paused
+
+Plan-review Round 1 was attempted (8-agent suite launched in parallel) but all 4
+initial agents hit network errors ("API Error: Unable to connect") simultaneously.
+Network connectivity issue on the host. No findings were produced. Pausing to
+save state and retry plan-review in a fresh context window.
+
+### Precise next steps when context restored
+
+1. **Read `SESSION-STATE.md`** (canonical re-orientation).
+2. **Read this Checkpoint 13** (you're here).
+3. **Read `docs/plans/session-05.md`** — the full plan v1 (519 lines). Understand
+   the D0→D1→D2→D3→D4→D5 sequencing and all design decisions.
+4. **Fire `/plan-review` on `docs/plans/session-05.md`**:
+   - Run the 8-agent suite in parallel (Round 1).
+   - Consolidate by theme, triage by severity.
+   - Run 9th-agent verification.
+   - Write `docs/code-reviews/session-05-plan-round1.md`.
+   - Remediate all CRITICAL + HIGH items in the plan.
+   - Commit plan v2.
+   - Fire Round 2.
+   - Remediate Round 2 findings → plan v3 if CRITICAL.
+   - Begin implementation ONLY after Round 2 is clean.
+5. **Do NOT begin implementation** until plan-review Round 2 (at minimum) is clean.
+
+### Resume from a fresh context
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-05/dedup-mobileclip
+just session-start
+```
+
+Then paste the standard restart prompt.
+
+---
+
+## Checkpoint 14 — session 05 PAUSED for context refresh (2026-05-29; D0–D4 complete, D5 pending)
+
+**Status**: PAUSED. Branch: `session-05/dedup-mobileclip`. `just ci` GREEN (183 tests). D0-D4 fully implemented.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code, session 05 implementation window)
+
+### What landed this window (D0–D4 commits)
+
+This was a substantial implementation window. All D0-D4 deliverables from the plan shipped:
+
+**D0 Pre-flight** (commit `...`):
+- MobileCLIP (apple/ml-mobileclip) failed license gate — `apple-amlr` is proprietary. ABORT condition for MobileCLIP.
+- Fallback: `laion/CLIP-ViT-B-32-laion2B-s34B-b79K` (MIT) selected.
+- ONNX export via `scripts/convert-clip-to-onnx.sh` (OpenCLIP MIT → int8 quantized).
+- **Model**: `clip_vit_b32_laion2b_int8.onnx` (85.3 MB, single file, commit_from_memory compatible).
+- SHA-256: `09361948663aa58d62cdaee26c291e913d6d87c35b199c15115aeb4f6c1bd508`
+- Inference: dim=512, norm=1.0, cosine_sim(CRAW,RAW)=0.843 (bilinear resize, TD-020 stop-gap), wall-clock=0.96s/photo.
+- TD-020 filed (bicubic center-crop deferred). DN-027 (cross-platform tolerance) filed.
+- ANL-003 committed.
+
+**D1a**: `ImageEmbedding(Arc<[f32]>)` — from_raw (is_finite() guard for NaN), cosine_similarity, as_f32_le_bytes, from_f32_le_bytes (EmbeddingCorruptBytes for misaligned bytes). 6 unit tests + `static_assertions::assert_impl_all!(Send, Sync)`.
+
+**D1b**: verify-model-sha256.sh extended to loop over ALL manifest sections (covers NIMA + CLIP). CLIP model in Git LFS.
+
+**D1c**: `MobileClip { bytes: Arc<[u8]> }` — embed(&self, rgb, path) → ImageEmbedding. NCHW preprocessing, CLIP-standard normalization, thread_local! per-worker ort Session. EmbeddingZeroVector guard. tracing::error! on model load failure. 3 integration tests (in photohelper-raw/tests/).
+
+**D1d sub-component review** (R1: 1C+2H+5M+7L; R2: 0C+0H — CLEAN). Key fix: `extract_field` had a `?` early-exit bug (swallowed prefix matches) — discovered by new unit tests.
+
+**D2a**: Schema v3 — `embeddings` + `dup_clusters` tables, `apply_v2_to_v3`, migration chain (0→3, 1→3, 2→3). Decision doc `docs/decisions/0003-catalog-schema-v3.md`. TD-019 filed. 4 catalog tests (idempotency, chain v1→v3, FK enforcement, schema_version_too_new gate).
+
+**D2b**: Catalog API — `EmbeddingRow`, `InsertEmbeddingOutcome`, `unembedded_rows`, `insert_embedding` (with Rust-level dim guard — INSERT OR IGNORE swallows CHECK violations!), `all_embeddings_for_model` (returns dim alongside bytes), `insert_dup_cluster`. 7 catalog tests.
+
+**D2c sub-component review** (R1: 1C+2H+3M+3L; R2: 0C+0H — CLEAN). Key discoveries: INSERT OR IGNORE swallows CHECK violations (dim guard added); FK violations DO propagate despite OR IGNORE (per SQLite docs); TD-017+TD-018 were missing from TECH-DEBT.md (filed).
+
+**D3**: `crates/photohelper-cli/src/commands/dedup.rs`:
+- `DedupeArgs` with `parse_similarity_threshold` value_parser
+- `DedupeStats` (9 AtomicU64)
+- `run_dedup`: Phase 1 (embed via rayon into_par_iter) + Phase 2 (cluster)
+- `threshold_cluster`: union-find with path compression + union-by-rank, O(n²)
+- TD-017 + TD-019 in-source labels at this commit
+- `scripts/photohelper-dedup.sh` + `just dedup`
+- 3 integration tests: end-to-end, idempotency (walked:0), strict-mode (file-missing:1)
+
+**D4**: `crates/photohelper-cli/src/heartbeat.rs` extracted:
+- `HeartbeatStop`, `heartbeat_interval()`, `run_heartbeat_loop(on_tick: Fn())`
+- `spawn_dying_heartbeat` test seam (`#[cfg(test)]`)
+- `ingest.rs` + `cull.rs` + `dedup.rs` all import from `heartbeat.rs`
+- TD-016 → **CLOSED**
+- TD-010 → **CLOSED**: `build_global_already_initialized_warns_but_succeeds` + `spawn_dying_heartbeat_panics_and_join_returns_err` in `ingest.rs::td010_tests`
+
+**Test count**: 143 (baseline) → **183** (+40):
+- +6 ImageEmbedding unit tests (D1a)
+- +3 CLIP integration tests in photohelper-raw (D1c)
+- +7 catalog unit tests (D2a+D2b)
+- +3 dedup integration tests (D3)
+- +2 TD-010 in-process tests (D4)
+- +various catalog remediation tests from D2c review
+
+### TDs filed/closed this window
+
+**Filed:**
+- TD-017: O(n²) union-find clustering (D2c review + D3)
+- TD-018: f32 BLOB quantization (D2b)
+- TD-019: no dedup_runs audit trail (D2a)
+- TD-020: bilinear resize stop-gap for CLIP (D0)
+
+**Closed:**
+- TD-016: heartbeat duplication → heartbeat.rs extracted (D4)
+- TD-010: 2 remaining in-process tests (D4)
+
+### DNs opened this window
+
+- DN-027: MobileCLIP cross-platform embedding tolerance for cosine-similarity clustering
+- DN-028: MobileCLIP `apple-amlr` license blocks direct use
+
+### Precise next steps when context restored
+
+1. **Read `SESSION-STATE.md`** (canonical re-orientation).
+2. **Read this Checkpoint 14** (you're here).
+3. **Run `/session-end`** — this fires the full 8-agent double-review (R1 → remediate → R2) against all session code, updates SESSION-STATE.md + HANDOFF_REPORT.md, runs `just ci`, opens the PR, waits for green CI, and merges.
+4. If session-end R1 surfaces CRITICAL findings that require substantial code changes, remediate inline before R2.
+5. After merge: start session 06 per standard protocol (`git switch main && git pull --ff-only && git switch -c session-06/<slug> && just session-start`).
+
+### Resume from a fresh context
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-05/dedup-mobileclip
+just session-start
+```
+
+Then paste the standard restart prompt.
+
+---
+
+## Checkpoint 15 — session 05 SHIPPED (2026-05-29; full dedup pipeline + session-end review)
+
+**Status**: SHIPPED. PR #8 opened; CI pending merge.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code session 05, session-end window)
+
+### What landed since Checkpoint 14 (D5 + session-end review)
+
+**D5 (ledger)**: DN-024 closed. TD-017/TD-015/TD-018 stale text fixed. TD-019 label corrected.
+SESSION-STATE catalog component updated to sessions 01+04+05.
+
+**Session-end R1** (`docs/code-reviews/session-05-round1.md`): 19 findings; 15 retained
+(discard_rate=0.053). 2C+3H+9M+1L. Key findings:
+- CRITICAL A: `insert_embedding` range-checked dim but not `dim*4==bytes.len()`; `dedup.rs`
+  discarded `_dim`; docstring promised non-existent caller validation.
+- CRITICAL B: `threshold_cluster` had zero unit tests (plan promised 5).
+- HIGH C: `MobileClip` SESS module-scoped thread_local (cross-contamination risk).
+- HIGH D: `cosine_similarity` Err silently swallowed in clustering loop.
+- HIGH E: Phase 2 empty/corrupt set: no log, no counter.
+
+**R1 remediation**: `insert_embedding` `dim*4==bytes.len()` guard; `all_embeddings_for_model`
+JOINs photos (excludes superseded); 6 threshold_cluster unit tests; `INSTANCE_EXISTS` guard
+in `MobileClip`; `if let Ok(sim)` → match+error; `deserialize_failed` counter; `catalog_inconsistency`
+split into `already_embedded` + `catalog_insert_failed`; all 9 MEDIUM items closed.
+
+**Session-end R2** (`docs/code-reviews/session-05-round2.md`): 0 findings; 8/8 CLOSED. CLEAN.
+
+**Final test count**: 182 (176 pre-R1 + 6 new threshold_cluster unit tests).
+`just ci` GREEN: fmt, lint, tests, audit, unsafe-isolation, sanitize-check, model SHA-256.
+
+### What is not yet in place
+
+TD-012 AHD demosaic, TD-014 ort stable, TD-017 O(n²) clustering, TD-018 quantization,
+TD-020 CLIP bicubic, develop/export/watermark subcommands, release engineering.
+
+### How to resume (session 06)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-06/<slug>
+just session-start
+cat SESSION-STATE.md
+```

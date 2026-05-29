@@ -10,7 +10,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use anyhow::Context as _;
 use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
@@ -20,7 +19,7 @@ use photohelper_catalog::{Catalog, InsertScoreOutcome};
 use photohelper_core::model::PhotoId;
 use photohelper_raw::decode::read_raw_rgb;
 
-use crate::commands::ingest::{HeartbeatStop, heartbeat_interval};
+use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
 use crate::{Cli, exit_code};
 
 /// Clap args for `photohelper cull`.
@@ -118,9 +117,7 @@ pub fn run_cull(
 
     let stats = Arc::new(CullStats::new());
 
-    // Heartbeat thread.
-    // TD-016: heartbeat_loop_cull duplicates logic from heartbeat_loop in
-    // ingest.rs; extract to commands/heartbeat.rs at the third consumer.
+    // Heartbeat thread (shared via heartbeat.rs — TD-016 closed).
     let stop = Arc::new(HeartbeatStop::new());
     let heartbeat_handle = {
         let stats = Arc::clone(&stats);
@@ -128,7 +125,16 @@ pub fn run_cull(
         let interval = heartbeat_interval();
         std::thread::Builder::new()
             .name("ph-heartbeat".into())
-            .spawn(move || heartbeat_loop_cull(&stats, &stop, interval))
+            .spawn(move || {
+                run_heartbeat_loop(&stop, interval, || {
+                    eprintln!(
+                        "[heartbeat] walked {}, scored {}, decode-failed {}",
+                        stats.walked.load(Ordering::Relaxed),
+                        stats.scored.load(Ordering::Relaxed),
+                        stats.decode_failed.load(Ordering::Relaxed),
+                    );
+                });
+            })
             .context("spawning heartbeat thread")?
     };
 
@@ -244,33 +250,6 @@ pub fn run_cull(
         return Ok(exit_code::EX_USAGE);
     }
     Ok(0)
-}
-
-// TD-016: heartbeat_loop_cull duplicates the heartbeat pattern from
-// ingest.rs; extract to commands/heartbeat.rs at the third consumer.
-fn heartbeat_loop_cull(stats: &CullStats, stop: &HeartbeatStop, interval: Duration) {
-    let granularity = interval.min(Duration::from_millis(100));
-    let ticks = interval
-        .as_millis()
-        .checked_div(granularity.as_millis())
-        .unwrap_or(1)
-        .max(1) as u64;
-    let mut counter: u64 = 0;
-    loop {
-        counter += 1;
-        if counter >= ticks {
-            counter = 0;
-            eprintln!(
-                "[heartbeat] walked {}, scored {}, decode-failed {}",
-                stats.walked.load(Ordering::Relaxed),
-                stats.scored.load(Ordering::Relaxed),
-                stats.decode_failed.load(Ordering::Relaxed),
-            );
-        }
-        if stop.wait_for_stop(granularity) {
-            return;
-        }
-    }
 }
 
 fn unix_now() -> i64 {

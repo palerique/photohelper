@@ -14,11 +14,15 @@ pub const MODEL_SLUG: &str = "nima-aesthetic-v1";
 
 /// The ONNX filename stem and `manifest.toml` section name for the NIMA model.
 ///
-/// `VerifiedModelBytes::from_manifest(dir, MODEL_MANIFEST_NAME)` loads the
-/// model; the `.onnx` file is `{dir}/{MODEL_MANIFEST_NAME}.onnx`. Keeping this
-/// constant alongside `MODEL_SLUG` ensures both identifiers travel with the
-/// model definition.
+/// `VerifiedModelBytes::from_manifest(dir, MODEL_MANIFEST_NAME)` loads the model.
+/// The manifest section `[nima_mobilenet_aesthetic]` specifies the actual filename.
 pub const MODEL_MANIFEST_NAME: &str = "nima_mobilenet_aesthetic";
+
+/// Model slug for the CLIP ViT-B/32 LAION2B image embedder (catalog `model_slug` column).
+pub const CLIP_MODEL_SLUG: &str = "clip-vit-b32-laion2b-v1";
+
+/// Manifest.toml section name for the CLIP model (matches filename stem before `_int8.onnx`).
+pub const CLIP_MODEL_MANIFEST_NAME: &str = "clip_vit_b32_laion2b";
 
 /// SHA-256-verified ONNX model bytes.
 ///
@@ -40,13 +44,14 @@ pub struct VerifiedModelBytes {
 impl VerifiedModelBytes {
     /// Load and SHA-256-verify a model from `model_dir`.
     ///
-    /// Reads `{model_dir}/{name}.onnx` and verifies its SHA-256 against the
-    /// `sha256` field in `{model_dir}/manifest.toml` under the `[{name}]` section.
+    /// Reads the file specified by the `filename` field in `{model_dir}/manifest.toml`
+    /// under the `[{name}]` section (falling back to `{name}.onnx` if absent), then
+    /// verifies its SHA-256 against the `sha256` field in the same section.
     ///
     /// # Errors
     ///
     /// - `ManifestNotFound` if `manifest.toml` is missing
-    /// - `ManifestParse` if manifest.toml cannot be parsed
+    /// - `ManifestParse` if manifest.toml cannot be parsed or SHA-256 field is absent
     /// - `ModelSha256Mismatch` if SHA-256 of the file does not match the manifest
     /// - `ManifestParse` if the ONNX file cannot be read (wrapped for uniformity)
     pub fn from_manifest(model_dir: &Path, name: &str) -> Result<Self, Error> {
@@ -69,7 +74,11 @@ impl VerifiedModelBytes {
                 source: format!("missing [{name}].sha256 in manifest.toml").into(),
             })?;
 
-        let onnx_path = model_dir.join(format!("{name}.onnx"));
+        // Use the `filename` field from the manifest section if present (allows suffixes
+        // like `_int8.onnx`); fall back to `{name}.onnx` for backward compatibility.
+        let filename =
+            extract_filename(&manifest_text, name).unwrap_or_else(|| format!("{name}.onnx"));
+        let onnx_path = model_dir.join(&filename);
         let bytes = std::fs::read(&onnx_path).map_err(|e| Error::ManifestParse {
             path: onnx_path.clone(),
             source: Box::new(e),
@@ -105,27 +114,42 @@ impl VerifiedModelBytes {
     }
 }
 
-/// Extract the sha256 value from a TOML manifest for a named section.
+/// Extract a string field from a named TOML manifest section.
 ///
-/// Minimal TOML parser: just looks for `[name]` sections and `sha256 = "..."` keys.
-fn extract_sha256(toml: &str, name: &str) -> Option<String> {
-    let section_header = format!("[{name}]");
+/// Minimal TOML parser: looks for `[name]` sections then `key = "..."` within them.
+fn extract_field(toml: &str, section: &str, key: &str) -> Option<String> {
+    let section_header = format!("[{section}]");
     let mut in_section = false;
     for line in toml.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             in_section = trimmed == section_header;
         } else if in_section {
-            if let Some(rest) = trimmed.strip_prefix("sha256") {
-                let rest = rest.trim().strip_prefix('=')?;
-                let val = rest.trim().trim_matches('"');
-                if !val.is_empty() {
-                    return Some(val.to_owned());
+            if let Some(rest) = trimmed.strip_prefix(key) {
+                // strip_prefix('=') may be None for prefix-matching lines (e.g., "sha256_extra").
+                // Use if-let instead of ? so we continue to the next line rather than
+                // returning None from the function.
+                if let Some(rest) = rest.trim().strip_prefix('=') {
+                    let val = rest.trim().trim_matches('"');
+                    if !val.is_empty() {
+                        return Some(val.to_owned());
+                    }
                 }
             }
         }
     }
     None
+}
+
+/// Extract the `sha256` field from a named manifest section.
+fn extract_sha256(toml: &str, name: &str) -> Option<String> {
+    extract_field(toml, name, "sha256")
+}
+
+/// Extract the optional `filename` field from a named manifest section.
+/// Returns `None` if the field is absent (caller uses `{name}.onnx` as fallback).
+fn extract_filename(toml: &str, name: &str) -> Option<String> {
+    extract_field(toml, name, "filename")
 }
 
 /// Compute the lowercase hex SHA-256 of `data`.
@@ -152,3 +176,59 @@ fn sha2_digest(data: &[u8]) -> [u8; 32] {
 }
 
 static_assertions::assert_impl_all!(VerifiedModelBytes: Send, Sync);
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::*;
+
+    const SAMPLE_TOML: &str = r#"
+[nima_model]
+filename = "nima_model.onnx"
+sha256   = "abc123"
+source_license = "Apache-2.0"
+
+[clip_model]
+sha256 = "def456"
+"#;
+
+    #[test]
+    fn extract_field_happy_path() {
+        let sha = extract_field(SAMPLE_TOML, "nima_model", "sha256").unwrap();
+        assert_eq!(sha, "abc123");
+        let filename = extract_field(SAMPLE_TOML, "nima_model", "filename").unwrap();
+        assert_eq!(filename, "nima_model.onnx");
+    }
+
+    #[test]
+    fn extract_field_missing_section_returns_none() {
+        assert!(extract_field(SAMPLE_TOML, "no_such_section", "sha256").is_none());
+    }
+
+    #[test]
+    fn extract_field_missing_key_returns_none() {
+        // "clip_model" section exists but has no "filename" field.
+        assert!(extract_field(SAMPLE_TOML, "clip_model", "filename").is_none());
+    }
+
+    #[test]
+    fn extract_field_no_filename_fallback_produces_name_dot_onnx() {
+        // extract_filename returns None for clip_model → caller uses {name}.onnx.
+        let filename = extract_filename(SAMPLE_TOML, "clip_model");
+        assert!(filename.is_none(), "clip_model has no filename field");
+        let fallback = filename.unwrap_or_else(|| "clip_model.onnx".to_owned());
+        assert_eq!(fallback, "clip_model.onnx");
+    }
+
+    #[test]
+    fn extract_sha256_wrapper() {
+        assert_eq!(extract_sha256(SAMPLE_TOML, "clip_model").unwrap(), "def456");
+    }
+
+    #[test]
+    fn extract_field_key_prefix_disambiguation() {
+        // "sha256" should not false-match "sha256_extra" (guarded by strip_prefix('=')).
+        let toml = "[s]\nsha256_extra = \"bad\"\nsha256 = \"good\"\n";
+        assert_eq!(extract_field(toml, "s", "sha256").unwrap(), "good");
+    }
+}

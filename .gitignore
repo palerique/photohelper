@@ -28,3 +28,5 @@ scripts/.nima-convert-venv/
 
 # Source Keras weights (not committed; ONNX is the authoritative artifact via LFS)
 crates/photohelper-ai/models/*.hdf5
+target-old/
+scripts/.clip-convert-venv/

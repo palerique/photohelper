@@ -14,8 +14,8 @@ use rusqlite::Connection;
 use photohelper_core::Error;
 use photohelper_core::model::{AbsPath, Photo, PhotoId};
 
-use crate::row::{CullRow, PhotoRow, SELECT_ALL_COLUMNS, insert_error};
-use crate::schema::{INIT_SQL, MIGRATE_V1_TO_V2_SQL, SCHEMA_VERSION};
+use crate::row::{CullRow, EmbeddingRow, PhotoRow, SELECT_ALL_COLUMNS, insert_error};
+use crate::schema::{INIT_SQL, MIGRATE_V1_TO_V2_SQL, MIGRATE_V2_TO_V3_SQL, SCHEMA_VERSION};
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
@@ -54,6 +54,17 @@ pub enum UpsertOutcome {
     },
     /// Identical PhotoId already in the catalog (re-ingest or hardlink).
     AlreadyCatalogued,
+}
+
+/// Outcome of [`Catalog::insert_embedding`].
+///
+/// Discriminated via `conn.changes()` after `INSERT OR IGNORE`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InsertEmbeddingOutcome {
+    /// Row was inserted; this is the first embedding for this photo × model.
+    Inserted,
+    /// Row already existed; nothing changed.
+    AlreadyEmbedded,
 }
 
 /// Outcome of [`Catalog::insert_cull_score`].
@@ -220,9 +231,10 @@ impl Catalog {
             "PRAGMA journal_mode = WAL",
             "PRAGMA synchronous = NORMAL",
             "PRAGMA busy_timeout = 5000",
-            // Enable FK enforcement so `cull_scores.photo_id` REFERENCES
-            // `photos(id)` is actually checked at INSERT time (per D2a
-            // and `docs/decisions/0002-catalog-schema-v2.md`).
+            // Enable FK enforcement so `cull_scores.photo_id` REFERENCES `photos(id)`,
+            // `embeddings.photo_id` REFERENCES `photos(id)`, and
+            // `dup_clusters.(photo_id, model_slug)` REFERENCES `embeddings(photo_id, model_slug)`
+            // are all enforced at INSERT time.
             "PRAGMA foreign_keys = ON",
         ] {
             conn.execute_batch(pragma).map_err(|e| Error::CatalogOpen {
@@ -240,12 +252,9 @@ impl Catalog {
             })?;
         match user_version {
             0 => {
-                // Fresh DB: run v1 init then immediately apply v1→v2
-                // migration so new catalogs start at SCHEMA_VERSION
-                // without an intermediate state.
-                // R2-T8 fix: use IMMEDIATE so init takes the RESERVED
-                // lock up-front (file-lock already serialises openers,
-                // but IMMEDIATE makes the SQLite-level intent explicit).
+                // Fresh DB: run v1 init then chain both migrations so new
+                // catalogs start at SCHEMA_VERSION without intermediate states.
+                // R2-T8 fix: use IMMEDIATE so init takes the RESERVED lock up-front.
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(|e| Error::CatalogOpen {
@@ -261,9 +270,14 @@ impl Catalog {
                     source: Box::new(e),
                 })?;
                 apply_v1_to_v2(&mut conn, catalog_path)?;
+                apply_v2_to_v3(&mut conn, catalog_path)?;
             }
             1 => {
                 apply_v1_to_v2(&mut conn, catalog_path)?;
+                apply_v2_to_v3(&mut conn, catalog_path)?;
+            }
+            2 => {
+                apply_v2_to_v3(&mut conn, catalog_path)?;
             }
             v if v == SCHEMA_VERSION => {}
             other => {
@@ -582,6 +596,235 @@ impl Catalog {
         Ok(outcome)
     }
 
+    /// Fetch all non-superseded photos that do not yet have an embedding from
+    /// `model_slug`, ordered by ingest time. The dedup pipeline calls this to
+    /// get the work list for the embed phase.
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned` if a prior worker panicked.
+    /// - `Error::CatalogOpen` for query failures.
+    pub fn unembedded_rows(&self, model_slug: &str) -> Result<Vec<EmbeddingRow>, Error> {
+        let guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
+            path: self.canonical_path.clone(),
+        })?;
+        let sql = "SELECT id, source_path FROM photos \
+                   WHERE superseded_at_unix_seconds IS NULL \
+                     AND id NOT IN (SELECT photo_id FROM embeddings WHERE model_slug = ?1) \
+                   ORDER BY ingested_at_unix_seconds";
+        let mut stmt = guard.prepare(sql).map_err(|e| Error::CatalogOpen {
+            path: self.canonical_path.clone(),
+            source: Box::new(e),
+        })?;
+        let rows = stmt
+            .query_map(rusqlite::params![model_slug], |row| {
+                let id_bytes: Vec<u8> = row.get("id")?;
+                let id_arr: [u8; 32] = id_bytes.as_slice().try_into().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(0, "id".into(), rusqlite::types::Type::Blob)
+                })?;
+                let photo_id = photohelper_core::catalog_glue::photo_id_from_row_bytes(id_arr);
+                let path_str: String = row.get("source_path")?;
+                Ok((photo_id, path_str))
+            })
+            .map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (photo_id, path_str) = r.map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+            out.push(EmbeddingRow::new(photo_id, PathBuf::from(path_str)));
+        }
+        Ok(out)
+    }
+
+    /// Persist a float32 embedding for `photo_id` × `model_slug`.
+    ///
+    /// `embedding_bytes` must be a little-endian f32 byte slice (`dim × 4` bytes).
+    /// Uses `INSERT OR IGNORE` so concurrent workers race safely — the first writer
+    /// wins, the rest see `AlreadyEmbedded`.
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned` if a prior worker panicked.
+    /// - `Error::CatalogInsert` for SQLite failures (includes FK violations and
+    ///   constraint violations like `dim` out of range).
+    // TD-018: embedding stored as raw f32 LE bytes; quantization='f32' hardcoded.
+    // See TECH-DEBT.md § TD-018 for the int8/f16 quantization upgrade plan.
+    pub fn insert_embedding(
+        &self,
+        photo_id: PhotoId,
+        model_slug: &str,
+        embedding_bytes: &[u8],
+        dim: usize,
+        embedded_at_unix_seconds: i64,
+    ) -> Result<InsertEmbeddingOutcome, Error> {
+        // Rust-level guards: INSERT OR IGNORE silently swallows ALL SQLite constraint
+        // violations (UNIQUE, CHECK, NOT NULL), so dim-range and byte-length mismatches
+        // would silently return AlreadyEmbedded instead of an error.
+        if dim == 0 || dim > 65536 {
+            return Err(Error::CatalogInsert {
+                photo_id,
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("dim {dim} is outside valid range [1, 65536]"),
+                )),
+            });
+        }
+        if embedding_bytes.len() != dim * 4 {
+            return Err(Error::CatalogInsert {
+                photo_id,
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "embedding byte length {} != dim {dim} * 4 ({})",
+                        embedding_bytes.len(),
+                        dim * 4
+                    ),
+                )),
+            });
+        }
+        let mut guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
+            path: self.canonical_path.clone(),
+        })?;
+        let id_bytes = photo_id.as_bytes().to_vec();
+        let tx = guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| insert_error(photo_id, e))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO embeddings \
+             (photo_id, model_slug, dim, quantization, embedding, embedded_at_unix_seconds) \
+             VALUES (?1, ?2, ?3, 'f32', ?4, ?5)",
+            rusqlite::params![
+                &id_bytes,
+                model_slug,
+                dim as i64,
+                embedding_bytes,
+                embedded_at_unix_seconds
+            ],
+        )
+        .map_err(|e| insert_error(photo_id, e))?;
+        let outcome = if tx.changes() == 1 {
+            InsertEmbeddingOutcome::Inserted
+        } else {
+            InsertEmbeddingOutcome::AlreadyEmbedded
+        };
+        tx.commit().map_err(|e| insert_error(photo_id, e))?;
+        Ok(outcome)
+    }
+
+    /// Load all non-superseded embeddings for `model_slug` as raw f32 LE byte slices.
+    ///
+    /// Returns `(PhotoId, embedding_bytes, dim)` triples for the O(n²) clustering pass.
+    /// Superseded photos are excluded (consistent with `unembedded_rows` and
+    /// `unsuperseded_unscored_rows`). `insert_embedding` enforces `dim*4 == bytes.len()`
+    /// at write time, so the returned triples are byte-length consistent.
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned`, `Error::CatalogOpen` for query failures.
+    pub fn all_embeddings_for_model(
+        &self,
+        model_slug: &str,
+    ) -> Result<Vec<(PhotoId, Vec<u8>, usize)>, Error> {
+        let guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
+            path: self.canonical_path.clone(),
+        })?;
+        let mut stmt = guard
+            .prepare(
+                "SELECT e.photo_id, e.embedding, e.dim \
+                 FROM embeddings e \
+                 JOIN photos p ON p.id = e.photo_id \
+                 WHERE e.model_slug = ?1 \
+                   AND p.superseded_at_unix_seconds IS NULL",
+            )
+            .map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+        let rows = stmt
+            .query_map(rusqlite::params![model_slug], |row| {
+                let id_bytes: Vec<u8> = row.get("photo_id")?;
+                let embedding: Vec<u8> = row.get("embedding")?;
+                let dim: i64 = row.get("dim")?;
+                Ok((id_bytes, embedding, dim))
+            })
+            .map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id_bytes, embedding, dim_i64) = r.map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+            let id_arr: [u8; 32] =
+                id_bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|e| Error::CatalogOpen {
+                        path: self.canonical_path.clone(),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("photo_id blob wrong length: {e}"),
+                        )),
+                    })?;
+            let photo_id = photohelper_core::catalog_glue::photo_id_from_row_bytes(id_arr);
+            let dim = usize::try_from(dim_i64).map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("embeddings.dim value {dim_i64} is out of usize range: {e}"),
+                )),
+            })?;
+            out.push((photo_id, embedding, dim));
+        }
+        Ok(out)
+    }
+
+    /// Persist a cluster assignment for `photo_id` × `model_slug`.
+    ///
+    /// Uses `INSERT OR REPLACE` — re-clustering a photo replaces the old
+    /// assignment. Returns `()` (INSERT OR REPLACE always "inserts").
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned` if a prior worker panicked.
+    /// - `Error::CatalogInsert` for SQLite failures (includes FK violations).
+    // TD-019: no per-dedup-run audit trail; similarity_threshold stored per-row as stop-gap.
+    // See TECH-DEBT.md § TD-019 for the dedup_runs upgrade plan.
+    pub fn insert_dup_cluster(
+        &self,
+        photo_id: PhotoId,
+        model_slug: &str,
+        cluster_id: i64,
+        similarity_threshold: f32,
+        clustered_at_unix_seconds: i64,
+    ) -> Result<(), Error> {
+        let mut guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
+            path: self.canonical_path.clone(),
+        })?;
+        let id_bytes = photo_id.as_bytes().to_vec();
+        let tx = guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| insert_error(photo_id, e))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO dup_clusters \
+             (photo_id, model_slug, cluster_id, similarity_threshold, clustered_at_unix_seconds) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                &id_bytes,
+                model_slug,
+                cluster_id,
+                f64::from(similarity_threshold),
+                clustered_at_unix_seconds
+            ],
+        )
+        .map_err(|e| insert_error(photo_id, e))?;
+        tx.commit().map_err(|e| insert_error(photo_id, e))?;
+        Ok(())
+    }
+
     /// Borrow the canonical catalog path.
     #[must_use]
     pub fn canonical_path(&self) -> &Path {
@@ -649,6 +892,27 @@ fn apply_v1_to_v2(conn: &mut Connection, path: &Path) -> Result<(), Error> {
             source: Box::new(e),
         })?;
     tx.execute_batch(MIGRATE_V1_TO_V2_SQL)
+        .map_err(|e| Error::CatalogOpen {
+            path: path.to_path_buf(),
+            source: Box::new(e),
+        })?;
+    tx.commit().map_err(|e| Error::CatalogOpen {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })
+}
+
+/// Apply the v2 → v3 schema migration: add `embeddings` and `dup_clusters` tables,
+/// then set `PRAGMA user_version = 3`. Wrapped in `BEGIN IMMEDIATE` matching the
+/// v1→v2 convention; `CREATE TABLE IF NOT EXISTS` makes the DDL idempotent.
+fn apply_v2_to_v3(conn: &mut Connection, path: &Path) -> Result<(), Error> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| Error::CatalogOpen {
+            path: path.to_path_buf(),
+            source: Box::new(e),
+        })?;
+    tx.execute_batch(MIGRATE_V2_TO_V3_SQL)
         .map_err(|e| Error::CatalogOpen {
             path: path.to_path_buf(),
             source: Box::new(e),
@@ -768,12 +1032,12 @@ mod tests {
     }
 
     #[test]
-    fn catalog_fresh_db_initializes_to_v2() {
+    fn catalog_fresh_db_initializes_to_v3() {
         let dir = tempfile::tempdir().unwrap();
         let cat = dir.path().join("fresh.db");
         let c = Catalog::open(&cat, 1).unwrap();
         let conn = c.conn.lock().unwrap();
-        // Fresh catalog must be at SCHEMA_VERSION = 2.
+        // Fresh catalog must be at SCHEMA_VERSION = 3.
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
@@ -792,7 +1056,20 @@ mod tests {
             .unwrap();
         assert_eq!(
             count, 1,
-            "cull_scores table must be present in a fresh v2 DB"
+            "cull_scores table must be present in a fresh v3 DB"
+        );
+        // embeddings table must exist (created by MIGRATE_V2_TO_V3_SQL).
+        let count2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='embeddings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count2, 1,
+            "embeddings table must be present in a fresh v3 DB"
         );
     }
 
@@ -926,6 +1203,123 @@ mod tests {
     // D2b: cull_scores integration tests
     // =========================================================
 
+    // =========================================================
+    // D2a: schema v3 migration tests
+    // =========================================================
+
+    #[test]
+    fn migration_v2_to_v3_reopen_succeeds() {
+        // Build a v2 DB, open twice — second open must not fail or change version.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v2.db");
+        {
+            // Create a v2 DB manually (INIT_SQL → user_version=1, then v1→v2).
+            let mut conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(crate::schema::INIT_SQL).unwrap();
+            apply_v1_to_v2(&mut conn, &db_path).unwrap();
+        }
+        // First open: applies v2→v3 migration. Drop the catalog (releases lock)
+        // before the second open — two concurrent opens would deadlock on the lock.
+        drop(Catalog::open(&db_path, 1).unwrap());
+        // Second open: v3 already; must succeed with no error.
+        let cat2 = Catalog::open(&db_path, 1).unwrap();
+        let conn = cat2.conn.lock().unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "second open must keep version at SCHEMA_VERSION"
+        );
+        // Both tables must exist.
+        for table in &["embeddings", "dup_clusters"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{table} must be present after idempotent v2→v3");
+        }
+    }
+
+    #[test]
+    fn migration_chain_v1_to_v3() {
+        // Build a v1 DB and verify opening upgrades all the way to v3.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v1chain.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(crate::schema::INIT_SQL).unwrap();
+        }
+        let cat = Catalog::open(&db_path, 1).unwrap();
+        let conn = cat.conn.lock().unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "v1 DB must chain migrate to SCHEMA_VERSION"
+        );
+        // All three tables (photos, cull_scores, embeddings) must exist.
+        for table in &["photos", "cull_scores", "embeddings", "dup_clusters"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "{table} must be present after v1→v3 chain migration"
+            );
+        }
+    }
+
+    #[test]
+    fn dup_clusters_fk_violation_rejects_nonexistent_embedding() {
+        // Verify PRAGMA foreign_keys = ON enforces dup_clusters → embeddings FK.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("fk.db");
+        let cat = Catalog::open(&db_path, 1).unwrap();
+        let conn = cat.conn.lock().unwrap();
+        // Insert a valid photo.
+        let fake_photo_id = [0xAAu8; 32];
+        conn.execute(
+            "INSERT INTO photos (id, source_path, file_size, mtime_unix_seconds, \
+             mtime_anomalous, ingested_at_unix_seconds) VALUES (?1, '/tmp/x.cr3', 1000, 1000, 0, 1000)",
+            rusqlite::params![fake_photo_id.to_vec()],
+        )
+        .unwrap();
+        // Attempting to insert into dup_clusters without a matching embeddings row
+        // must fail with a FK violation (SqliteFailure with ConstraintViolation).
+        let res = conn.execute(
+            "INSERT INTO dup_clusters (photo_id, model_slug, cluster_id, similarity_threshold, \
+             clustered_at_unix_seconds) VALUES (?1, 'clip-v1', 0, 0.95, 1000)",
+            rusqlite::params![fake_photo_id.to_vec()],
+        );
+        assert!(
+            res.is_err(),
+            "FK violation: dup_clusters insert without matching embeddings must fail"
+        );
+        let err = res.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error {
+                        code: rusqlite::ffi::ErrorCode::ConstraintViolation,
+                        ..
+                    },
+                    _
+                )
+            ),
+            "expected ConstraintViolation FK error, got: {err:?}"
+        );
+    }
+
     #[test]
     fn migration_v1_to_v2_upgrades_and_enforces_fk() {
         // Build a v1 DB (user_version = 1, only photos table).
@@ -943,7 +1337,7 @@ mod tests {
             let v: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(v, SCHEMA_VERSION, "catalog must upgrade v1 DB to v2");
+            assert_eq!(v, SCHEMA_VERSION, "catalog must upgrade v1 DB to v3");
         }
 
         // Insert a photos row so we have a valid photo_id for the FK.
@@ -1053,6 +1447,257 @@ mod tests {
     // =========================================================
     // D5c-ii: HeartbeatDeathTrigger smoke test
     // =========================================================
+
+    // =========================================================
+    // D2b: embeddings + dup_clusters catalog API tests
+    // =========================================================
+
+    /// Helper: synthetic L2-normalized embedding bytes (512 dims, unit vector).
+    fn make_unit_embedding_bytes(dim: usize) -> Vec<u8> {
+        let val = 1.0_f32 / (dim as f32).sqrt();
+        let mut bytes = Vec::with_capacity(dim * 4);
+        for _ in 0..dim {
+            bytes.extend_from_slice(&val.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn insert_embedding_happy_path_and_already_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("e.db"), 1).unwrap();
+        let photo = make_test_photo(dir.path(), 1);
+        cat.upsert(&photo, 0).unwrap();
+        let pid = photo.photo_id();
+
+        let emb_bytes = make_unit_embedding_bytes(512);
+
+        // First insert → Inserted.
+        let out = cat
+            .insert_embedding(pid, "clip-v1", &emb_bytes, 512, 1_000_000)
+            .unwrap();
+        assert_eq!(out, InsertEmbeddingOutcome::Inserted);
+
+        // Second insert with same (photo_id, model_slug) → AlreadyEmbedded.
+        let out2 = cat
+            .insert_embedding(pid, "clip-v1", &emb_bytes, 512, 2_000_000)
+            .unwrap();
+        assert_eq!(out2, InsertEmbeddingOutcome::AlreadyEmbedded);
+    }
+
+    #[test]
+    fn unembedded_rows_excludes_embedded_and_superseded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("u.db"), 1).unwrap();
+        let p1 = make_test_photo(dir.path(), 1);
+        let p2 = make_test_photo(dir.path(), 2);
+        let p3 = make_test_photo(dir.path(), 3);
+        cat.upsert(&p1, 0).unwrap();
+        cat.upsert(&p2, 1).unwrap();
+        cat.upsert(&p3, 2).unwrap();
+
+        let emb = make_unit_embedding_bytes(512);
+
+        // Embed p1 under clip-v1.
+        cat.insert_embedding(p1.photo_id(), "clip-v1", &emb, 512, 1000)
+            .unwrap();
+
+        // Supersede p3 via raw SQL (no delete API in v0.1).
+        {
+            let conn = cat.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE photos SET superseded_at_unix_seconds = 9999 WHERE id = ?1",
+                rusqlite::params![p3.photo_id().as_bytes().to_vec()],
+            )
+            .unwrap();
+        }
+
+        // unembedded_rows must return only p2 (p1 embedded, p3 superseded).
+        let rows = cat.unembedded_rows("clip-v1").unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "only p2 should be unembedded and non-superseded"
+        );
+        assert_eq!(rows[0].photo_id(), p2.photo_id());
+
+        // For a different model slug, all non-superseded photos are returned.
+        let rows2 = cat.unembedded_rows("other-model").unwrap();
+        assert_eq!(
+            rows2.len(),
+            2,
+            "both p1 and p2 unembedded under 'other-model'"
+        );
+    }
+
+    #[test]
+    fn all_embeddings_for_model_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("r.db"), 1).unwrap();
+        let p1 = make_test_photo(dir.path(), 1);
+        let p2 = make_test_photo(dir.path(), 2);
+        cat.upsert(&p1, 0).unwrap();
+        cat.upsert(&p2, 1).unwrap();
+
+        let emb1 = make_unit_embedding_bytes(512);
+        let mut emb2 = make_unit_embedding_bytes(512);
+        emb2[0] = 0xFF; // make it distinct from emb1
+
+        cat.insert_embedding(p1.photo_id(), "clip-v1", &emb1, 512, 1000)
+            .unwrap();
+        cat.insert_embedding(p2.photo_id(), "clip-v1", &emb2, 512, 2000)
+            .unwrap();
+
+        let results = cat.all_embeddings_for_model("clip-v1").unwrap();
+        assert_eq!(results.len(), 2, "must retrieve both embeddings");
+
+        // Verify bytes + dim round-trip correctly.
+        let map: std::collections::HashMap<_, _> = results
+            .into_iter()
+            .map(|(pid, bytes, dim)| (pid, (bytes, dim)))
+            .collect();
+        let (bytes1, dim1) = &map[&p1.photo_id()];
+        assert_eq!(bytes1, &emb1, "p1 embedding bytes must round-trip");
+        assert_eq!(*dim1, 512_usize, "p1 dim must round-trip");
+        let (bytes2, dim2) = &map[&p2.photo_id()];
+        assert_eq!(bytes2, &emb2, "p2 embedding bytes must round-trip");
+        assert_eq!(*dim2, 512_usize, "p2 dim must round-trip");
+
+        // Different model → empty result.
+        let empty = cat.all_embeddings_for_model("other-model").unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn insert_dup_cluster_happy_path_and_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("d.db"), 1).unwrap();
+        let p1 = make_test_photo(dir.path(), 1);
+        cat.upsert(&p1, 0).unwrap();
+
+        let emb = make_unit_embedding_bytes(512);
+        cat.insert_embedding(p1.photo_id(), "clip-v1", &emb, 512, 1000)
+            .unwrap();
+
+        // First cluster assignment.
+        cat.insert_dup_cluster(p1.photo_id(), "clip-v1", 0, 0.95, 2000)
+            .unwrap();
+
+        // Re-cluster with different cluster_id (INSERT OR REPLACE).
+        cat.insert_dup_cluster(p1.photo_id(), "clip-v1", 7, 0.90, 3000)
+            .unwrap();
+
+        // Verify the second assignment replaced the first.
+        let conn = cat.conn.lock().unwrap();
+        let cluster_id: i64 = conn
+            .query_row(
+                "SELECT cluster_id FROM dup_clusters WHERE photo_id = ?1 AND model_slug = ?2",
+                rusqlite::params![p1.photo_id().as_bytes().to_vec(), "clip-v1"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cluster_id, 7,
+            "INSERT OR REPLACE must overwrite previous assignment"
+        );
+        // Verify other columns were also replaced (not just cluster_id).
+        let (threshold, clustered_at): (f64, i64) = conn
+            .query_row(
+                "SELECT similarity_threshold, clustered_at_unix_seconds \
+                 FROM dup_clusters WHERE photo_id = ?1 AND model_slug = ?2",
+                rusqlite::params![p1.photo_id().as_bytes().to_vec(), "clip-v1"],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        // 0.90_f32 cast to f64 is 0.8999999761581421; use f32 epsilon tolerance.
+        assert!(
+            (threshold - f64::from(0.90_f32)).abs() < f64::EPSILON,
+            "similarity_threshold must be replaced to 0.90 (f32), got {threshold}"
+        );
+        assert_eq!(
+            clustered_at, 3000,
+            "clustered_at_unix_seconds must be replaced to 3000"
+        );
+    }
+
+    #[test]
+    fn insert_embedding_dim_zero_rejects_with_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("dim.db"), 1).unwrap();
+        let photo = make_test_photo(dir.path(), 1);
+        cat.upsert(&photo, 0).unwrap();
+
+        // dim=0 must be caught by the Rust-level guard before INSERT OR IGNORE
+        // can swallow the CHECK constraint violation.
+        let err = cat
+            .insert_embedding(photo.photo_id(), "clip-v1", &[0u8; 0], 0, 1000)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogInsert { .. }),
+            "dim=0 must return CatalogInsert, not AlreadyEmbedded"
+        );
+    }
+
+    #[test]
+    fn insert_embedding_dim_bounds_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("bounds.db"), 1).unwrap();
+        let photo = make_test_photo(dir.path(), 1);
+        cat.upsert(&photo, 0).unwrap();
+        let pid = photo.photo_id();
+
+        // dim=65537 (above upper bound) must also be caught.
+        let err = cat
+            .insert_embedding(pid, "clip-v1", &make_unit_embedding_bytes(512), 65537, 1000)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogInsert { .. }),
+            "dim=65537 must return CatalogInsert, got {err:?}"
+        );
+
+        // dim=65536 (at upper bound) must succeed.
+        let large_emb = make_unit_embedding_bytes(65536);
+        let out = cat
+            .insert_embedding(pid, "clip-v1", &large_emb, 65536, 1000)
+            .unwrap();
+        assert_eq!(out, InsertEmbeddingOutcome::Inserted);
+    }
+
+    #[test]
+    fn insert_embedding_fk_violation_with_nonexistent_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("fk2.db"), 1).unwrap();
+        let fake_pid = photo_id_from_row_bytes([0xFFu8; 32]);
+        let emb = make_unit_embedding_bytes(512);
+
+        // SQLite docs: ON CONFLICT clause (OR IGNORE) does NOT apply to FOREIGN KEY
+        // constraints — only to UNIQUE, NOT NULL, CHECK, and ROWID. So a FK violation
+        // with INSERT OR IGNORE still fires as a ConstraintViolation error.
+        let err = cat
+            .insert_embedding(fake_pid, "clip-v1", &emb, 512, 1000)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogInsert { .. }),
+            "FK violation must surface as CatalogInsert, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn insert_dup_cluster_with_missing_embedding_fails() {
+        // API-level test: insert_dup_cluster without matching embeddings row.
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("dcfk.db"), 1).unwrap();
+        let photo = make_test_photo(dir.path(), 1);
+        cat.upsert(&photo, 0).unwrap();
+        // No embedding inserted → FK violation in dup_clusters.
+        let err = cat
+            .insert_dup_cluster(photo.photo_id(), "clip-v1", 0, 0.95, 1000)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogInsert { .. }),
+            "FK violation must surface as CatalogInsert, got: {err:?}"
+        );
+    }
 
     #[test]
     fn heartbeat_death_trigger_panics_and_join_returns_err() {
