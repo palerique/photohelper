@@ -511,6 +511,7 @@ mod tests {
 
     use photohelper_core::catalog_glue::photo_id_from_row_bytes;
     use photohelper_core::model::{AbsPath, ExifMetadata, Photo};
+    use photohelper_test_helpers::HeartbeatDeathTrigger;
 
     use super::*;
 
@@ -652,5 +653,34 @@ mod tests {
             1,
             "fresh catalog must accept inserts after poisoned one is dropped"
         );
+    }
+
+    // =========================================================
+    // D5c-ii: HeartbeatDeathTrigger smoke test
+    // =========================================================
+
+    #[test]
+    fn heartbeat_death_trigger_panics_and_join_returns_err() {
+        // D5c-ii: verify the HeartbeatDeathTrigger helper itself works correctly.
+        // A signalled trigger thread panics; join() returns Err; is_finished()
+        // becomes true after signalling. This is the foundation for the in-process
+        // heartbeat-death-WARN regression test (see D5e in session 03 plan §D5c-ii).
+        let trigger = HeartbeatDeathTrigger::spawn();
+        assert!(
+            !trigger.is_finished(),
+            "thread should be running before signal"
+        );
+        trigger.signal();
+        // Spin until finished (tiny delay while the thread wakes and panics).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !trigger.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "trigger thread did not finish within 5s"
+            );
+            std::thread::yield_now();
+        }
+        let result = trigger.join();
+        assert!(result.is_err(), "join must return Err after a panic");
     }
 }

@@ -127,10 +127,16 @@ hooks-run-all:
 # `ci` runs exactly what .github/workflows/ci.yml runs, in the same order, so
 # `just ci` passing locally is equivalent to CI passing. Keep this list in
 # sync with the workflow file.
-ci: fmt-check lint test audit unsafe-isolation sanitize-check
+ci: fmt-check lint test audit unsafe-isolation sanitize-check test-helpers-dev-only
     @./scripts/verify-state.sh
     @prek run --all-files
     @prek run --all-files --hook-stage pre-push
+
+# D5c E2E: verify photohelper-test-helpers appears only as a dev-dependency.
+# Any non-dev consumer is a policy violation — test helpers must not be linked
+# into release artifacts.
+test-helpers-dev-only:
+    @./scripts/check-test-helpers-dev-only.sh
 
 # Sanitization gate for tests/fixtures/cr3/*.CR3 — every fixture must
 # contain only the asserted-survivor EXIF tag set (no GPS / lens serial

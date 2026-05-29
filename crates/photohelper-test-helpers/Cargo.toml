@@ -1,0 +1,16 @@
+[package]
+name = "photohelper-test-helpers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Dev-only test helpers for the photohelper workspace"
+
+# This crate must NEVER appear as a non-dev dependency. Enforced by the
+# D5c E2E check: `cargo metadata | jq` asserts all consumers list it
+# under `dep_kinds = [{kind: "dev"}]` only.
+
+[lints]
+workspace = true

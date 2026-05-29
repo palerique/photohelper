@@ -9,6 +9,7 @@ members = [
     "crates/photohelper-export",
     "crates/photohelper-cameras",
     "crates/photohelper-catalog",
+    "crates/photohelper-test-helpers",
 ]
 
 [workspace.package]

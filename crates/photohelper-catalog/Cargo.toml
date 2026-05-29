@@ -23,5 +23,6 @@ tracing.workspace = true
 # parsing surface.
 
 [dev-dependencies]
+photohelper-test-helpers = { path = "../photohelper-test-helpers" }
 tempfile.workspace = true
 static_assertions.workspace = true
