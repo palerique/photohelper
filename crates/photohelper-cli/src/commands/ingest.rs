@@ -34,7 +34,8 @@ const RAW_EXTS: &[&str] = &["cr3"];
 /// Heartbeat interval. Overridable in tests via the
 /// `PHOTOHELPER_HEARTBEAT_INTERVAL_MS` env var so test row 48 (heartbeat
 /// at default verbosity) doesn't have to wait 10 seconds in CI.
-fn heartbeat_interval() -> Duration {
+/// `pub(crate)` so `cull.rs` can share the same env-var override (TD-016).
+pub(crate) fn heartbeat_interval() -> Duration {
     if let Ok(s) = std::env::var("PHOTOHELPER_HEARTBEAT_INTERVAL_MS")
         && let Ok(ms) = s.parse::<u64>()
     {
@@ -54,7 +55,7 @@ pub(crate) struct HeartbeatStop {
 }
 
 impl HeartbeatStop {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             lock: Mutex::new(false),
             cvar: Condvar::new(),
@@ -62,7 +63,7 @@ impl HeartbeatStop {
     }
 
     /// Mark the stop flag and wake every waiter immediately.
-    fn signal(&self) {
+    pub(crate) fn signal(&self) {
         let mut stopped = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         *stopped = true;
         drop(stopped);
@@ -70,7 +71,7 @@ impl HeartbeatStop {
     }
 
     /// Wait up to `dur` for `signal()`; returns `true` if stop was observed.
-    fn wait_for_stop(&self, dur: Duration) -> bool {
+    pub(crate) fn wait_for_stop(&self, dur: Duration) -> bool {
         let stopped = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         if *stopped {
             return true;
