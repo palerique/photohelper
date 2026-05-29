@@ -201,8 +201,8 @@
 - **Observed**: Session 02's plan originally scoped `dup_groups` as a v2 schema table. Session 03 plan-review Round 1 (PR1-T30) found the table was under-specified (no dimension, no float-format, no model-identity column) and would ship with no writer — a schema-only stop-gap with no current value. Per decision-doc 0001:129 ("A single-statement migration doesn't justify framework overhead"), shipping a table with zero consumers also violates the spirit of the v2 migration: every table in v2 should have at least one producer session 03 can point to.
 - **Why it matters**: When MobileCLIP (or an alternative embedding model) arrives in session 04+, the schema design can be done correctly with the consumer's actual shape known. A premature schema must be migrated again (v3+), wasting a migration slot. Session 03 ships only `cull_scores` in v2.
 - **Owner**: session 04+ that adds the MobileCLIP producer. That session's plan MUST include: embedding table schema (`model_slug TEXT`, `dim INTEGER`, `quantization TEXT`, `embedding BLOB`), dimension validation at insert time, `dup_clusters` table for group assignment (separate from per-photo embeddings), and `v2→v3` migration.
-- **Binding trigger**: session 04+'s first plan commit IF MobileCLIP dup-detection is in scope for that session. If not, defers until the session that introduces the first embedding producer.
-- **Status**: open (dup_groups deferred from session 03 per PR1-T30 remediation; schema will be defined when the compute arrives).
+- **Binding trigger**: **Escalated (2026-05-29)**: user explicitly requested dedup feature for a future session. Session 05 is the target. Session 05's plan MUST include MobileCLIP dup-detection as a primary deliverable. If session 05 scope is too large, scope to session 06 with explicit acknowledgment.
+- **Status**: open — escalated to session 05 target. Schema design deferred correctly (consumer-first approach).
 
 ### DN-025 — NIMA cross-platform score tolerance (apple-silicon vs Linux x86_64) (2026-05-28, session 03)
 
