@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use photohelper_core::Error;
 use photohelper_core::model::{AbsPath, Photo, PhotoId};
 
-use crate::row::{CullRow, PhotoRow, SELECT_ALL_COLUMNS, insert_error};
+use crate::row::{CullRow, EmbeddingRow, PhotoRow, SELECT_ALL_COLUMNS, insert_error};
 use crate::schema::{INIT_SQL, MIGRATE_V1_TO_V2_SQL, MIGRATE_V2_TO_V3_SQL, SCHEMA_VERSION};
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
@@ -54,6 +54,17 @@ pub enum UpsertOutcome {
     },
     /// Identical PhotoId already in the catalog (re-ingest or hardlink).
     AlreadyCatalogued,
+}
+
+/// Outcome of [`Catalog::insert_embedding`].
+///
+/// Discriminated via `conn.changes()` after `INSERT OR IGNORE`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InsertEmbeddingOutcome {
+    /// Row was inserted; this is the first embedding for this photo × model.
+    Inserted,
+    /// Row already existed; nothing changed.
+    AlreadyEmbedded,
 }
 
 /// Outcome of [`Catalog::insert_cull_score`].
@@ -583,6 +594,197 @@ impl Catalog {
         };
         tx.commit().map_err(|e| insert_error(photo_id, e))?;
         Ok(outcome)
+    }
+
+    /// Fetch all non-superseded photos that do not yet have an embedding from
+    /// `model_slug`, ordered by ingest time. The dedup pipeline calls this to
+    /// get the work list for the embed phase.
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned` if a prior worker panicked.
+    /// - `Error::CatalogOpen` for query failures.
+    pub fn unembedded_rows(&self, model_slug: &str) -> Result<Vec<EmbeddingRow>, Error> {
+        let guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
+            path: self.canonical_path.clone(),
+        })?;
+        let sql = "SELECT id, source_path FROM photos \
+                   WHERE superseded_at_unix_seconds IS NULL \
+                     AND id NOT IN (SELECT photo_id FROM embeddings WHERE model_slug = ?1) \
+                   ORDER BY ingested_at_unix_seconds";
+        let mut stmt = guard.prepare(sql).map_err(|e| Error::CatalogOpen {
+            path: self.canonical_path.clone(),
+            source: Box::new(e),
+        })?;
+        let rows = stmt
+            .query_map(rusqlite::params![model_slug], |row| {
+                let id_bytes: Vec<u8> = row.get("id")?;
+                let id_arr: [u8; 32] = id_bytes.as_slice().try_into().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(0, "id".into(), rusqlite::types::Type::Blob)
+                })?;
+                let photo_id = photohelper_core::catalog_glue::photo_id_from_row_bytes(id_arr);
+                let path_str: String = row.get("source_path")?;
+                Ok((photo_id, path_str))
+            })
+            .map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (photo_id, path_str) = r.map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+            out.push(EmbeddingRow::new(photo_id, PathBuf::from(path_str)));
+        }
+        Ok(out)
+    }
+
+    /// Persist a float32 embedding for `photo_id` × `model_slug`.
+    ///
+    /// `embedding_bytes` must be a little-endian f32 byte slice (`dim × 4` bytes).
+    /// Uses `INSERT OR IGNORE` so concurrent workers race safely — the first writer
+    /// wins, the rest see `AlreadyEmbedded`.
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned` if a prior worker panicked.
+    /// - `Error::CatalogInsert` for SQLite failures (includes FK violations and
+    ///   constraint violations like `dim` out of range).
+    // TD-018: embedding stored as raw f32 LE bytes; quantization='f32' hardcoded.
+    // See TECH-DEBT.md § TD-018 for the int8/f16 quantization upgrade plan.
+    pub fn insert_embedding(
+        &self,
+        photo_id: PhotoId,
+        model_slug: &str,
+        embedding_bytes: &[u8],
+        dim: usize,
+        embedded_at_unix_seconds: i64,
+    ) -> Result<InsertEmbeddingOutcome, Error> {
+        let mut guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
+            path: self.canonical_path.clone(),
+        })?;
+        // dim is guaranteed > 0 by ImageEmbedding's constructor invariant, but the
+        // CHECK(dim > 0) in the schema enforces it at the DB layer regardless.
+        let id_bytes = photo_id.as_bytes().to_vec();
+        let tx = guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| insert_error(photo_id, e))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO embeddings \
+             (photo_id, model_slug, dim, quantization, embedding, embedded_at_unix_seconds) \
+             VALUES (?1, ?2, ?3, 'f32', ?4, ?5)",
+            rusqlite::params![
+                &id_bytes,
+                model_slug,
+                dim as i64,
+                embedding_bytes,
+                embedded_at_unix_seconds
+            ],
+        )
+        .map_err(|e| insert_error(photo_id, e))?;
+        let outcome = if tx.changes() == 1 {
+            InsertEmbeddingOutcome::Inserted
+        } else {
+            InsertEmbeddingOutcome::AlreadyEmbedded
+        };
+        tx.commit().map_err(|e| insert_error(photo_id, e))?;
+        Ok(outcome)
+    }
+
+    /// Load all embeddings for `model_slug` as raw f32 LE byte slices.
+    ///
+    /// Returns `(PhotoId, embedding_bytes)` pairs; the caller (CLI clustering
+    /// pass) constructs `ImageEmbedding` via `ImageEmbedding::from_f32_le_bytes`.
+    /// Loaded in a single query for the O(n²) clustering pass.
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned`, `Error::CatalogOpen` for query failures.
+    pub fn all_embeddings_for_model(
+        &self,
+        model_slug: &str,
+    ) -> Result<Vec<(PhotoId, Vec<u8>)>, Error> {
+        let guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
+            path: self.canonical_path.clone(),
+        })?;
+        let mut stmt = guard
+            .prepare("SELECT photo_id, embedding FROM embeddings WHERE model_slug = ?1")
+            .map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+        let rows = stmt
+            .query_map(rusqlite::params![model_slug], |row| {
+                let id_bytes: Vec<u8> = row.get("photo_id")?;
+                let embedding: Vec<u8> = row.get("embedding")?;
+                Ok((id_bytes, embedding))
+            })
+            .map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id_bytes, embedding) = r.map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+            let id_arr: [u8; 32] =
+                id_bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|e| Error::CatalogOpen {
+                        path: self.canonical_path.clone(),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("photo_id blob wrong length: {e}"),
+                        )),
+                    })?;
+            let photo_id = photohelper_core::catalog_glue::photo_id_from_row_bytes(id_arr);
+            out.push((photo_id, embedding));
+        }
+        Ok(out)
+    }
+
+    /// Persist a cluster assignment for `photo_id` × `model_slug`.
+    ///
+    /// Uses `INSERT OR REPLACE` — re-clustering a photo replaces the old
+    /// assignment. Returns `()` (INSERT OR REPLACE always "inserts").
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned` if a prior worker panicked.
+    /// - `Error::CatalogInsert` for SQLite failures (includes FK violations).
+    // TD-019: no per-dedup-run audit trail; similarity_threshold stored per-row as stop-gap.
+    // See TECH-DEBT.md § TD-019 for the dedup_runs upgrade plan.
+    pub fn insert_dup_cluster(
+        &self,
+        photo_id: PhotoId,
+        model_slug: &str,
+        cluster_id: i64,
+        similarity_threshold: f32,
+        clustered_at_unix_seconds: i64,
+    ) -> Result<(), Error> {
+        let mut guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
+            path: self.canonical_path.clone(),
+        })?;
+        let id_bytes = photo_id.as_bytes().to_vec();
+        let tx = guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| insert_error(photo_id, e))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO dup_clusters \
+             (photo_id, model_slug, cluster_id, similarity_threshold, clustered_at_unix_seconds) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                &id_bytes,
+                model_slug,
+                cluster_id,
+                f64::from(similarity_threshold),
+                clustered_at_unix_seconds
+            ],
+        )
+        .map_err(|e| insert_error(photo_id, e))?;
+        tx.commit().map_err(|e| insert_error(photo_id, e))?;
+        Ok(())
     }
 
     /// Borrow the canonical catalog path.
@@ -1207,6 +1409,161 @@ mod tests {
     // =========================================================
     // D5c-ii: HeartbeatDeathTrigger smoke test
     // =========================================================
+
+    // =========================================================
+    // D2b: embeddings + dup_clusters catalog API tests
+    // =========================================================
+
+    /// Helper: synthetic L2-normalized embedding bytes (512 dims, unit vector).
+    fn make_unit_embedding_bytes(dim: usize) -> Vec<u8> {
+        let val = 1.0_f32 / (dim as f32).sqrt();
+        let mut bytes = Vec::with_capacity(dim * 4);
+        for _ in 0..dim {
+            bytes.extend_from_slice(&val.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn insert_embedding_happy_path_and_already_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("e.db"), 1).unwrap();
+        let photo = make_test_photo(dir.path(), 1);
+        cat.upsert(&photo, 0).unwrap();
+        let pid = photo.photo_id();
+
+        let emb_bytes = make_unit_embedding_bytes(512);
+
+        // First insert → Inserted.
+        let out = cat
+            .insert_embedding(pid, "clip-v1", &emb_bytes, 512, 1_000_000)
+            .unwrap();
+        assert_eq!(out, InsertEmbeddingOutcome::Inserted);
+
+        // Second insert with same (photo_id, model_slug) → AlreadyEmbedded.
+        let out2 = cat
+            .insert_embedding(pid, "clip-v1", &emb_bytes, 512, 2_000_000)
+            .unwrap();
+        assert_eq!(out2, InsertEmbeddingOutcome::AlreadyEmbedded);
+    }
+
+    #[test]
+    fn unembedded_rows_excludes_embedded_and_superseded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("u.db"), 1).unwrap();
+        let p1 = make_test_photo(dir.path(), 1);
+        let p2 = make_test_photo(dir.path(), 2);
+        let p3 = make_test_photo(dir.path(), 3);
+        cat.upsert(&p1, 0).unwrap();
+        cat.upsert(&p2, 1).unwrap();
+        cat.upsert(&p3, 2).unwrap();
+
+        let emb = make_unit_embedding_bytes(512);
+
+        // Embed p1 under clip-v1.
+        cat.insert_embedding(p1.photo_id(), "clip-v1", &emb, 512, 1000)
+            .unwrap();
+
+        // Supersede p3 via raw SQL (no delete API in v0.1).
+        {
+            let conn = cat.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE photos SET superseded_at_unix_seconds = 9999 WHERE id = ?1",
+                rusqlite::params![p3.photo_id().as_bytes().to_vec()],
+            )
+            .unwrap();
+        }
+
+        // unembedded_rows must return only p2 (p1 embedded, p3 superseded).
+        let rows = cat.unembedded_rows("clip-v1").unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "only p2 should be unembedded and non-superseded"
+        );
+        assert_eq!(rows[0].photo_id(), p2.photo_id());
+
+        // For a different model slug, all non-superseded photos are returned.
+        let rows2 = cat.unembedded_rows("other-model").unwrap();
+        assert_eq!(
+            rows2.len(),
+            2,
+            "both p1 and p2 unembedded under 'other-model'"
+        );
+    }
+
+    #[test]
+    fn all_embeddings_for_model_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("r.db"), 1).unwrap();
+        let p1 = make_test_photo(dir.path(), 1);
+        let p2 = make_test_photo(dir.path(), 2);
+        cat.upsert(&p1, 0).unwrap();
+        cat.upsert(&p2, 1).unwrap();
+
+        let emb1 = make_unit_embedding_bytes(512);
+        let mut emb2 = make_unit_embedding_bytes(512);
+        emb2[0] = 0xFF; // make it distinct from emb1
+
+        cat.insert_embedding(p1.photo_id(), "clip-v1", &emb1, 512, 1000)
+            .unwrap();
+        cat.insert_embedding(p2.photo_id(), "clip-v1", &emb2, 512, 2000)
+            .unwrap();
+
+        let results = cat.all_embeddings_for_model("clip-v1").unwrap();
+        assert_eq!(results.len(), 2, "must retrieve both embeddings");
+
+        // Verify bytes round-trip correctly.
+        let map: std::collections::HashMap<_, _> = results.into_iter().collect();
+        assert_eq!(
+            map[&p1.photo_id()],
+            emb1,
+            "p1 embedding bytes must round-trip"
+        );
+        assert_eq!(
+            map[&p2.photo_id()],
+            emb2,
+            "p2 embedding bytes must round-trip"
+        );
+
+        // Different model → empty result.
+        let empty = cat.all_embeddings_for_model("other-model").unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn insert_dup_cluster_happy_path_and_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("d.db"), 1).unwrap();
+        let p1 = make_test_photo(dir.path(), 1);
+        cat.upsert(&p1, 0).unwrap();
+
+        let emb = make_unit_embedding_bytes(512);
+        cat.insert_embedding(p1.photo_id(), "clip-v1", &emb, 512, 1000)
+            .unwrap();
+
+        // First cluster assignment.
+        cat.insert_dup_cluster(p1.photo_id(), "clip-v1", 0, 0.95, 2000)
+            .unwrap();
+
+        // Re-cluster with different cluster_id (INSERT OR REPLACE).
+        cat.insert_dup_cluster(p1.photo_id(), "clip-v1", 7, 0.90, 3000)
+            .unwrap();
+
+        // Verify the second assignment replaced the first.
+        let conn = cat.conn.lock().unwrap();
+        let cluster_id: i64 = conn
+            .query_row(
+                "SELECT cluster_id FROM dup_clusters WHERE photo_id = ?1 AND model_slug = ?2",
+                rusqlite::params![p1.photo_id().as_bytes().to_vec(), "clip-v1"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cluster_id, 7,
+            "INSERT OR REPLACE must overwrite previous assignment"
+        );
+    }
 
     #[test]
     fn heartbeat_death_trigger_panics_and_join_returns_err() {

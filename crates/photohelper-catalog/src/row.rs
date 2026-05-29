@@ -111,6 +111,41 @@ impl CullRow {
     }
 }
 
+/// A 2-field projection used by the dedup embedding pipeline: enough to locate
+/// the file on disk and identify the photo in the catalog.
+///
+/// Intentionally distinct from [`CullRow`]: the types may diverge (e.g.,
+/// `EmbeddingRow` could carry `existing_dim` or `model_slug`; `CullRow` could
+/// carry `existing_score`). Two identical DTOs is below the three-instance
+/// abstraction threshold per project convention.
+///
+/// Produced by [`super::Catalog::unembedded_rows`].
+#[derive(Clone, Debug)]
+pub struct EmbeddingRow {
+    photo_id: PhotoId,
+    source_path: PathBuf,
+}
+
+impl EmbeddingRow {
+    /// Construct from DB-retrieved values.
+    pub(crate) fn new(photo_id: PhotoId, source_path: PathBuf) -> Self {
+        Self {
+            photo_id,
+            source_path,
+        }
+    }
+
+    /// `PhotoId` as stored in the catalog.
+    pub fn photo_id(&self) -> PhotoId {
+        self.photo_id
+    }
+
+    /// Source path as canonicalized at ingest time.
+    pub fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+}
+
 /// Columns selected by `from_row`. Keep in sync with the struct.
 pub(crate) const SELECT_ALL_COLUMNS: &str = "id, source_path, file_size, \
      mtime_unix_seconds, mtime_anomalous, make, model, camera_slug, \
