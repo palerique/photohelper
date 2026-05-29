@@ -10,27 +10,33 @@
 **Last session**: 3 (`ai-culling-skeleton` — 2026-05-28) — **SHIPPED** via PR #6
 (`64452ad`). Session narrowed to D5+D6+D7 after D0 ABORT.
 
-**Current session**: **04** (`ai-culling-pipeline`) — **IMPLEMENTATION COMPLETE.**
-Branch: `session-04/ai-culling-pipeline`. All deliverables D0'→D3 done.
-`just ci` GREEN. **143 tests**.
+**Current session**: **04** (`ai-culling-pipeline`) — **SHIPPED** via PR #N.
+Branch deleted after merge.
 
-**Goal** (session 04): Full AI culling pipeline — D0'→D1a→D1b/c→D1d→D1e→D2a/b→D3.
+**Goal** (session 04): Full AI culling pipeline — D0'→D1a→D1b/c→D1d→D1e→D2a/b→D3. DONE.
 
-**Action**: **FIRE SESSION-END REVIEW** (`/eight-agent-review` or `session-end`
-skill). Then R2 → remediate → push → PR → merge.
+**Action (next session)**: Session 05 — dedup pipeline (DN-024 MobileCLIP) or
+`develop` pipeline start. Begin with `git switch main && git pull --ff-only origin main`.
 
-**Status**: `just ci` GREEN (143 tests). All D0'→D3 deliverables complete:
-- D1e: read_raw_rgb (dcraw_process FFI + RgbImage, integration test with plausibility check)
-- D2a: catalog schema v2 (cull_scores table, FK enforcement, SCHEMA_VERSION=2, decision doc 0002)
-- D2b: CullRow, InsertScoreOutcome, unsuperseded_unscored_rows, insert_cull_score
-- Sub-component review (D2b boundary): R1+R2 complete, all findings remediated
-- D3: commands/cull.rs (run_cull pipeline, CullStats×10, heartbeat, --strict, model wiring)
-- 2 CLI integration tests: real CR3 fixture + strict decode-fail exit code
+**Status**: SHIPPED. `just ci` GREEN (143 tests). Session-end R1+R2 CLEAN.
+Completed this session: D0' (ANL-002+DN-026 closed), D1a (ort dep), D1b+D1c
+(RgbImage in core + VerifiedModelBytes+NimaScore+Nima in ai), D1d (ONNX via LFS
++ verify-model-sha256 CI gate), D1e (read_raw_rgb FFI), D2a (schema v2 migration
++ FK enforcement), D2b (CullRow, unsuperseded_unscored_rows, insert_cull_score,
+sub-component R1+R2), D3 (commands/cull.rs full pipeline + 3 CLI integration tests).
 DN-024 (dedup) escalated → session 05.
 
 **Plan-review history (session 04 — COMPLETE)**:
 - R1 → 6 CRITICAL + 13 HIGH + 10 MEDIUM + 3 LOW → plan v2
 - R2 → 3 HIGH + 5 MEDIUM + 2 LOW → plan v3 (CLEAN)
+
+**Sub-component review (D2b boundary — COMPLETE)**:
+- R1 → 1 CRITICAL + 4 HIGH + 5 MEDIUM + 2 LOW → remediated
+- R2 → 2 HIGH + 7 MEDIUM + 3 LOW → remediated → CLEAN
+
+**Session-end review (COMPLETE)**:
+- R1 → 1 CRITICAL + 4 HIGH + 9 MEDIUM + 1 LOW → 13 items remediated; just ci GREEN (143 tests)
+- R2 → 0 findings; all 13 watch-list items CLOSED; CLEAN
 
 **Plan-review history (session 03 — COMPLETE)**:
 - R1 → 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW → plan v2 (dc95639)
@@ -50,12 +56,12 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 |-----------------------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | `photohelper-cli`     | **implemented (session 01)**            | clap v4 + 7 subcommands; `ingest` real; stubs exit 69; heartbeat + summary via eprintln!.                     |
 | `photohelper-core`    | **implemented (session 01)**            | model (PhotoId, AbsPath, CameraId, KnownCamera, ExifOrientation, Aspect, ExifMetadata, IngestOutcome, Photo); error (13 variants); catalog_glue. |
-| `photohelper-raw`     | **implemented (session 02)**            | LibRaw 0.22.1 vendored (1.6 MB tarball under `vendor/`); autoconf-driven build.rs + cc-compiled C shim (`cpp/photohelper_libraw_shim.c`) over LibRaw struct types. `exif::read_cr3(path) → RawExif` + `decode::read_raw(path) → RawImage`. Error / RawExifCause / RawDecodeCause enums + RawExif + RawImage + BayerPlane + CfaPattern + SensorLevels + SensorBitDepth + WhiteBalance + CamRgbToXyzD65Matrix all with R2-T6 invariants. Three-layer unsafe-isolation defense (workspace forbid + file-level forbid + rg gate). 3 integration tests pass against CC0 R8 CR3 fixtures. |
-| `photohelper-ai`      | scaffolded                              | ort/tract + culling/denoise models land in sessions 03+.                                                      |
+| `photohelper-raw`     | **implemented (session 02+04)**         | Session 02: LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw, full type suite. Session 04 D1e: decode::read_raw_rgb (dcraw_process pipeline + RgbImage output via 6 new C shim accessors + parse_libraw_rgb_image + extract_rgb_image). 4 integration tests (3 Bayer + 1 RGB). |
+| `photohelper-ai`      | **implemented (session 04)**            | VerifiedModelBytes + NimaScore + Nima (ONNX Runtime 2.0.0-rc.12, thread_local! per-worker Session, SHA-256 model verification). NIMA model in Git LFS. MODEL_SLUG + MODEL_MANIFEST_NAME constants. |
 | `photohelper-sidecar` | scaffolded                              | XMP read/write (crs:/ph: namespaces) lands when `develop` is wired (~session 04).                             |
 | `photohelper-export`  | scaffolded                              | resize + watermark + mozjpeg encode land when `export` is wired (~session 05).                                |
 | `photohelper-cameras` | **implemented (session 01)**            | CameraProfile trait + CanonR8 stub + CameraRegistry::for_exif with normalization.                             |
-| `photohelper-catalog` | **implemented (session 01)** (8th crate)| Catalog::open with file-lock + WAL + magic-byte + schema-version + wal_checkpoint warn; upsert with BEGIN IMMEDIATE + supersede + poison ROLLBACK; PhotoRow boundary; v1 schema authoritatively documented in `docs/decisions/0001-catalog-schema-v1.md`. |
+| `photohelper-catalog` | **implemented (sessions 01+04)**        | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores table + FK enforcement + SCHEMA_VERSION=2), CullRow (PathBuf, private fields + accessors), InsertScoreOutcome, unsuperseded_unscored_rows (NOT IN SQL filter, ORDER BY ingested_at), insert_cull_score (INSERT OR IGNORE + changes(), range guard, TD-013 labeled). Decision docs 0001 amended + 0002 authored. |
 
 ---
 

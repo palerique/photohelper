@@ -795,3 +795,82 @@ just session-start
 ```
 
 Then paste the restart prompt.
+
+---
+
+## Checkpoint 11 — session 04 SHIPPED (2026-05-29; full AI culling pipeline)
+
+**Status**: SHIPPED. Session-04 GOAL fully met end-to-end.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code session 04)
+
+### What landed this session
+
+**D0'**: Re-ran NIMA inference verification after DN-026 closure. Scores:
+CRAW_FULL_FRAME.CR3 = 3.7377, RAW_FULL_FRAME.CR3 = 3.9253. ANL-002 addendum.
+DN-026 CLOSED.
+
+**D1a**: Wired `ort =2.0.0-rc.12` dep with `download-binaries` + `tls-native`.
+
+**D1b+D1c**: `RgbImage` in photohelper-core (breaks ai↔raw circular dep). In
+photohelper-ai: `VerifiedModelBytes` (SHA-256 manifest verification), `NimaScore`
+(f32 newtype, range [1,10], Ord via total_cmp), `Nima` (thread_local! per-worker
+ort::Session). `MODEL_SLUG` + `MODEL_MANIFEST_NAME` constants.
+
+**D1d**: NIMA ONNX model in Git LFS (Apache-2.0 converted from idealo/image-
+quality-assessment). `scripts/verify-model-sha256.sh` + `just verify-model-sha256`
+CI gate.
+
+**D1e**: `read_raw_rgb(path) → Result<RgbImage, Error>` via LibRaw dcraw_process
+pipeline. 3 new FFI bindings (dcraw_process, make_mem_image, clear_mem) + 6 C
+shim accessors for libraw_processed_image_t. Integration test verifies both CC0
+CR3 fixtures: dim invariant + mean∈(20,240) + std_dev>5.
+
+**D2a**: Catalog schema v2 — `cull_scores` table (photo_id FK, model_slug,
+aesthetic_score REAL [1,10], scored_at_unix_seconds). `PRAGMA foreign_keys = ON`.
+`apply_v1_to_v2` migration (idempotent DDL). Decision doc 0002 + 0001 amendment.
+`SCHEMA_VERSION = 2`. 3 new catalog unit tests.
+
+**D2b**: `CullRow` (PathBuf source_path, private fields + accessors — Theme-A fix
+from sub-component R1). `InsertScoreOutcome` (Inserted | AlreadyScored).
+`Catalog::unsuperseded_unscored_rows(model_slug)` (SQL NOT IN filter, ORDER BY).
+`Catalog::insert_cull_score(photo_id, model_slug, f64, i64)` (INSERT OR IGNORE +
+changes(), range guard). Sub-component review R1+R2 complete; D2b has 5 catalog
+tests.
+
+**D3**: `crates/photohelper-cli/src/commands/cull.rs` — full `run_cull` pipeline
+(exists-check → derive → decode → NIMA → persist), `CullStats` (9 AtomicU64
+fields), `CullArgs` (`--strict`), heartbeat (TD-016 stop-gap). `main.rs` wired
+with `PHOTOHELPER_MODEL_DIR` env var + `MODEL_MANIFEST_NAME` constant.
+3 CLI integration tests: real CC0 fixture end-to-end, strict decode-fail exit code,
+idempotency (second run walks 0 rows — SQL filter verified).
+
+**Session-end review R1+R2**: R1 surfaced 1 CRITICAL + 4 HIGH + 9 MEDIUM; all
+remediated. R2 was clean (0 findings, all 13 watch-list items closed).
+
+### Test count
+133 (baseline) → **143** (+10: 1 raw integration, 3 catalog unit, 3 CLI integration,
+3 other catalog from sub-component review).
+
+### TDs closed / filed this session
+
+Closed: DN-026 (NIMA ONNX model license — resolved by converting idealo model to
+ONNX under Apache-2.0). TD-016 status updated from "prospective" to "Open
+(materialized)".
+
+Filed: TD-012 in-source comment added to read_raw_rgb. TD-013 in-source comment
+added to insert_cull_score.
+
+### What is not yet in place
+
+- D3 `--dry-run` (TD-015 deferred)
+- Duplicate-detection pipeline (DN-024 → session 05)
+- `develop` / `export` / `watermark` subcommands
+- Windows build verification + release engineering
+
+### How to resume (session 05)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-05/<kebab-slug>
+just session-start
+```
