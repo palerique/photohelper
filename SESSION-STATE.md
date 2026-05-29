@@ -29,7 +29,8 @@ commit, push branch, open PR to main, wait for green CI, merge.
 
 **Status**: `just ci` GREEN on branch `session-03/ai-culling-skeleton`.
 133 tests pass. All deliverables (D0 ABORT, D5a–D5e, D6, D7) committed.
-Session-end Round 1 review complete; Round 1 remediation in progress.
+Session-end double-review COMPLETE (R1: 1 CRITICAL + 3 HIGH → closed; R2: 0 CRITICAL + 0 HIGH).
+Ready to ship.
 
 **Plan-review history (session 03 — COMPLETE)**:
 - R1 → 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW → plan v2 (dc95639)
