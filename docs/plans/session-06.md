@@ -35,7 +35,7 @@ runnable `photohelper develop` subcommand backed by the `photohelper-sidecar` cr
 9. **`develop` subcommand RUNNABLE**: walks catalog photos, reads/writes XMP sidecars,
    writes NIMA score from catalog to `ph:NimaScore`, accepts develop-setting CLI flags
    (`--exposure`, `--temp`, `--tint`, `--contrast`, `--highlights`, `--shadows`),
-   heartbeat progress, `--strict` exit codes, `file_missing` + `derive_failed` counters.
+   heartbeat progress, `--strict` exit codes, `file_missing` + `errored` counters.
    ≥ 9 integration tests. `scripts/photohelper-develop.sh` + `just develop` recipe.
 10. **SESSION-STATE.md + HANDOFF_REPORT.md** updated; all closed TDs marked in TECH-DEBT.md.
 
