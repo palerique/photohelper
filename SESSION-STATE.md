@@ -7,20 +7,25 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 4 (`ai-culling-pipeline` — 2026-05-29) — **SHIPPED** via PR #7
-(`0069dac`). Full AI culling pipeline: NIMA inference, catalog v2, `cull` subcommand,
-143 tests. Post-ship: `photohelper-cull.sh` fixed (PHOTOHELPER_MODEL_DIR wired) +
-`photohelper-list-catalog.sh` enhanced (`--sort score` + score column in list mode).
+**Last session**: 5 (`dedup-mobileclip` — 2026-05-29) — **SHIPPED** via PR #8
+(pending merge). Full dedup pipeline: CLIP ViT-B/32 LAION2B int8 embeddings, catalog v3
+(embeddings + dup_clusters), `dedup` subcommand, heartbeat.rs extraction, 182 tests.
+Session-end R1 (2C+3H+9M; 15 retained) → remediated → R2 CLEAN (0 findings; 8/8 closed).
 
-**Current session**: 5 (`dedup-mobileclip` — 2026-05-29) — branch `session-05/dedup-mobileclip`.
-**PAUSED** for context refresh after D0-D4 complete; D5 ledger updates + session-end review pending.
+**Current session**: 6 (TBD — 2026-05-29 or later).
 
-**Goal**: Session 05 — duplicate-detection pipeline (DN-024 CLIP embeddings + dup_clusters).
+**Goal**: Session 06 — TBD. Candidates: TD backlog (TD-012 bicubic demosaic, TD-014 ort stable,
+TD-020 CLIP bicubic), `develop` pipeline start (XMP sidecar I/O), export pipeline, or release
+engineering wiring.
 
-**Action**: Resume in fresh context: run D5 ledger updates, then fire session-end review
-(`/session-end`) to complete the double-review and ship the PR.
+**Action**: Start session 06 per protocol:
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-06/<slug>
+just session-start
+```
 
-**Status (session 05 — D0-D4 COMPLETE, D5 pending)**: `just ci` GREEN (183 tests).
+**Status (session 05 — COMPLETE; SHIPPED)**: `just ci` GREEN (182 tests).
 - D0 ✓ CLIP ViT-B/32 LAION2B int8 (85.3MB, MIT, ANL-003, TD-020 filed)
 - D1a ✓ ImageEmbedding (6 unit tests); D1b ✓ verify-model-sha256.sh multi-model
 - D1c ✓ MobileClip struct (3 integration tests); D1d sub-component review ✓ (CLEAN)
@@ -41,9 +46,13 @@
 - R1 → 1 CRITICAL + 4 HIGH + 5 MEDIUM + 2 LOW → remediated
 - R2 → 2 HIGH + 7 MEDIUM + 3 LOW → remediated → CLEAN
 
-**Session-end review (COMPLETE)**:
+**Session-end review (session 04 — COMPLETE)**:
 - R1 → 1 CRITICAL + 4 HIGH + 9 MEDIUM + 1 LOW → 13 items remediated; just ci GREEN (143 tests)
 - R2 → 0 findings; all 13 watch-list items CLOSED; CLEAN
+
+**Session-end review (session 05 — COMPLETE)**:
+- R1 → 2 CRITICAL + 3 HIGH + 9 MEDIUM + 1 LOW (15 retained; 1 discarded/hallucinated); 8 HIGH+CRITICAL → remediated; all MEDIUM remediated inline; just ci GREEN (182 tests)
+- R2 → 0 findings; all 8 watch-list items CLOSED; CLEAN
 
 **Plan-review history (session 03 — COMPLETE)**:
 - R1 → 10 CRITICAL + 18 HIGH + 10 MEDIUM + 5 LOW → plan v2 (dc95639)

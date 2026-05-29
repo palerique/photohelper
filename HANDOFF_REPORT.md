@@ -1077,3 +1077,48 @@ just session-start
 ```
 
 Then paste the standard restart prompt.
+
+---
+
+## Checkpoint 15 — session 05 SHIPPED (2026-05-29; full dedup pipeline + session-end review)
+
+**Status**: SHIPPED. PR #8 opened; CI pending merge.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code session 05, session-end window)
+
+### What landed since Checkpoint 14 (D5 + session-end review)
+
+**D5 (ledger)**: DN-024 closed. TD-017/TD-015/TD-018 stale text fixed. TD-019 label corrected.
+SESSION-STATE catalog component updated to sessions 01+04+05.
+
+**Session-end R1** (`docs/code-reviews/session-05-round1.md`): 19 findings; 15 retained
+(discard_rate=0.053). 2C+3H+9M+1L. Key findings:
+- CRITICAL A: `insert_embedding` range-checked dim but not `dim*4==bytes.len()`; `dedup.rs`
+  discarded `_dim`; docstring promised non-existent caller validation.
+- CRITICAL B: `threshold_cluster` had zero unit tests (plan promised 5).
+- HIGH C: `MobileClip` SESS module-scoped thread_local (cross-contamination risk).
+- HIGH D: `cosine_similarity` Err silently swallowed in clustering loop.
+- HIGH E: Phase 2 empty/corrupt set: no log, no counter.
+
+**R1 remediation**: `insert_embedding` `dim*4==bytes.len()` guard; `all_embeddings_for_model`
+JOINs photos (excludes superseded); 6 threshold_cluster unit tests; `INSTANCE_EXISTS` guard
+in `MobileClip`; `if let Ok(sim)` → match+error; `deserialize_failed` counter; `catalog_inconsistency`
+split into `already_embedded` + `catalog_insert_failed`; all 9 MEDIUM items closed.
+
+**Session-end R2** (`docs/code-reviews/session-05-round2.md`): 0 findings; 8/8 CLOSED. CLEAN.
+
+**Final test count**: 182 (176 pre-R1 + 6 new threshold_cluster unit tests).
+`just ci` GREEN: fmt, lint, tests, audit, unsafe-isolation, sanitize-check, model SHA-256.
+
+### What is not yet in place
+
+TD-012 AHD demosaic, TD-014 ort stable, TD-017 O(n²) clustering, TD-018 quantization,
+TD-020 CLIP bicubic, develop/export/watermark subcommands, release engineering.
+
+### How to resume (session 06)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-06/<slug>
+just session-start
+cat SESSION-STATE.md
+```
