@@ -99,8 +99,29 @@ mod exit_code {
     pub const EX_USAGE: u8 = 64;
     /// Fatal IO / catalog / config errors.
     pub const EX_IOERR: u8 = 74;
+    /// Catalog lock held by another process (retry later).
+    pub const EX_TEMPFAIL: u8 = 75;
+    /// Permission denied (read-only filesystem or missing write access).
+    pub const EX_NOPERM: u8 = 77;
     /// `--strict` escalation (POSIX generic failure).
     pub const EX_STRICT_FAIL: u8 = 1;
+}
+
+/// Map a fatal `anyhow::Error` (which wraps a `photohelper_core::Error` on the
+/// ingest path) to the appropriate POSIX exit code.
+fn exit_code_for_error(err: &anyhow::Error) -> u8 {
+    use photohelper_core::Error;
+    if let Some(core_err) = err.downcast_ref::<Error>() {
+        match core_err {
+            Error::CatalogLockHeld { .. } => exit_code::EX_TEMPFAIL,
+            Error::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied => {
+                exit_code::EX_NOPERM
+            }
+            _ => exit_code::EX_IOERR,
+        }
+    } else {
+        exit_code::EX_IOERR
+    }
 }
 
 fn main() -> ExitCode {
@@ -112,7 +133,7 @@ fn main() -> ExitCode {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
                 tracing::error!("{err:#}");
-                ExitCode::from(exit_code::EX_IOERR)
+                ExitCode::from(exit_code_for_error(&err))
             }
         },
         Command::Cull => stub("cull"),

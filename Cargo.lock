@@ -601,6 +601,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "filetime",
+ "fs4",
  "num_cpus",
  "photohelper-cameras",
  "photohelper-catalog",

@@ -483,3 +483,219 @@ fn heartbeat_fires_during_ingest_when_interval_is_short() {
     // env-var override stops being honored, this assertion fails.
     assert.stderr(contains("[heartbeat] walked"));
 }
+
+// =====================================================================
+// D5d tests — DN-008 6 rows (session 03)
+// Row 6: compile-time Send+Sync assertion already in catalog tests via
+//        static_assertions::assert_impl_all!(Arc<Catalog>: Send, Sync).
+// =====================================================================
+
+// =====================================================================
+// Row 17: hardlink dedup — two paths → same PhotoId → one catalog row.
+// =====================================================================
+
+#[test]
+fn ingest_hardlink_produces_one_row_and_already_catalogued() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("original.cr3");
+    // 200 bytes of 0xCC so PhotoId derivation produces a deterministic ID.
+    std::fs::write(&original, vec![0xCCu8; 200]).unwrap();
+    let mtime = filetime::FileTime::from_unix_time(1_577_836_800, 0);
+    filetime::set_file_mtime(&original, mtime).unwrap();
+    let hardlink = dir.path().join("hardlink.cr3");
+    std::fs::hard_link(&original, &hardlink).unwrap();
+    // Hardlink shares inode — same size, same mtime, same content → same PhotoId.
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args(["ingest", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(contains("walked: 2"))
+        .stderr(contains("ingested: 1"))
+        .stderr(contains("already-catalogued: 1"));
+
+    let conn =
+        rusqlite::Connection::open(dir.path().join(".photohelper").join("catalog.db")).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "hardlinked files share a PhotoId; only one row expected"
+    );
+    drop(conn);
+}
+
+// =====================================================================
+// Row 39: --strict on CR3-only dir with real EXIF asserts exit 0.
+// Requires Git LFS fixtures (tests/fixtures/cr3/).
+// =====================================================================
+
+#[test]
+fn ingest_strict_on_real_cr3_dir_exits_zero() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests")
+        .join("fixtures")
+        .join("cr3");
+
+    // Skip this test if LFS fixtures aren't pulled (CI without LFS).
+    if !fixtures.join("RAW_FULL_FRAME.CR3").exists() {
+        return;
+    }
+
+    let cat_dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args([
+            "--catalog",
+            cat_dir.path().join("c.db").to_str().unwrap(),
+            "ingest",
+            "--strict",
+            fixtures.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0)
+        .stderr(contains("no-exif: 0"));
+}
+
+// =====================================================================
+// Row 42: walker edge cases — nested-dirs + broken symlinks.
+// =====================================================================
+
+#[test]
+fn ingest_walks_nested_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub1").join("sub2");
+    std::fs::create_dir_all(&sub).unwrap();
+    let cr3 = sub.join("deep.cr3");
+    std::fs::write(&cr3, vec![0xAAu8; 200]).unwrap();
+    filetime::set_file_mtime(&cr3, filetime::FileTime::from_unix_time(1_577_836_800, 0)).unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args(["ingest", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(contains("ingested: 1"));
+}
+
+#[test]
+#[cfg(unix)]
+fn ingest_skips_broken_symlinks_without_error() {
+    let dir = tempfile::tempdir().unwrap();
+    // A broken symlink: points to a non-existent target.
+    std::os::unix::fs::symlink(dir.path().join("ghost.cr3"), dir.path().join("broken.cr3"))
+        .unwrap();
+    // A valid CR3 so the walk finds at least one file.
+    let cr3 = dir.path().join("real.cr3");
+    std::fs::write(&cr3, vec![0xBBu8; 200]).unwrap();
+    filetime::set_file_mtime(&cr3, filetime::FileTime::from_unix_time(1_577_836_800, 0)).unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args(["ingest", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(contains("ingested: 1"))
+        .stderr(contains("errored: 0"));
+}
+
+// =====================================================================
+// Row 43: mtime_anomalous round-trip — mtime > 2100 sets flag = 1.
+// =====================================================================
+
+#[test]
+fn ingest_future_mtime_sets_mtime_anomalous_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let cr3 = dir.path().join("future.cr3");
+    std::fs::write(&cr3, vec![0xDDu8; 200]).unwrap();
+    // Year 2200 = unix timestamp ≈ 7_258_118_400 (well beyond 2100 ceiling).
+    filetime::set_file_mtime(&cr3, filetime::FileTime::from_unix_time(7_258_118_400, 0)).unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args(["ingest", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(contains("mtime-anomalous: 1"));
+
+    let conn =
+        rusqlite::Connection::open(dir.path().join(".photohelper").join("catalog.db")).unwrap();
+    let flag: i64 = conn
+        .query_row("SELECT mtime_anomalous FROM photos LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        flag, 1,
+        "mtime > 2100 must set mtime_anomalous = 1 in the DB"
+    );
+    drop(conn);
+}
+
+// =====================================================================
+// Row 49: fatal exit codes.
+// =====================================================================
+
+#[test]
+fn ingest_exits_75_when_catalog_lock_is_held() {
+    use std::fs::File;
+
+    let input_dir = tempfile::tempdir().unwrap();
+    let cat_dir = tempfile::tempdir().unwrap();
+    let db_path = cat_dir.path().join("catalog.db");
+
+    // Pre-create the lock file and acquire it exclusively.
+    let lock_path = cat_dir.path().join("catalog.db.lock");
+    let lock_file = File::create(&lock_path).unwrap();
+    // fs4 1.x: `lock()` = exclusive blocking lock; `unlock()` = release.
+    // Fully-qualified to sidestep the `unstable_name_collisions` lint.
+    <std::fs::File as fs4::FileExt>::lock(&lock_file).unwrap();
+
+    // With the lock held, ingest must fail with EX_TEMPFAIL (75).
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args([
+            "--catalog",
+            db_path.to_str().unwrap(),
+            "--catalog-lock-timeout-seconds",
+            "1",
+            "ingest",
+            input_dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .code(75);
+
+    <std::fs::File as fs4::FileExt>::unlock(&lock_file).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn ingest_exits_77_when_catalog_dir_is_not_writable() {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+
+    let input_dir = tempfile::tempdir().unwrap();
+    let cat_dir = tempfile::tempdir().unwrap();
+    // Make the catalog dir read-only so lock-file-create fails.
+    std::fs::set_permissions(cat_dir.path(), Permissions::from_mode(0o555)).unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args([
+            "--catalog",
+            cat_dir.path().join("catalog.db").to_str().unwrap(),
+            "ingest",
+            input_dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .code(77);
+
+    // Restore write permission so tempdir cleanup succeeds.
+    std::fs::set_permissions(cat_dir.path(), Permissions::from_mode(0o755)).unwrap();
+}
