@@ -115,17 +115,20 @@ fn main() -> ExitCode {
                 ExitCode::from(exit_code::EX_IOERR)
             }
         },
-        Command::Cull => stub("cull", "session 03"),
-        Command::Develop => stub("develop", "session 04"),
-        Command::Export => stub("export", "session 05"),
-        Command::Run => stub("run", "session 06"),
-        Command::Models => stub("models", "session 03"),
-        Command::Camera => stub("camera", "session 02"),
+        Command::Cull => stub("cull"),
+        Command::Develop => stub("develop"),
+        Command::Export => stub("export"),
+        Command::Run => stub("run"),
+        Command::Models => stub("models"),
+        Command::Camera => stub("camera"),
     }
 }
 
-fn stub(name: &str, planned_in: &str) -> ExitCode {
-    eprintln!("photohelper {name}: not yet implemented (planned for {planned_in})");
+fn stub(name: &str) -> ExitCode {
+    eprintln!(
+        "photohelper {name}: not yet implemented in v0.1 (ingest + cull only); \
+         see README.md for the current scope."
+    );
     ExitCode::from(exit_code::EX_UNAVAILABLE)
 }
 

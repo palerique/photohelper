@@ -14,6 +14,12 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set dotenv-load := false
 
+# Ensure cargo subcommands (cargo-fmt, cargo-clippy, etc.) are on PATH.
+# When rustup is installed via Homebrew the toolchain bin isn't symlinked into
+# /opt/homebrew/bin, so `just` recipes that invoke `cargo fmt` fail with
+# "no such command: fmt" unless we prepend the active toolchain's bin directory.
+export PATH := `rustup which cargo 2>/dev/null | xargs -I{} dirname {} 2>/dev/null || echo ""` + ":" + env('PATH', '')
+
 # Default recipe — lists the others so bare `just` shows help.
 default:
     @just --list --unsorted

@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use tempfile::TempDir;
 
@@ -327,8 +328,20 @@ fn stub_subcommands_exit_69_with_not_yet_implemented_message() {
             .arg(name)
             .assert()
             .code(69)
-            .stderr(contains("not yet implemented"));
+            .stderr(contains("not yet implemented in v0.1 (ingest + cull only)"));
     }
+}
+
+#[test]
+fn cull_help_does_not_emit_stub_message() {
+    // `cull --help` shows clap help, not the stub message.
+    // After D4 wires cull, this confirms the real handler is active.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args(["cull", "--help"])
+        .assert()
+        .code(0)
+        .stderr(contains("not yet implemented in v0.1").not());
 }
 
 // =====================================================================
