@@ -110,22 +110,74 @@ The receiver is `&mut self` (exclusive mutable reference). This means:
 - Sharing one `Arc<Session>` across rayon workers and calling `run()` from multiple threads simultaneously would require a `Mutex<Session>`, which would serialize all inference calls (no parallelism benefit).
 - **Correct approach**: construct one `Session` per rayon worker thread via `thread_local!`. The worker captures `Arc<VerifiedModelBytes>` cheaply; each thread builds its own `Session` from those bytes on first use. `VerifiedModelBytes` wraps `Arc<[u8]>` and is `Send + Sync`; the per-thread `Session` is `!Sync` and stays thread-local.
 
-**Binding impact on D4 design** (recorded for when D0 ABORT is resolved in a future session):
-- `run_cull` signature must be: `fn run_cull(cli: &Cli, args: &CullArgs, model: &VerifiedModelBytes) -> ExitCode`
-- `thread_local!` block holds `RefCell<Option<Session>>` with lazy initialization from `model`
-- See plan v4 § D4 option-b spec for full details.
+**Binding impact on D4 design** (BINDING — confirmed in session 04 D0' verification):
+- `run_cull` signature: `fn run_cull(cli: &Cli, args: &CullArgs, model: &VerifiedModelBytes) -> ExitCode`
+- `thread_local!` block holds `RefCell<Option<Session>>` with lazy initialization from model bytes
+- See `docs/plans/session-04.md § D1c` for the full thread-local pattern spec.
 
 ---
 
-## § Inference end-to-end
+## § Inference end-to-end (D0' addendum — session 04, 2026-05-29)
 
-**Not conducted** — blocked by the model provenance ABORT (§ NIMA model provenance). No unlicensed model file was downloaded.
+**Status: CONDUCTED** — `scripts/verify-nima-d0-prime.sh` ran inference on both CC0 R8 CR3
+fixtures using the converted ONNX model (`nima_mobilenet_aesthetic.onnx`,
+SHA-256: `f181fa8911dad2c4d5c8fbced3056c30b617d12b00cd411fd40eecd047752228`).
+
+**Model provenance (DN-026 resolution — Path A)**:
+- Source: `idealo/image-quality-assessment` (Apache-2.0, 2241 stars)
+- Architecture: MobileNet (include_top=False, pooling=avg) + Dense(10, softmax)
+- Conversion: `scripts/convert-nima-to-onnx.sh` via `tf2onnx` (Apache-2.0)
+- Output license: Apache-2.0 (derivative of Apache-2.0 source via Apache-2.0 tool)
+- Opset: 13; Input: `(1, 224, 224, 3)` NHWC; Output: `(1, 10)` softmax
+
+**Per-fixture results** (Canon R8, CC0 license, rawpy decode + AHD demosaic + bilinear 224×224):
+
+| Fixture | aesthetic_score | Softmax distribution (bins 1–10) |
+|---|---|---|
+| `CRAW_FULL_FRAME.CR3` | **3.7377** | 0.0001 0.2004 0.2158 0.3244 0.1913 0.0465 0.0154 0.0058 0.0002 0.0000 |
+| `RAW_FULL_FRAME.CR3` | **3.9253** | 0.0002 0.1695 0.1948 0.3139 0.2248 0.0651 0.0224 0.0087 0.0006 0.0000 |
+
+Both scores ∈ [1.0, 10.0] ✓. Both scores sum to 1.000000 ✓.
+
+**Determinism**: exact bit-for-bit reproducibility on Apple Silicon (delta = 0.00e+00 on re-run).
+
+**Preprocessing**: MobileNet `preprocess_input` = `pixel / 127.5 - 1.0` per channel
+(maps `[0,255]` → `[-1,1]`). Note: session-03 plan spec'd ImageNet mean/std normalization
+which was incorrect; session-04 plan amendment A3 corrects this.
 
 ---
 
-## § Per-photo wall-clock
+## § Per-photo wall-clock (D0' addendum — session 04, 2026-05-29)
 
-**Not measured** — blocked by model provenance ABORT.
+**Apple Silicon (arm64, rawpy AHD decode + onnxruntime CPU)**:
+
+| Component | CRAW fixture | RAW fixture |
+|---|---|---|
+| decode (rawpy postprocess) | 562 ms | 578 ms |
+| infer (resize 224×224 + ort run) | 51 ms | 39 ms |
+| **total wall-clock** | **613 ms** | **617 ms** |
+| **average** | **~0.62 s/photo** | |
+
+At ~0.62 s/photo, a 370-photo corpus (the user's full R8 library) takes ~229 s ≈ 3.8 min.
+This comfortably satisfies the session-03 acceptance criterion (wall-clock < 30 min for
+the full corpus with rayon parallelism). With 8 rayon workers on Apple Silicon, wall-clock
+reduces to ~29 s.
+
+**CI band for cross-platform tests** (per DN-025 two-tier strategy):
+- Apple Silicon: golden vector ±1e-3 tolerance
+- Linux x86_64 CI: `score ∈ [1.74, 5.74]` (score − 2.0 to score + 2.0, clamped to [1,10])
+
+---
+
+## § ABORT Decision (updated — DN-026 RESOLVED)
+
+**Original ABORT** (session 03): model provenance/license check failed.
+**Resolution** (session 04 D0'): `scripts/convert-nima-to-onnx.sh` (Path A) exported the
+`idealo/image-quality-assessment` Apache-2.0 MobileNet weights to ONNX via tf2onnx
+(Apache-2.0). Full provenance chain documented. SHA-256 verified against manifest.toml.
+
+**DN-026 CLOSED** — session 04 commit: see git log for commit SHA.
+AI culling pipeline (D1–D4) is unblocked.
 
 ---
 
