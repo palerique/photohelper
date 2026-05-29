@@ -478,13 +478,20 @@ source_path in SELECT. PR1-T5: per-worker Session. PR1-T33: heartbeat
 duplicated in cull.rs.)**
 
 - `crates/photohelper-cli/src/commands/cull.rs` — new file (replaces
-  inline stub in `main.rs`):
-  ```rust
-  pub fn run_cull(cli: &Cli, args: &CullArgs, scorer: &Nima)
-      -> anyhow::Result<u8>   // matches run_ingest(&Cli, &IngestArgs) pattern
-  ```
-  No `Scorer` trait; concrete `&Nima`. No `CullOpts` struct (≤2 fields;
-  pass `&CullArgs` directly per the existing `run_ingest` precedent).
+  inline stub in `main.rs`). **Signature determined by D0 §Threading semantics**
+  (T-γ + T-ε binding):
+  - **If D0 confirms `Session::run` is `&self`** (one shared `Nima`):
+    ```rust
+    pub fn run_cull(cli: &Cli, args: &CullArgs, scorer: Arc<Nima>)
+        -> anyhow::Result<u8>
+    ```
+  - **If D0 confirms `Session::run` is `&mut self`** (per-worker `thread_local!`):
+    ```rust
+    pub fn run_cull(cli: &Cli, args: &CullArgs, model: &VerifiedModelBytes)
+        -> anyhow::Result<u8>   // each worker constructs its own Nima internally
+    ```
+  No `Scorer` trait; concrete `Nima`. No `CullOpts` struct (≤2 fields;
+  `&CullArgs` passed directly per the existing `run_ingest` precedent).
   No `--threshold-warn` flag (deferred to session 05+ per §Out of scope).
 
 - **`CullStats` type (T3 + T-ζ + T-η remediation)**: uses `AtomicU64` for all
