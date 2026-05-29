@@ -257,9 +257,9 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-015 — `--model-path` power-user override dropped from v0.1
 
-- **Status**: Open (prospective — `cull.rs` not yet created; D4 deferred due to D0 ABORT + DN-026)
+- **Status**: Open
 - **Opened**: 2026-05-28 (session 3, D1b plan-review R1 remediation — PR1-T27)
-- **Stop-gap location**: Prospective — `crates/photohelper-cli/src/commands/cull.rs` will be the stop-gap location when D4 lands. The file does not exist yet (session 03 D0 ABORTed before D4 was implemented). This TD becomes actionable when DN-026 is resolved and the AI culling pipeline (D1–D4) is implemented in a future session.
+- **Stop-gap location**: `crates/photohelper-cli/src/commands/cull.rs` (session 04; `--model-path` flag absent, model loaded from `PHOTOHELPER_MODEL_DIR` env only).
 - **Fundamental fix**: add `--model-path <path>` + `--model-sha256 <hex>` CLI flags to `cull`. `VerifiedModelBytes::from_path_with_sha256(path, expected_sha256)` constructor validates user-supplied models. Both flags must be provided together (model without SHA = unverified; reject). Update `ModelRegistry::load_from_path_with_sha256`.
 - **Binding trigger**: first user request to supply a custom NIMA model (e.g. a fine-tuned model or a different aesthetic scorer) OR before v0.2 if power-user workflows are anticipated.
 - **Scope estimate**: ~50 LoC (new constructor + CLI flag pair + validation + tests) / low risk (the verification architecture already handles this via `VerifiedModelBytes`).
@@ -302,9 +302,10 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-017 — O(n²) union-find clustering; O(n × dim) memory for clustering pass
 
-- **Status**: Open (prospective — `dedup.rs` not yet created; D3 deferred)
+- **Status**: Open
 - **Opened**: 2026-05-29 (session 05, D2b planning — stop-gap S1)
-- **Stop-gap location**: Prospective — `crates/photohelper-cli/src/commands/dedup.rs::threshold_cluster` will be the stop-gap location when D3 lands. Will carry in-source `// TD-017: O(n²) clustering stop-gap` at the call site.
+- **Stop-gap location**: `crates/photohelper-cli/src/commands/dedup.rs:347-352` (commit `535210f` — D3).
+  In-source: `// TD-017: O(n²) union-find clustering; O(n × dim) memory.`
 - **Fundamental fix**: replace the O(n²) union-find pairwise-comparison clustering with DBSCAN (density-based spatial clustering) or hierarchical agglomerative clustering. Both support cosine distance, have O(n log n) variants, and avoid materializing the full n×n similarity matrix. A k-NN index (e.g. FAISS or hnswlib via ort or a Rust crate) would reduce the similarity computation from O(n²) to O(n · k · log n).
 - **Binding trigger**: n > 10K photos in a real user corpus OR user request for faster/lower-memory clustering. At n=10K × 512 dims × 4 bytes ≈ 20 MB embedding memory + 100M pairwise comparisons.
 - **Scope estimate**: ~100 LoC (DBSCAN impl or k-NN integration) / medium risk (changes clustering output; must verify cluster stability).
@@ -319,7 +320,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Opened**: 2026-05-29 (session 05, D2b — `insert_embedding` + `MIGRATE_V2_TO_V3_SQL`)
 - **Stop-gap location**:
   - `crates/photohelper-catalog/src/schema.rs` (`quantization TEXT NOT NULL DEFAULT 'f32'` in `MIGRATE_V2_TO_V3_SQL`) @ session 05 D2a commit. In-source: none yet (schema constant).
-  - `crates/photohelper-catalog/src/catalog.rs::insert_embedding` (hardcodes `'f32'` literal in SQL) @ session 05 D2b commit. In-source: `// TD-018: embedding stored as raw f32 LE bytes; quantization='f32' hardcoded.`
+  - `crates/photohelper-catalog/src/catalog.rs:685` (hardcodes `'f32'` literal in INSERT SQL) @ session 05 D2b commit. In-source: `// TD-018: embedding stored as raw f32 LE bytes; quantization='f32' hardcoded.`
 - **Fundamental fix**: extend `insert_embedding` to accept a `quantization: &str` parameter; update `all_embeddings_for_model` to read the `quantization` column and dispatch deserialization accordingly (f32 LE, int8, f16). Add `EmbeddingBlob { photo_id, bytes, dim, quantization }` as the return type of `all_embeddings_for_model` to carry the full context. Requires no migration (the column already exists in v3 with DEFAULT 'f32').
 - **Binding trigger**: first user request for int8/f16 quantization or storage-size complaint.
 - **Scope estimate**: ~30 LoC in catalog (parameter + dispatch) + CLI call-site updates / low risk.
@@ -334,7 +335,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Opened**: 2026-05-29 (session 05, D2a — `dup_clusters` schema)
 - **Stop-gap location**: `crates/photohelper-catalog/src/schema.rs` (`MIGRATE_V2_TO_V3_SQL`) +
   `crates/photohelper-catalog/src/catalog.rs` (future `insert_dup_cluster`) @ session 05 D2a commit.
-  In-source: `// TD-019: per-cull-run audit trail absent` (analogous comment to TD-013 in insert_cull_score).
+  In-source: `// TD-019: no per-dedup-run audit trail; similarity_threshold stored per-row as stop-gap.`
 - **Fundamental fix**: add a `dedup_runs` table analogous to the planned `cull_runs` (TD-013):
   ```sql
   CREATE TABLE IF NOT EXISTS dedup_runs (

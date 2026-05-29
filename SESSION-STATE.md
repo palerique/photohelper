@@ -68,7 +68,7 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 | `photohelper-sidecar` | scaffolded                              | XMP read/write (crs:/ph: namespaces) lands when `develop` is wired (~session 04).                             |
 | `photohelper-export`  | scaffolded                              | resize + watermark + mozjpeg encode land when `export` is wired (~session 05).                                |
 | `photohelper-cameras` | **implemented (session 01)**            | CameraProfile trait + CanonR8 stub + CameraRegistry::for_exif with normalization.                             |
-| `photohelper-catalog` | **implemented (sessions 01+04)**        | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores table + FK enforcement + SCHEMA_VERSION=2), CullRow (PathBuf, private fields + accessors), InsertScoreOutcome, unsuperseded_unscored_rows (NOT IN SQL filter, ORDER BY ingested_at), insert_cull_score (INSERT OR IGNORE + changes(), range guard, TD-013 labeled). Decision docs 0001 amended + 0002 authored. |
+| `photohelper-catalog` | **implemented (sessions 01+04+05)**     | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores + FK + SCHEMA_VERSION=2), CullRow, InsertScoreOutcome, unsuperseded_unscored_rows, insert_cull_score. Decision docs 0001+0002. Session 05 D2a+D2b: schema v3 (embeddings + dup_clusters + apply_v2_to_v3 + SCHEMA_VERSION=3), EmbeddingRow, InsertEmbeddingOutcome, unembedded_rows, insert_embedding (dim*4==bytes guard), all_embeddings_for_model (superseded excluded), insert_dup_cluster. Decision doc 0003. |
 
 ---
 

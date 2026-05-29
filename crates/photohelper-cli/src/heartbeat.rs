@@ -106,11 +106,13 @@ pub(crate) fn spawn_dying_heartbeat(
         .expect("spawning dying heartbeat thread")
 }
 
-/// Tick-first heartbeat loop. Call `on_tick` every `interval`, then wait for
-/// `stop.signal()`. Tick-first (DN-019 lesson): a wait-first loop races
-/// thread-startup against `stop.signal()` and can return without printing;
-/// tick-first guarantees at least one liveness signal per `interval` even
-/// when the run is shorter than OS thread-startup latency.
+/// Counter-increment-first heartbeat loop. Calls `on_tick` every `interval`, then waits for
+/// `stop.signal()`. The "tick-first" property (DN-019 lesson) applies when `ticks == 1`
+/// (i.e., `interval ≤ granularity`, typical in tests): the counter reaches the threshold on
+/// the very first iteration, so `on_tick` fires before the first blocking wait. For production
+/// intervals (`interval=10s, granularity=100ms, ticks=100`) the first tick fires after one
+/// full interval; runs that complete in under one interval produce no heartbeat output, which
+/// is expected behavior.
 ///
 /// `granularity = min(interval, 100ms)` ensures sub-100ms env overrides take
 /// effect in tests while production still gets responsive-to-stop behavior.

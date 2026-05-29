@@ -49,16 +49,24 @@ fn parse_similarity_threshold(s: &str) -> Result<f32, String> {
     Ok(v)
 }
 
-/// Atomic counters for the Phase 1 embed summary (9 concurrent fields).
+/// Atomic counters for the dedup summary (Phase 1 per-photo + Phase 2 cluster).
 struct DedupeStats {
+    /// Total photos walked from unembedded_rows.
     walked: AtomicU64,
+    /// Successfully embedded and persisted.
     embedded: AtomicU64,
     derive_failed: AtomicU64,
     decode_failed: AtomicU64,
     infer_failed: AtomicU64,
     file_missing: AtomicU64,
     content_changed: AtomicU64,
-    catalog_inconsistency: AtomicU64,
+    /// Benign inter-process race: another writer embedded first (not a real error).
+    already_embedded: AtomicU64,
+    /// Real catalog failure (disk full, FK violation, lock timeout).
+    catalog_insert_failed: AtomicU64,
+    /// Phase-2 only: corrupt embeddings dropped during deserialization.
+    deserialize_failed: AtomicU64,
+    /// Phase-2 only: dup_cluster write failure (does not trigger --strict).
     cluster_write_failed: AtomicU64,
 }
 
@@ -72,7 +80,9 @@ impl DedupeStats {
             infer_failed: AtomicU64::new(0),
             file_missing: AtomicU64::new(0),
             content_changed: AtomicU64::new(0),
-            catalog_inconsistency: AtomicU64::new(0),
+            already_embedded: AtomicU64::new(0),
+            catalog_insert_failed: AtomicU64::new(0),
+            deserialize_failed: AtomicU64::new(0),
             cluster_write_failed: AtomicU64::new(0),
         }
     }
@@ -81,7 +91,8 @@ impl DedupeStats {
         format!(
             "walked: {}, embedded: {}, derive-failed: {}, decode-failed: {}, \
              infer-failed: {}, file-missing: {}, content-changed: {}, \
-             catalog-inconsistency: {}, cluster-write-failed: {}, \
+             already-embedded: {}, catalog-insert-failed: {}, \
+             deserialize-failed: {}, cluster-write-failed: {}, \
              clusters-found: {clusters_found}, singletons: {singletons}",
             self.walked.load(Ordering::Relaxed),
             self.embedded.load(Ordering::Relaxed),
@@ -90,7 +101,9 @@ impl DedupeStats {
             self.infer_failed.load(Ordering::Relaxed),
             self.file_missing.load(Ordering::Relaxed),
             self.content_changed.load(Ordering::Relaxed),
-            self.catalog_inconsistency.load(Ordering::Relaxed),
+            self.already_embedded.load(Ordering::Relaxed),
+            self.catalog_insert_failed.load(Ordering::Relaxed),
+            self.deserialize_failed.load(Ordering::Relaxed),
             self.cluster_write_failed.load(Ordering::Relaxed),
         )
     }
@@ -217,17 +230,17 @@ pub fn run_dedup(cli: &Cli, args: &DedupeArgs, model: &VerifiedModelBytes) -> an
                 stats.embedded.fetch_add(1, Ordering::Relaxed);
             }
             Ok(InsertEmbeddingOutcome::AlreadyEmbedded) => {
-                // Already embedded since unembedded_rows was queried (inter-process race).
+                // Benign inter-process race: another writer won between unembedded_rows and
+                // insert_embedding. Not a data error; excluded from --strict exit check.
                 tracing::warn!(
                     path = %source_path.display(),
-                    "insert_embedding returned AlreadyEmbedded for an unembedded row \
-                     — inter-process race?"
+                    "insert_embedding returned AlreadyEmbedded — inter-process race?"
                 );
-                stats.catalog_inconsistency.fetch_add(1, Ordering::Relaxed);
+                stats.already_embedded.fetch_add(1, Ordering::Relaxed);
             }
             Err(e) => {
                 tracing::warn!(path = %source_path.display(), error = %e, "catalog insert failed");
-                stats.catalog_inconsistency.fetch_add(1, Ordering::Relaxed);
+                stats.catalog_insert_failed.fetch_add(1, Ordering::Relaxed);
             }
         }
     });
@@ -246,22 +259,39 @@ pub fn run_dedup(cli: &Cli, args: &DedupeArgs, model: &VerifiedModelBytes) -> an
         .all_embeddings_for_model(CLIP_MODEL_SLUG)
         .with_context(|| "loading embeddings for clustering")?;
 
+    if all_embeddings.is_empty() {
+        tracing::info!(
+            model = CLIP_MODEL_SLUG,
+            "no embeddings found for model; skipping clustering phase"
+        );
+    }
     let (clusters_found, singletons) = if all_embeddings.len() < 2 {
         // 0 or 1 embedding: nothing to cluster.
         (0_usize, all_embeddings.len())
     } else {
         // Deserialize raw bytes to ImageEmbedding for clustering.
+        // `insert_embedding` enforces `dim*4 == bytes.len()` at write time; we re-check
+        // here to surface any catalog corruption rather than silently misbehaving.
         let photo_embeddings: Vec<(PhotoId, ImageEmbedding)> = all_embeddings
             .into_iter()
-            .filter_map(
-                |(pid, bytes, _dim)| match ImageEmbedding::from_f32_le_bytes(&bytes) {
+            .filter_map(|(pid, bytes, dim)| {
+                if bytes.len() != dim * 4 {
+                    tracing::error!(
+                        photo_id = %pid, stored_dim = dim, byte_len = bytes.len(),
+                        "embedding dim/byte-length mismatch (catalog corruption?); skipping"
+                    );
+                    stats.deserialize_failed.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+                match ImageEmbedding::from_f32_le_bytes(&bytes) {
                     Ok(emb) => Some((pid, emb)),
                     Err(e) => {
                         tracing::warn!(error = %e, "skipping corrupt embedding during clustering");
+                        stats.deserialize_failed.fetch_add(1, Ordering::Relaxed);
                         None
                     }
-                },
-            )
+                }
+            })
             .collect();
 
         if photo_embeddings.is_empty() {
@@ -291,19 +321,21 @@ pub fn run_dedup(cli: &Cli, args: &DedupeArgs, model: &VerifiedModelBytes) -> an
     eprintln!("{}", stats.summary_line(clusters_found, singletons));
 
     // Exit code logic.
-    let all_per_photo_errors = stats.derive_failed.load(Ordering::Relaxed)
+    // `already_embedded` is a benign race (excluded from strict); `catalog_insert_failed` and
+    // `cluster_write_failed` are real errors that prevent data from being persisted.
+    let all_errors = stats.derive_failed.load(Ordering::Relaxed)
         + stats.decode_failed.load(Ordering::Relaxed)
         + stats.infer_failed.load(Ordering::Relaxed)
         + stats.file_missing.load(Ordering::Relaxed)
         + stats.content_changed.load(Ordering::Relaxed)
-        + stats.catalog_inconsistency.load(Ordering::Relaxed);
+        + stats.catalog_insert_failed.load(Ordering::Relaxed)
+        + stats.cluster_write_failed.load(Ordering::Relaxed);
 
-    // Note: cluster_write_failed is a Phase-2 error; it does NOT trigger EX_STRICT_FAIL.
-    if args.strict && all_per_photo_errors > 0 {
+    if args.strict && all_errors > 0 {
         return Ok(exit_code::EX_STRICT_FAIL);
     }
     let walked = stats.walked.load(Ordering::Relaxed);
-    if walked > 0 && stats.embedded.load(Ordering::Relaxed) == 0 && all_per_photo_errors == 0 {
+    if walked > 0 && stats.embedded.load(Ordering::Relaxed) == 0 && all_errors == 0 {
         return Ok(exit_code::EX_USAGE);
     }
     Ok(0)
@@ -365,10 +397,18 @@ fn threshold_cluster(embeddings: &[(PhotoId, ImageEmbedding)], threshold: f32) -
 
     for i in 0..n {
         for j in (i + 1)..n {
-            // cosine_similarity returns Err only for dim-mismatch (same model → same dim).
-            if let Ok(sim) = embeddings[i].1.cosine_similarity(&embeddings[j].1) {
-                if sim >= threshold {
+            match embeddings[i].1.cosine_similarity(&embeddings[j].1) {
+                Ok(sim) if sim >= threshold => {
                     uf_union(&mut parent, &mut rank, i, j);
+                }
+                Ok(_) => {} // below threshold
+                Err(e) => {
+                    // Dim mismatch within a single model slug indicates catalog corruption
+                    // (all embeddings from the same model must have equal dimension).
+                    tracing::error!(
+                        i_pid = %embeddings[i].0, j_pid = %embeddings[j].0, error = %e,
+                        "cosine_similarity failed — embedding dim mismatch (DB corruption?)"
+                    );
                 }
             }
         }
@@ -406,4 +446,103 @@ fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+mod threshold_cluster_tests {
+    use photohelper_ai::ImageEmbedding;
+    use photohelper_core::model::PhotoId;
+
+    use super::threshold_cluster;
+
+    fn make_id(seed: u8) -> PhotoId {
+        // Derive from a deterministic tiny fixture path by writing a tmp file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join(format!("{seed}.bin"));
+        std::fs::write(&p, vec![seed; 64 * 1024]).expect("write fixture");
+        PhotoId::derive(&p).expect("derive")
+    }
+
+    fn unit_vec(dim: usize, hot: usize) -> ImageEmbedding {
+        let mut v = vec![0.0_f32; dim];
+        v[hot] = 1.0;
+        ImageEmbedding::from_raw(&v).expect("unit vector")
+    }
+
+    fn identical_vecs(dim: usize) -> ImageEmbedding {
+        // All-equal normalized vector: each element = 1/sqrt(dim).
+        let val = 1.0_f32 / (dim as f32).sqrt();
+        let v = vec![val; dim];
+        ImageEmbedding::from_raw(&v).expect("uniform vector")
+    }
+
+    #[test]
+    fn empty_input_returns_zero_clusters() {
+        let result = threshold_cluster(&[], 0.95);
+        assert_eq!(result.cluster_count, 0);
+        assert_eq!(result.singleton_count, 0);
+        assert!(result.assignments.is_empty());
+    }
+
+    #[test]
+    fn single_element_is_one_singleton() {
+        let id = make_id(1);
+        let emb = unit_vec(4, 0);
+        let result = threshold_cluster(&[(id, emb)], 0.95);
+        assert_eq!(result.cluster_count, 1);
+        assert_eq!(result.singleton_count, 1);
+    }
+
+    #[test]
+    fn two_orthogonal_vectors_are_two_singletons() {
+        // e1 = [1,0,0,0], e2 = [0,1,0,0]: cosine_similarity = 0.0 < any threshold.
+        let id1 = make_id(10);
+        let id2 = make_id(11);
+        let e1 = unit_vec(4, 0);
+        let e2 = unit_vec(4, 1);
+        let result = threshold_cluster(&[(id1, e1), (id2, e2)], 0.95);
+        assert_eq!(result.cluster_count, 2);
+        assert_eq!(result.singleton_count, 2);
+    }
+
+    #[test]
+    fn two_identical_vectors_at_threshold_1_0_form_one_cluster() {
+        let id1 = make_id(20);
+        let id2 = make_id(21);
+        let e1 = identical_vecs(4);
+        let e2 = identical_vecs(4);
+        // cosine_similarity of identical unit vectors = 1.0; threshold=1.0 means exactly 1.0 qualifies.
+        let result = threshold_cluster(&[(id1, e1), (id2, e2)], 1.0);
+        assert_eq!(result.cluster_count, 1, "identical vectors should cluster");
+        assert_eq!(result.singleton_count, 0);
+    }
+
+    #[test]
+    fn two_orthogonal_vectors_at_threshold_1_0_are_singletons() {
+        // cosine_similarity = 0.0 < 1.0 → should NOT cluster.
+        let id1 = make_id(30);
+        let id2 = make_id(31);
+        let e1 = unit_vec(4, 0);
+        let e2 = unit_vec(4, 1);
+        let result = threshold_cluster(&[(id1, e1), (id2, e2)], 1.0);
+        assert_eq!(result.cluster_count, 2);
+        assert_eq!(result.singleton_count, 2);
+    }
+
+    #[test]
+    fn three_elements_partial_cluster() {
+        // e1 and e2 identical → same cluster; e3 orthogonal → singleton.
+        let id1 = make_id(40);
+        let id2 = make_id(41);
+        let id3 = make_id(42);
+        let e1 = identical_vecs(4);
+        let e2 = identical_vecs(4);
+        let e3 = unit_vec(4, 3);
+        let result = threshold_cluster(&[(id1, e1), (id2, e2), (id3, e3)], 0.95);
+        assert_eq!(
+            result.cluster_count, 2,
+            "one pair-cluster + one singleton = 2 clusters"
+        );
+        assert_eq!(result.singleton_count, 1);
+    }
 }

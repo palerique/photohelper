@@ -660,15 +660,28 @@ impl Catalog {
         dim: usize,
         embedded_at_unix_seconds: i64,
     ) -> Result<InsertEmbeddingOutcome, Error> {
-        // Rust-level guard mirrors insert_cull_score's score-range check: INSERT OR IGNORE
-        // silently swallows ALL SQLite constraint violations (UNIQUE, CHECK, NOT NULL), so
-        // a dim outside [1, 65536] would return AlreadyEmbedded instead of an error.
+        // Rust-level guards: INSERT OR IGNORE silently swallows ALL SQLite constraint
+        // violations (UNIQUE, CHECK, NOT NULL), so dim-range and byte-length mismatches
+        // would silently return AlreadyEmbedded instead of an error.
         if dim == 0 || dim > 65536 {
             return Err(Error::CatalogInsert {
                 photo_id,
                 source: Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("dim {dim} is outside valid range [1, 65536]"),
+                )),
+            });
+        }
+        if embedding_bytes.len() != dim * 4 {
+            return Err(Error::CatalogInsert {
+                photo_id,
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "embedding byte length {} != dim {dim} * 4 ({})",
+                        embedding_bytes.len(),
+                        dim * 4
+                    ),
                 )),
             });
         }
@@ -701,12 +714,12 @@ impl Catalog {
         Ok(outcome)
     }
 
-    /// Load all embeddings for `model_slug` as raw f32 LE byte slices.
+    /// Load all non-superseded embeddings for `model_slug` as raw f32 LE byte slices.
     ///
-    /// Returns `(PhotoId, embedding_bytes, dim)` triples; the caller (CLI clustering
-    /// pass) constructs `ImageEmbedding` via `ImageEmbedding::from_f32_le_bytes` and
-    /// validates `dim == bytes.len() / 4` to catch corruption early.
-    /// Loaded in a single query for the O(n²) clustering pass.
+    /// Returns `(PhotoId, embedding_bytes, dim)` triples for the O(n²) clustering pass.
+    /// Superseded photos are excluded (consistent with `unembedded_rows` and
+    /// `unsuperseded_unscored_rows`). `insert_embedding` enforces `dim*4 == bytes.len()`
+    /// at write time, so the returned triples are byte-length consistent.
     ///
     /// # Errors
     /// - `Error::CatalogPoisoned`, `Error::CatalogOpen` for query failures.
@@ -718,7 +731,13 @@ impl Catalog {
             path: self.canonical_path.clone(),
         })?;
         let mut stmt = guard
-            .prepare("SELECT photo_id, embedding, dim FROM embeddings WHERE model_slug = ?1")
+            .prepare(
+                "SELECT e.photo_id, e.embedding, e.dim \
+                 FROM embeddings e \
+                 JOIN photos p ON p.id = e.photo_id \
+                 WHERE e.model_slug = ?1 \
+                   AND p.superseded_at_unix_seconds IS NULL",
+            )
             .map_err(|e| Error::CatalogOpen {
                 path: self.canonical_path.clone(),
                 source: Box::new(e),

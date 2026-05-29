@@ -42,12 +42,13 @@ impl ImageEmbedding {
         self.0.len()
     }
 
-    /// Raw float slice for future use by `threshold_cluster` in `dedup.rs` (D3, not yet
-    /// implemented). Currently called only by tests.
+    /// Raw float slice; called only by tests.
+    ///
+    /// `threshold_cluster` in `dedup.rs` uses `cosine_similarity()` rather than raw slice access.
     #[must_use]
     #[allow(
         dead_code,
-        reason = "called only by tests; will be used by dedup.rs (threshold_cluster, D3) — not yet implemented"
+        reason = "called only by tests; threshold_cluster uses cosine_similarity() instead of raw slice access"
     )]
     pub(crate) fn as_slice(&self) -> &[f32] {
         &self.0
@@ -57,9 +58,6 @@ impl ImageEmbedding {
     ///
     /// Since both embeddings are L2-normalized, cosine similarity equals the dot product.
     /// The result is clamped to [-1.0, 1.0] to guard against floating-point overshoot.
-    ///
-    /// In `threshold_cluster`, add `debug_assert!(all embeddings have equal dim)` before
-    /// the O(n²) pair loop — dimension mismatch within a single model is a programming error.
     ///
     /// # Errors
     ///
