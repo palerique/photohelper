@@ -299,9 +299,23 @@ impl Catalog {
             Ok(g) => g,
             Err(poisoned) => {
                 let conn = poisoned.into_inner();
-                // ROLLBACK any open transaction left by the panicked worker;
-                // ignore errors — there may not be an open txn.
-                let _ = conn.execute("ROLLBACK", []);
+                // ROLLBACK any open transaction left by the panicked worker.
+                // ApiMisuse (SQLITE_MISUSE) and "no transaction is active" both
+                // indicate no work to undo — ignore. Any other error is unexpected
+                // and propagated so the caller can log it.
+                match conn.execute("ROLLBACK", []) {
+                    Ok(_) => {}
+                    // extended_code 1 = SQLITE_ERROR; SQLite returns this with the
+                    // message "cannot rollback - no transaction is active" when
+                    // the panicked worker held the lock but had no open txn.
+                    Err(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == 1 => {}
+                    Err(e) => {
+                        return Err(Error::CatalogTransaction {
+                            op: "rollback-after-worker-panic",
+                            source: Box::new(e),
+                        });
+                    }
+                }
                 return Err(Error::CatalogPoisoned {
                     path: self.canonical_path.clone(),
                 });
@@ -472,11 +486,54 @@ impl Catalog {
     }
 }
 
+/// Test-only extension methods (D5a — `poison_for_testing` knob).
+#[cfg(test)]
+impl Catalog {
+    /// Poison the catalog's internal mutex for testing the poison-recovery path.
+    ///
+    /// Spawns a thread that acquires the lock and panics, permanently poisoning
+    /// the mutex. After this call every `upsert` returns `Error::CatalogPoisoned`.
+    ///
+    /// Caller must hold an `Arc<Catalog>` so the inner Arc clone is safe.
+    pub(crate) fn poison_for_testing(self: &std::sync::Arc<Self>) {
+        let c = std::sync::Arc::clone(self);
+        let h = std::thread::spawn(move || {
+            let _guard = c.conn.lock().expect("mutex must not be pre-poisoned");
+            panic!("intentional mutex poison for testing");
+        });
+        let _ = h.join(); // Err(_) expected — the thread panicked
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use photohelper_core::catalog_glue::photo_id_from_row_bytes;
+    use photohelper_core::model::{AbsPath, ExifMetadata, Photo};
+
     use super::*;
 
-    static_assertions::assert_impl_all!(std::sync::Arc<Catalog>: Send, Sync);
+    static_assertions::assert_impl_all!(Arc<Catalog>: Send, Sync);
+
+    /// Create a minimal, unique test photo whose source_path is `dir/file.cr3`.
+    /// `PhotoId` is synthesised from `id_seed` so callers can distinguish rows.
+    fn make_test_photo(dir: &std::path::Path, id_seed: u8) -> Photo {
+        let file_path = dir.join(format!("test_{id_seed}.cr3"));
+        std::fs::write(&file_path, vec![id_seed; 1024]).expect("write test fixture");
+        let abs = AbsPath::canonicalize(&file_path).expect("canonicalize");
+        let pid = photo_id_from_row_bytes([id_seed; 32]);
+        Photo::from_filesystem(
+            abs,
+            1024,
+            1_577_836_800,
+            false,
+            pid,
+            None,
+            ExifMetadata::default(),
+        )
+        .expect("valid test photo")
+    }
 
     #[test]
     fn open_rejects_path_is_directory() {
@@ -530,5 +587,70 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, 1);
+    }
+
+    // =========================================================
+    // D5a: poison_for_testing + 3 poison-recovery tests
+    // =========================================================
+
+    #[test]
+    fn poison_propagates_as_catalog_poisoned_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Arc::new(Catalog::open(dir.path().join("c.db"), 1).unwrap());
+        cat.poison_for_testing();
+        let photo = make_test_photo(dir.path(), 1);
+        let err = cat.upsert(&photo, 0).unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogPoisoned { .. }),
+            "expected CatalogPoisoned after mutex poison, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn poison_rollback_discards_panicked_workers_partial_insert() {
+        // D5b fix: ROLLBACK after poison with no open txn must NOT propagate an error
+        // (ApiMisuse arm), so upsert returns CatalogPoisoned, not CatalogTransaction.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("c.db");
+        let cat = Arc::new(Catalog::open(&db_path, 1).unwrap());
+        // Pre-insert a row so we can assert row count is unchanged after poison.
+        cat.upsert(&make_test_photo(dir.path(), 1), 0).unwrap();
+        cat.poison_for_testing();
+        // This upsert triggers the D5b ROLLBACK + CatalogPoisoned path.
+        let err = cat.upsert(&make_test_photo(dir.path(), 2), 0).unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogPoisoned { .. }),
+            "expected CatalogPoisoned (not CatalogTransaction), got {err:?}"
+        );
+        // The ROLLBACK must not have left the DB in a state that blocks re-open.
+        drop(cat);
+        let cat2 = Catalog::open(&db_path, 1).unwrap();
+        assert_eq!(
+            cat2.row_count().unwrap(),
+            1,
+            "only the pre-poison row must survive"
+        );
+    }
+
+    #[test]
+    fn poison_recovery_admits_subsequent_inserts() {
+        // After a poisoned catalog is dropped, a fresh catalog at the same path
+        // accepts new inserts — the ROLLBACK left the DB consistent.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("c.db");
+        {
+            let cat = Arc::new(Catalog::open(&db_path, 1).unwrap());
+            cat.poison_for_testing();
+            // Trigger the D5b ROLLBACK path.
+            let _ = cat.upsert(&make_test_photo(dir.path(), 1), 0);
+            // cat dropped here — file lock released.
+        }
+        let cat2 = Catalog::open(&db_path, 1).unwrap();
+        cat2.upsert(&make_test_photo(dir.path(), 2), 0).unwrap();
+        assert_eq!(
+            cat2.row_count().unwrap(),
+            1,
+            "fresh catalog must accept inserts after poisoned one is dropped"
+        );
     }
 }
