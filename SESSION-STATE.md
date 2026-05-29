@@ -13,19 +13,19 @@
 `photohelper-list-catalog.sh` enhanced (`--sort score` + score column in list mode).
 
 **Current session**: 5 (`dedup-mobileclip` — 2026-05-29) — branch `session-05/dedup-mobileclip`.
+**PAUSED** for context refresh after plan v1 committed; plan-review pending (agents
+hit network errors on first launch attempt).
 
 **Goal**: Session 05 — duplicate-detection pipeline (DN-024 MobileCLIP embeddings +
-dup_clusters). Plan at `docs/plans/session-05.md`. Plan-review pending.
+dup_clusters). Plan at `docs/plans/session-05.md`.
 
-**Action**: Run `/plan-review` on `docs/plans/session-05.md`.
+**Action**: Resume plan-review — run `/plan-review` on `docs/plans/session-05.md`.
+Plan v1 is committed; fire Round 1 agent suite, remediate, fire Round 2. Do NOT
+begin implementation until Round 2 is clean.
 
-**Status**: SHIPPED. `just ci` GREEN (143 tests). Session-end R1+R2 CLEAN.
-Completed this session: D0' (ANL-002+DN-026 closed), D1a (ort dep), D1b+D1c
-(RgbImage in core + VerifiedModelBytes+NimaScore+Nima in ai), D1d (ONNX via LFS
-+ verify-model-sha256 CI gate), D1e (read_raw_rgb FFI), D2a (schema v2 migration
-+ FK enforcement), D2b (CullRow, unsuperseded_unscored_rows, insert_cull_score,
-sub-component R1+R2), D3 (commands/cull.rs full pipeline + 3 CLI integration tests).
-DN-024 (dedup) escalated → session 05.
+**Status (session 05 so far)**: Plan v1 committed (`docs/plans/session-05.md`).
+`just ci` GREEN (143 tests — no code changes from main). Plan-review Round 1 NOT
+yet fired (network errors on 2026-05-29; retry in fresh context).
 
 **Plan-review history (session 04 — COMPLETE)**:
 - R1 → 6 CRITICAL + 13 HIGH + 10 MEDIUM + 3 LOW → plan v2

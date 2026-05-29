@@ -918,3 +918,68 @@ cat SESSION-STATE.md
 Candidate scope for session 05: duplicate-detection pipeline (DN-024 MobileCLIP)
 or `develop` pipeline start (XMP sidecar I/O). Review open TDs and DNs at
 session start to decide.
+
+---
+
+## Checkpoint 13 — session 05 PAUSED for context refresh (2026-05-29; plan v1 committed, plan-review pending)
+
+**Status**: PAUSED. Branch: `session-05/dedup-mobileclip`. `just ci` GREEN (143 tests). No code changes from main.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code, session 05 opening window)
+
+### What landed this window
+
+Session 05 started per the eng-protocol:
+- Branch `session-05/dedup-mobileclip` created off `main` (up-to-date).
+- `just session-start` → STATUS: ready.
+- Session-04 Round-2 review confirmed CLEAN (0 findings; all 13 watch-list items closed).
+- Scope chosen by user: **DN-024 duplicate-detection pipeline** (MobileCLIP embeddings + dup_clusters).
+
+**Plan v1 committed** (`docs/plans/session-05.md`):
+
+Plan covers 5 deliverables (D0 pre-flight ABORT gate → D1 MobileCLIP in photohelper-ai →
+D2 catalog v2→v3 migration → D3 dedup subcommand → D4 TD-016 closure → D5 docs).
+
+Key design decisions locked in plan v1:
+1. **D0 ABORT gate first** — MobileCLIP weight license must be explicit (MIT/Apache-2.0/CC-BY-4.0). Search order: `apple/ml-mobileclip` → community ONNX export → `openai/clip-vit-base-patch32` fallback.
+2. **thread_local! per-worker ort Session** (same as Nima) — expected since Session::run is &mut self.
+3. **Schema v3**: `embeddings` (photo_id, model_slug, dim, quantization, embedding BLOB, PRIMARY KEY (photo_id, model_slug)) + `dup_clusters` (cluster_id, photo_id, model_slug, similarity_threshold, FK to embeddings) + `apply_v2_to_v3` idempotent migration.
+4. **Cosine-similarity threshold clustering** via union-find (O(n²) pairwise comparisons; stop-gap S1/TD-017). Warn at n > 5K.
+5. **TD-016 fires** — dedup is the 3rd heartbeat consumer (ingest + cull + dedup) → `heartbeat.rs` extraction is mandatory in D4.
+6. **TD-010 also fires** — D4 touches `ingest.rs` → remaining 2 sub-items (build_global WARN + heartbeat-death-WARN) close in D4.
+7. **3 new stop-gaps declared**: S1 (O(n²) clustering / TD-017), S2 (f32 BLOB / TD-018), S3 (no dedup_runs audit trail / TD-019).
+8. **Target**: ≥ 163 tests (143 + 20 minimum).
+
+### Why paused
+
+Plan-review Round 1 was attempted (8-agent suite launched in parallel) but all 4
+initial agents hit network errors ("API Error: Unable to connect") simultaneously.
+Network connectivity issue on the host. No findings were produced. Pausing to
+save state and retry plan-review in a fresh context window.
+
+### Precise next steps when context restored
+
+1. **Read `SESSION-STATE.md`** (canonical re-orientation).
+2. **Read this Checkpoint 13** (you're here).
+3. **Read `docs/plans/session-05.md`** — the full plan v1 (519 lines). Understand
+   the D0→D1→D2→D3→D4→D5 sequencing and all design decisions.
+4. **Fire `/plan-review` on `docs/plans/session-05.md`**:
+   - Run the 8-agent suite in parallel (Round 1).
+   - Consolidate by theme, triage by severity.
+   - Run 9th-agent verification.
+   - Write `docs/code-reviews/session-05-plan-round1.md`.
+   - Remediate all CRITICAL + HIGH items in the plan.
+   - Commit plan v2.
+   - Fire Round 2.
+   - Remediate Round 2 findings → plan v3 if CRITICAL.
+   - Begin implementation ONLY after Round 2 is clean.
+5. **Do NOT begin implementation** until plan-review Round 2 (at minimum) is clean.
+
+### Resume from a fresh context
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-05/dedup-mobileclip
+just session-start
+```
+
+Then paste the standard restart prompt.
