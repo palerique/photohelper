@@ -983,3 +983,97 @@ just session-start
 ```
 
 Then paste the standard restart prompt.
+
+---
+
+## Checkpoint 14 — session 05 PAUSED for context refresh (2026-05-29; D0–D4 complete, D5 pending)
+
+**Status**: PAUSED. Branch: `session-05/dedup-mobileclip`. `just ci` GREEN (183 tests). D0-D4 fully implemented.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code, session 05 implementation window)
+
+### What landed this window (D0–D4 commits)
+
+This was a substantial implementation window. All D0-D4 deliverables from the plan shipped:
+
+**D0 Pre-flight** (commit `...`):
+- MobileCLIP (apple/ml-mobileclip) failed license gate — `apple-amlr` is proprietary. ABORT condition for MobileCLIP.
+- Fallback: `laion/CLIP-ViT-B-32-laion2B-s34B-b79K` (MIT) selected.
+- ONNX export via `scripts/convert-clip-to-onnx.sh` (OpenCLIP MIT → int8 quantized).
+- **Model**: `clip_vit_b32_laion2b_int8.onnx` (85.3 MB, single file, commit_from_memory compatible).
+- SHA-256: `09361948663aa58d62cdaee26c291e913d6d87c35b199c15115aeb4f6c1bd508`
+- Inference: dim=512, norm=1.0, cosine_sim(CRAW,RAW)=0.843 (bilinear resize, TD-020 stop-gap), wall-clock=0.96s/photo.
+- TD-020 filed (bicubic center-crop deferred). DN-027 (cross-platform tolerance) filed.
+- ANL-003 committed.
+
+**D1a**: `ImageEmbedding(Arc<[f32]>)` — from_raw (is_finite() guard for NaN), cosine_similarity, as_f32_le_bytes, from_f32_le_bytes (EmbeddingCorruptBytes for misaligned bytes). 6 unit tests + `static_assertions::assert_impl_all!(Send, Sync)`.
+
+**D1b**: verify-model-sha256.sh extended to loop over ALL manifest sections (covers NIMA + CLIP). CLIP model in Git LFS.
+
+**D1c**: `MobileClip { bytes: Arc<[u8]> }` — embed(&self, rgb, path) → ImageEmbedding. NCHW preprocessing, CLIP-standard normalization, thread_local! per-worker ort Session. EmbeddingZeroVector guard. tracing::error! on model load failure. 3 integration tests (in photohelper-raw/tests/).
+
+**D1d sub-component review** (R1: 1C+2H+5M+7L; R2: 0C+0H — CLEAN). Key fix: `extract_field` had a `?` early-exit bug (swallowed prefix matches) — discovered by new unit tests.
+
+**D2a**: Schema v3 — `embeddings` + `dup_clusters` tables, `apply_v2_to_v3`, migration chain (0→3, 1→3, 2→3). Decision doc `docs/decisions/0003-catalog-schema-v3.md`. TD-019 filed. 4 catalog tests (idempotency, chain v1→v3, FK enforcement, schema_version_too_new gate).
+
+**D2b**: Catalog API — `EmbeddingRow`, `InsertEmbeddingOutcome`, `unembedded_rows`, `insert_embedding` (with Rust-level dim guard — INSERT OR IGNORE swallows CHECK violations!), `all_embeddings_for_model` (returns dim alongside bytes), `insert_dup_cluster`. 7 catalog tests.
+
+**D2c sub-component review** (R1: 1C+2H+3M+3L; R2: 0C+0H — CLEAN). Key discoveries: INSERT OR IGNORE swallows CHECK violations (dim guard added); FK violations DO propagate despite OR IGNORE (per SQLite docs); TD-017+TD-018 were missing from TECH-DEBT.md (filed).
+
+**D3**: `crates/photohelper-cli/src/commands/dedup.rs`:
+- `DedupeArgs` with `parse_similarity_threshold` value_parser
+- `DedupeStats` (9 AtomicU64)
+- `run_dedup`: Phase 1 (embed via rayon into_par_iter) + Phase 2 (cluster)
+- `threshold_cluster`: union-find with path compression + union-by-rank, O(n²)
+- TD-017 + TD-019 in-source labels at this commit
+- `scripts/photohelper-dedup.sh` + `just dedup`
+- 3 integration tests: end-to-end, idempotency (walked:0), strict-mode (file-missing:1)
+
+**D4**: `crates/photohelper-cli/src/heartbeat.rs` extracted:
+- `HeartbeatStop`, `heartbeat_interval()`, `run_heartbeat_loop(on_tick: Fn())`
+- `spawn_dying_heartbeat` test seam (`#[cfg(test)]`)
+- `ingest.rs` + `cull.rs` + `dedup.rs` all import from `heartbeat.rs`
+- TD-016 → **CLOSED**
+- TD-010 → **CLOSED**: `build_global_already_initialized_warns_but_succeeds` + `spawn_dying_heartbeat_panics_and_join_returns_err` in `ingest.rs::td010_tests`
+
+**Test count**: 143 (baseline) → **183** (+40):
+- +6 ImageEmbedding unit tests (D1a)
+- +3 CLIP integration tests in photohelper-raw (D1c)
+- +7 catalog unit tests (D2a+D2b)
+- +3 dedup integration tests (D3)
+- +2 TD-010 in-process tests (D4)
+- +various catalog remediation tests from D2c review
+
+### TDs filed/closed this window
+
+**Filed:**
+- TD-017: O(n²) union-find clustering (D2c review + D3)
+- TD-018: f32 BLOB quantization (D2b)
+- TD-019: no dedup_runs audit trail (D2a)
+- TD-020: bilinear resize stop-gap for CLIP (D0)
+
+**Closed:**
+- TD-016: heartbeat duplication → heartbeat.rs extracted (D4)
+- TD-010: 2 remaining in-process tests (D4)
+
+### DNs opened this window
+
+- DN-027: MobileCLIP cross-platform embedding tolerance for cosine-similarity clustering
+- DN-028: MobileCLIP `apple-amlr` license blocks direct use
+
+### Precise next steps when context restored
+
+1. **Read `SESSION-STATE.md`** (canonical re-orientation).
+2. **Read this Checkpoint 14** (you're here).
+3. **Run `/session-end`** — this fires the full 8-agent double-review (R1 → remediate → R2) against all session code, updates SESSION-STATE.md + HANDOFF_REPORT.md, runs `just ci`, opens the PR, waits for green CI, and merges.
+4. If session-end R1 surfaces CRITICAL findings that require substantial code changes, remediate inline before R2.
+5. After merge: start session 06 per standard protocol (`git switch main && git pull --ff-only && git switch -c session-06/<slug> && just session-start`).
+
+### Resume from a fresh context
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-05/dedup-mobileclip
+just session-start
+```
+
+Then paste the standard restart prompt.

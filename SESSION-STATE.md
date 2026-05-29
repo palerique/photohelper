@@ -13,20 +13,21 @@
 `photohelper-list-catalog.sh` enhanced (`--sort score` + score column in list mode).
 
 **Current session**: 5 (`dedup-mobileclip` — 2026-05-29) — branch `session-05/dedup-mobileclip`.
-**PAUSED** for context refresh after plan v1 committed; plan-review pending (agents
-hit network errors on first launch attempt).
+**PAUSED** for context refresh after D0-D4 complete; D5 ledger updates + session-end review pending.
 
-**Goal**: Session 05 — duplicate-detection pipeline (DN-024 MobileCLIP embeddings +
-dup_clusters). Plan at `docs/plans/session-05.md`.
+**Goal**: Session 05 — duplicate-detection pipeline (DN-024 CLIP embeddings + dup_clusters).
 
-**Action**: D5 ledger updates → session-end review R1+R2 → PR.
+**Action**: Resume in fresh context: run D5 ledger updates, then fire session-end review
+(`/session-end`) to complete the double-review and ship the PR.
 
-**Status (session 05 so far)**: D0-D4 COMPLETE. `just ci` GREEN (183 tests).
-- D0 ✓ (ANL-003, CLIP ViT-B/32 LAION2B int8, TD-020 filed)
-- D1a-D1c ✓ (ImageEmbedding, MobileClip, 3+6 tests); D1d review ✓ (CLEAN)
-- D2a ✓ (schema v3, TD-019 filed); D2b ✓ (catalog API); D2c review ✓ (CLEAN; TD-017+TD-018 filed)
-- D3 ✓ (dedup subcommand, 3 integration tests, photohelper-dedup.sh)
-- D4 ✓ (heartbeat.rs extracted; TD-016+TD-010 CLOSED)
+**Status (session 05 — D0-D4 COMPLETE, D5 pending)**: `just ci` GREEN (183 tests).
+- D0 ✓ CLIP ViT-B/32 LAION2B int8 (85.3MB, MIT, ANL-003, TD-020 filed)
+- D1a ✓ ImageEmbedding (6 unit tests); D1b ✓ verify-model-sha256.sh multi-model
+- D1c ✓ MobileClip struct (3 integration tests); D1d sub-component review ✓ (CLEAN)
+- D2a ✓ schema v3 embeddings+dup_clusters (TD-019 filed); D2b ✓ catalog API (7 catalog tests)
+- D2c sub-component review ✓ (CLEAN; TD-017+TD-018 filed)
+- D3 ✓ dedup subcommand (threshold_cluster union-find, 3 integration tests, photohelper-dedup.sh)
+- D4 ✓ heartbeat.rs extraction (TD-016 CLOSED, TD-010 CLOSED, 2 TD-010 tests)
 
 **Plan-review history (session 05 — COMPLETE)**:
 - R1 → 3 CRITICAL + 13 HIGH + 8 MEDIUM + 5 LOW → plan v2
@@ -60,10 +61,10 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 
 | Component             | Status                                  | Notes                                                                                                         |
 |-----------------------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------|
-| `photohelper-cli`     | **implemented (session 01)**            | clap v4 + 7 subcommands; `ingest` real; stubs exit 69; heartbeat + summary via eprintln!.                     |
-| `photohelper-core`    | **implemented (session 01)**            | model (PhotoId, AbsPath, CameraId, KnownCamera, ExifOrientation, Aspect, ExifMetadata, IngestOutcome, Photo); error (13 variants); catalog_glue. |
-| `photohelper-raw`     | **implemented (session 02+04)**         | Session 02: LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw, full type suite. Session 04 D1e: decode::read_raw_rgb (dcraw_process pipeline + RgbImage output via 6 new C shim accessors + parse_libraw_rgb_image + extract_rgb_image). 4 integration tests (3 Bayer + 1 RGB). |
-| `photohelper-ai`      | **implemented (session 04)**            | VerifiedModelBytes + NimaScore + Nima (ONNX Runtime 2.0.0-rc.12, thread_local! per-worker Session, SHA-256 model verification). NIMA model in Git LFS. MODEL_SLUG + MODEL_MANIFEST_NAME constants. |
+| `photohelper-cli`     | **implemented (session 01+04+05)**      | clap v4 + 8 subcommands; `ingest`+`cull`+`dedup` real; stubs exit 69. heartbeat.rs shared (TD-016 closed). |
+| `photohelper-core`    | **implemented (session 01+04)**         | model + RgbImage; error (13 variants); catalog_glue. |
+| `photohelper-raw`     | **implemented (session 02+04)**         | LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw_rgb. 4 integration tests + 3 CLIP D1c tests. |
+| `photohelper-ai`      | **implemented (session 04+05)**         | NIMA + CLIP ViT-B/32 int8 (MIT, 85.3 MB). ImageEmbedding, MobileClip, EmbeddingZeroVector+EmbeddingCorruptBytes errors. CLIP_MODEL_SLUG+CLIP_MODEL_MANIFEST_NAME. |
 | `photohelper-sidecar` | scaffolded                              | XMP read/write (crs:/ph: namespaces) lands when `develop` is wired (~session 04).                             |
 | `photohelper-export`  | scaffolded                              | resize + watermark + mozjpeg encode land when `export` is wired (~session 05).                                |
 | `photohelper-cameras` | **implemented (session 01)**            | CameraProfile trait + CanonR8 stub + CameraRegistry::for_exif with normalization.                             |
