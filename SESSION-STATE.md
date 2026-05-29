@@ -10,22 +10,23 @@
 **Last session**: 3 (`ai-culling-skeleton` — 2026-05-28) — **SHIPPED** via PR #6
 (`64452ad`). Session narrowed to D5+D6+D7 after D0 ABORT.
 
-**Current session**: **04** (`ai-culling-pipeline`) — **PAUSED FOR CONTEXT REFRESH.**
-Branch: `session-04/ai-culling-pipeline`. Implementation ~50% complete.
-`just ci` GREEN. 133 tests.
+**Current session**: **04** (`ai-culling-pipeline`) — **IMPLEMENTATION COMPLETE.**
+Branch: `session-04/ai-culling-pipeline`. All deliverables D0'→D3 done.
+`just ci` GREEN. **143 tests**.
 
 **Goal** (session 04): Full AI culling pipeline — D0'→D1a→D1b/c→D1d→D1e→D2a/b→D3.
 
-**Action**: **RESUME IMPLEMENTATION at D1e.** Next commit:
-`feat(raw): D1e — read_raw_rgb (libraw_dcraw_process FFI + RgbImage output)`
-Then D2a → D2b → D3 → sub-component review at D2b → session-end R1+R2.
+**Action**: **FIRE SESSION-END REVIEW** (`/eight-agent-review` or `session-end`
+skill). Then R2 → remediate → push → PR → merge.
 
-**Status**: `just ci` GREEN (133 tests). Session paused for context refresh.
-Completed this window: D0' (ANL-002+DN-026 closed), D1a (ort dep), D1b+D1c
-(RgbImage in core + VerifiedModelBytes+NimaScore+Nima+Error in ai), D1d (ONNX
-via LFS + verify-model-sha256 CI gate). DN-024 (dedup) escalated → session 05.
-Remaining: D1e (read_raw_rgb FFI), D2a/b (catalog migration + cull_scores),
-D3 (run_cull + cull subcommand), tests, sub-component review, session-end.
+**Status**: `just ci` GREEN (143 tests). All D0'→D3 deliverables complete:
+- D1e: read_raw_rgb (dcraw_process FFI + RgbImage, integration test with plausibility check)
+- D2a: catalog schema v2 (cull_scores table, FK enforcement, SCHEMA_VERSION=2, decision doc 0002)
+- D2b: CullRow, InsertScoreOutcome, unsuperseded_unscored_rows, insert_cull_score
+- Sub-component review (D2b boundary): R1+R2 complete, all findings remediated
+- D3: commands/cull.rs (run_cull pipeline, CullStats×10, heartbeat, --strict, model wiring)
+- 2 CLI integration tests: real CR3 fixture + strict decode-fail exit code
+DN-024 (dedup) escalated → session 05.
 
 **Plan-review history (session 04 — COMPLETE)**:
 - R1 → 6 CRITICAL + 13 HIGH + 10 MEDIUM + 3 LOW → plan v2
