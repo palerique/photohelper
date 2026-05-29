@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 photohelper-core = { path = "../photohelper-core" }
 ort.workspace = true
+
 # TD-014: ort pin =2.0.0-rc.12; upgrade to stable 2.0.0 when released.
 thiserror.workspace = true
 static_assertions.workspace = true

@@ -64,6 +64,14 @@ pub enum Error {
     #[error("embedding vector is empty (zero dimensions)")]
     EmbeddingEmpty,
 
+    /// `ImageEmbedding::from_f32_le_bytes` received a byte slice whose length is
+    /// not a multiple of 4 (cannot represent any sequence of `f32` values).
+    #[error("embedding bytes are corrupt: length {len} is not a multiple of 4")]
+    EmbeddingCorruptBytes {
+        /// The actual byte slice length.
+        len: usize,
+    },
+
     /// `ImageEmbedding::from_raw` received a vector whose L2-norm is NaN, Inf,
     /// or outside the expected range [0.99, 1.01].
     ///

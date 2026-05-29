@@ -42,8 +42,8 @@ impl ImageEmbedding {
         self.0.len()
     }
 
-    /// Raw float slice used by `MobileClip::embed` for the dot-product in `cosine_similarity`
-    /// and by `threshold_cluster` for the O(n²) pair loop.
+    /// Raw float slice for future use by `threshold_cluster` in `dedup.rs` (D3, not yet
+    /// implemented). Currently called only by tests.
     #[must_use]
     #[allow(
         dead_code,
@@ -99,10 +99,7 @@ impl ImageEmbedding {
             return Err(Error::EmbeddingEmpty);
         }
         if bytes.len() % 4 != 0 {
-            // Mis-aligned byte slice cannot represent valid f32 values.
-            return Err(Error::EmbeddingNotNormalized {
-                norm: f32::NAN, // sentinel: indicates corrupt deserialization
-            });
+            return Err(Error::EmbeddingCorruptBytes { len: bytes.len() });
         }
         // chunks_exact(4) guarantees exactly 4-byte chunks; try_into().ok() cannot fail.
         let vec: Vec<f32> = bytes
@@ -219,9 +216,28 @@ mod tests {
     }
 
     #[test]
+    fn from_f32_le_bytes_rejects_empty() {
+        let err = ImageEmbedding::from_f32_le_bytes(&[]).unwrap_err();
+        assert!(matches!(err, Error::EmbeddingEmpty));
+    }
+
+    #[test]
     fn from_f32_le_bytes_rejects_non_aligned() {
         let bytes = vec![0u8; 13]; // 13 is not a multiple of 4
         let err = ImageEmbedding::from_f32_le_bytes(&bytes).unwrap_err();
-        assert!(matches!(err, Error::EmbeddingNotNormalized { .. }));
+        assert!(matches!(err, Error::EmbeddingCorruptBytes { len: 13 }));
+    }
+
+    #[test]
+    fn cosine_similarity_antipodal_returns_negative() {
+        // Two antipodal unit vectors: sim ≈ -1.0
+        let mut v = make_unit_vec(512, 1.0);
+        let a = ImageEmbedding::from_raw(&v).unwrap();
+        // Negate — norm stays 1.0, all elements flip sign.
+        v.iter_mut().for_each(|x| *x = -*x);
+        let b = ImageEmbedding::from_raw(&v).unwrap();
+        let sim = a.cosine_similarity(&b).unwrap();
+        assert!(sim <= -0.99, "antipodal sim must be ≈ -1.0; got {sim}");
+        assert!(sim >= -1.0, "cosine_similarity must clamp to [-1.0, 1.0]");
     }
 }

@@ -16,11 +16,7 @@ pub mod nima;
 pub use embedding::ImageEmbedding;
 pub use error::Error;
 pub use mobileclip::MobileClip;
-pub use model_bytes::{MODEL_MANIFEST_NAME, MODEL_SLUG, VerifiedModelBytes};
+pub use model_bytes::{
+    CLIP_MODEL_MANIFEST_NAME, CLIP_MODEL_SLUG, MODEL_MANIFEST_NAME, MODEL_SLUG, VerifiedModelBytes,
+};
 pub use nima::{Nima, NimaScore};
-
-/// Model slug for the CLIP ViT-B/32 LAION2B image embedder (catalog `model_slug` column).
-pub const CLIP_MODEL_SLUG: &str = "clip-vit-b32-laion2b-v1";
-
-/// Manifest.toml section name for the CLIP model (matches filename stem before `_int8.onnx`).
-pub const CLIP_MODEL_MANIFEST_NAME: &str = "clip_vit_b32_laion2b";

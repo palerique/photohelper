@@ -280,6 +280,25 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-020 — CLIP preprocessing uses bilinear 1:1 resize instead of bicubic center-crop
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 05, D1c — `MobileClip::embed`)
+- **Stop-gap location**:
+  - `crates/photohelper-ai/src/mobileclip.rs:82` — calls `nima::bilinear_resize(rgb, 224, 224)` @ commit (session 05 D1c). In-source: `// TD-020: bicubic center-crop deferred`.
+  - `crates/photohelper-ai/src/nima.rs:255` — `bilinear_resize` promoted to `pub(crate)` to enable CLIP reuse. In-source: `// pub(crate) so mobileclip.rs can reuse for CLIP preprocessing (TD-020)`.
+- **Fundamental fix**: Replace the bilinear 1:1 resize with CLIP-canonical preprocessing:
+  1. Resize the shorter edge to 256 pixels (bicubic, preserving aspect ratio).
+  2. Center-crop a 224×224 window.
+  3. This matches the preprocessing used during model training (confirmed via ANL-003 and open_clip source).
+  Implementation: use `image` crate's `FilterType::CatmullRom` (bicubic approximation) and its `crop` utilities, OR implement a ~30 LoC bicubic resize + center-crop in `mobileclip.rs`. Move away from `nima::bilinear_resize` (which is 1:1 aspect-changing).
+- **Binding trigger**: next session touching `MobileClip::embed` preprocessing OR user-reported clustering quality regression traceable to preprocessing (empirical delta: cosine_sim = 0.843 bilinear vs 0.923 Python bicubic on CC0 fixtures). If DBSCAN or k-NN retrieval is added, the embedding quality issue becomes more visible.
+- **Scope estimate**: ~30 LoC (bicubic + center-crop in `mobileclip.rs`; `bilinear_resize` demoted back to `fn` if NIMA stops needing it) / low risk.
+- **Consequence of inaction**: CLIP embeddings computed from bilinear-resized images may have reduced inter-photo similarities vs. the model's intended preprocessing. At the default 0.95 threshold, near-duplicate detection still works for very similar photos; at finer thresholds the quality gap becomes measurable.
+- **Related**: `docs/analysis/ANL-003-mobileclip-preflight.md §Preprocessing Parameters`; DN-027 (cross-platform tolerance); `crates/photohelper-raw/tests/integration_clip.rs` (test threshold 0.80 reflects this stop-gap).
+
+---
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).

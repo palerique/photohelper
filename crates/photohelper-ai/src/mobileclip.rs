@@ -20,6 +20,7 @@ use crate::embedding::ImageEmbedding;
 use crate::error::Error;
 use crate::model_bytes::VerifiedModelBytes;
 use crate::nima::bilinear_resize;
+use tracing;
 
 // CLIP ViT-B/32 channel normalization parameters (CLIP-standard, NOT ImageNet).
 // Confirmed in ANL-003 §Preprocessing Parameters. The f32 literals carry the
@@ -110,13 +111,18 @@ impl MobileClip {
         let raw_emb: Vec<f32> = SESS.with(|cell| -> Result<Vec<f32>, Error> {
             let mut guard = cell.borrow_mut();
             if guard.is_none() {
+                // If construction fails, guard stays None; the next embed() call on
+                // this thread retries. For deterministic failures, this produces N
+                // retries (one per photo). tracing::error! surfaces the root cause.
                 let sess = ort::session::Session::builder()
-                    .map_err(|e| Error::ModelLoad {
-                        source: Box::new(e),
+                    .map_err(|e| {
+                        tracing::error!("CLIP model builder failed: {e}; this worker will retry on each photo");
+                        Error::ModelLoad { source: Box::new(e) }
                     })?
                     .commit_from_memory(&self.bytes)
-                    .map_err(|e| Error::ModelLoad {
-                        source: Box::new(e),
+                    .map_err(|e| {
+                        tracing::error!("CLIP commit_from_memory failed: {e}; this worker will retry on each photo");
+                        Error::ModelLoad { source: Box::new(e) }
                     })?;
                 *guard = Some(sess);
             }
