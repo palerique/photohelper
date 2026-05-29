@@ -7,32 +7,28 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 2 (`libraw-cr3-decode` — 2026-05-28) — **SHIPPED**
-via PR #2, merge commit `67bd882` on `main` (LibRaw FFI for Canon R8
-CR3: EXIF + decode, atomic kamadak-exif removal, vendored LibRaw
-0.22.1, Git LFS CC0 fixtures + integration tests). Two operator
-follow-up sub-sessions also shipped: PR #3 merge `2f22094` (cleanup
-script + `just clean-catalog`) and PR #4 merge `1d31316` (list script
-+ `just list-catalog`). Session 02 post-merge two-block handoff WAS
-rendered (per the previous context window's session-end response).
+**Last session**: 3 (`ai-culling-skeleton` — 2026-05-28) — **IMPLEMENTATION
+COMPLETE (D0 ABORT path); session-end review pending.** Branch:
+`session-03/ai-culling-skeleton`. Session narrowed to D5+D6+D7 after D0
+pre-flight ABORT (no NIMA ONNX model with explicit permissive license found).
+AI culling pipeline (D1–D4) deferred to session 04+ pending DN-026 resolution.
 
-**Current session**: **03** (`ai-culling-skeleton`) — **PLAN-REVIEW
-COMPLETE; READY FOR IMPLEMENTATION.** Branch:
-`session-03/ai-culling-skeleton`. Plan v4 (final) at HEAD. Plan-review
-ran 4 rounds (R1 → R2 → R3 → R4), all converging to 0 CRITICAL, 0 HIGH.
+**Current session**: **03** (`ai-culling-skeleton`) — **IMPLEMENTATION DONE;
+AWAITING SESSION-END REVIEW (Round 1 → Round 2).** `just ci` GREEN.
+133 tests passing (was 118 at session start; +15 from D5a/b/c/d/e + D6 + D7).
 
-**Goal** (session 03): End-to-end AI culling pipeline (NIMA aesthetic
-scorer + catalog v1→v2 migration + `cull_scores` table + cull subcommand
-rewire) plus full TD-010 closure (Deliverable-6 test infrastructure)
-plus DN-020 stub-message fix. `dup_groups` deferred to session 04+.
+**Goal** (session 03 — narrowed): D0 pre-flight ABORT → D5 (TD-010 full
+closure except 2 in-process WARN tests → TD-010 PARTIALLY CLOSED) + D6
+(stub-message fix, closes DN-020) + D7 (docs, closes DN-003 + DN-021) +
+ANL-002 (ort CVE-clean, Session::run=&mut self, model license=ABORT).
 
-**Action**: **BEGIN IMPLEMENTATION.** Start with D6 (first-chore commit:
-DN-020 stub-message fix) then D0 (pre-flight: ort + NIMA audit, binding
-on Session::run receiver type) then D1a → D1b/c → D1d → D2a/b/c → D3 →
-D4 → D5 → D7. Sub-component reviews fire at D1c (photohelper-ai) and
-D2b (catalog migration) boundaries per the plan checkpoints table.
+**Action**: **SESSION-END REVIEW (Round 1 → remediate → Round 2)**. Fire
+`/eight-agent-review` on the session's code changes. Remediate findings.
+Then update SESSION-STATE.md, checkpoint HANDOFF_REPORT.md + discovery-notes,
+commit, push branch, open PR to main, wait for green CI, merge.
 
 **Status**: `just ci` GREEN on branch `session-03/ai-culling-skeleton`.
+133 tests pass. All deliverables (D0 ABORT, D5a–D5e, D6, D7) committed.
 118 workspace tests pass (unchanged from main). Branch is docs/plan +
 review artifacts only; no implementation code yet. Plan-review COMPLETE.
 

@@ -643,3 +643,72 @@ just session-start
 ```
 
 Then paste the restart prompt rendered at the end of this pause turn.
+
+---
+
+## Checkpoint 9 — session 03 implementation complete (2026-05-28; D0 ABORT path)
+
+**Status**: IMPLEMENTATION COMPLETE (D0 ABORT path). Branch `session-03/ai-culling-skeleton` at HEAD. `just ci` GREEN. Session-end review (Round 1 + Round 2) pending.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code, session 03 implementation window)
+
+### Summary
+
+Session 03 narrowed from its original scope (full AI culling pipeline) to D5+D6+D7 after D0 pre-flight ABORT. The AI culling pipeline (D1–D4: photohelper-ai crate, catalog v1→v2 migration, cull subcommand) is blocked by DN-026: no NIMA ONNX model with explicit MIT/Apache-2.0/CC-BY-4.0 license was found. See `docs/analysis/ANL-002-ort-nima-preflight.md` for the full pre-flight findings and two resolution paths for session 04+.
+
+### What landed this window (12 commits, all conventional)
+
+| Commit | Subject |
+|---|---|
+| D6 | `chore(cli): refresh stub-subcommand messages (closes DN-020)` — stub() rewritten to public message; justfile PATH fix |
+| D0 | `chore(ai): pre-flight ort + NIMA audit (Deliverable 0) — ABORT` — ANL-002; DN-026 filed |
+| D5a+D5b | `fix(catalog): D5a+D5b — poison_for_testing knob + silent-ROLLBACK fix` |
+| D5d | `feat(cli)+test: D5d — DN-008 6 rows + fatal exit codes (EX_TEMPFAIL/EX_NOPERM)` |
+| D5c | `feat(test-infra): D5c — photohelper-test-helpers crate + HeartbeatDeathTrigger` |
+| D5e | `test(cli): D5e — R2-T18 WARN regression tests (file-lock op-tag + wal_checkpoint)` |
+| D7 | `docs: D7 + TD-010 partial closure update` |
+
+### Test count growth
+
+118 tests at session start → 133 tests at session end (+15). Key additions:
+- D5a: 3 catalog poison-recovery tests
+- D5c: 1 HeartbeatDeathTrigger smoke test + 1 doc-test
+- D5d: 7 CLI integration tests (hardlink dedup, strict+real-CR3, nested-dirs, broken-symlinks, future-mtime, EX_TEMPFAIL, EX_NOPERM)
+- D5e: 2 WARN regression tests (file-lock op-tag, wal_checkpoint)
+- D6: 1 negative test (cull --help)
+
+### TD-010 closure status
+
+- 6a (poison_for_testing): **CLOSED**
+- 6b (ROLLBACK fix): **CLOSED** (extended_code==1, not ApiMisuse as plan cited)
+- 6c (HeartbeatDeathTrigger crate): **CLOSED**
+- 6d (DN-008 6 rows): **CLOSED**
+- 6e rows 2+3 (wal_checkpoint + file-lock): **CLOSED**
+- 6e rows 1+4 (build_global + heartbeat-death in-process): **DEFERRED** — needs in-process run_ingest() invocation, not subprocess. Updated TD-010 with concrete plan (~50 LoC).
+- 6f (R2-T19): already closed at session 01 R2.
+
+### D0 ABORT key findings (from ANL-002)
+
+- **ort 2.0.0-rc.12**: CVE-clean (0 RustSec + 0 GitHub + 0 OSV.dev advisories as of 2026-05-28). Wraps ONNX Runtime 1.24. Rust MSRV = 1.88 (matches our toolchain).
+- **Session::run receiver**: `&mut self` (confirmed from pykeio/ort source). Binding for D4: per-worker `thread_local!` path is the correct concurrency model.
+- **NIMA ONNX model**: No model found with explicit MIT/Apache-2.0/CC-BY-4.0 license. Only candidate (`cromsc/nima-mobilenet-aesthetic` on HuggingFace) has no license file, no model card, no provenance documentation. ABORT condition fires.
+
+### New TDs/DNs this window
+
+- **DN-026**: No NIMA ONNX model with explicit permissive license found — BLOCKER for D1–D4.
+- **TD-010**: PARTIALLY CLOSED (see above).
+
+### What is not yet in place
+
+- AI culling pipeline (D1–D4): blocked by DN-026. Resolution paths in ANL-002.
+- catalog v1→v2 migration + `cull_scores` table (D2): blocked by D0 ABORT.
+- 2 remaining TD-010 in-process WARN tests.
+- Session-end 8-agent review (Round 1 + Round 2).
+
+### How to resume
+
+```bash
+git switch session-03/ai-culling-skeleton
+just session-start
+```
+
+Then fire the session-end review (`/eight-agent-review` or `eight-agent-review` skill), remediate, update STATE + HANDOFF, push, PR, merge.
