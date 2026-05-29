@@ -69,7 +69,11 @@ impl VerifiedModelBytes {
                 source: format!("missing [{name}].sha256 in manifest.toml").into(),
             })?;
 
-        let onnx_path = model_dir.join(format!("{name}.onnx"));
+        // Use the `filename` field from the manifest section if present (allows suffixes
+        // like `_int8.onnx`); fall back to `{name}.onnx` for backward compatibility.
+        let filename =
+            extract_filename(&manifest_text, name).unwrap_or_else(|| format!("{name}.onnx"));
+        let onnx_path = model_dir.join(&filename);
         let bytes = std::fs::read(&onnx_path).map_err(|e| Error::ManifestParse {
             path: onnx_path.clone(),
             source: Box::new(e),
@@ -105,18 +109,18 @@ impl VerifiedModelBytes {
     }
 }
 
-/// Extract the sha256 value from a TOML manifest for a named section.
+/// Extract a string field from a named TOML manifest section.
 ///
-/// Minimal TOML parser: just looks for `[name]` sections and `sha256 = "..."` keys.
-fn extract_sha256(toml: &str, name: &str) -> Option<String> {
-    let section_header = format!("[{name}]");
+/// Minimal TOML parser: looks for `[name]` sections then `key = "..."` within them.
+fn extract_field(toml: &str, section: &str, key: &str) -> Option<String> {
+    let section_header = format!("[{section}]");
     let mut in_section = false;
     for line in toml.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             in_section = trimmed == section_header;
         } else if in_section {
-            if let Some(rest) = trimmed.strip_prefix("sha256") {
+            if let Some(rest) = trimmed.strip_prefix(key) {
                 let rest = rest.trim().strip_prefix('=')?;
                 let val = rest.trim().trim_matches('"');
                 if !val.is_empty() {
@@ -126,6 +130,17 @@ fn extract_sha256(toml: &str, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract the `sha256` field from a named manifest section.
+fn extract_sha256(toml: &str, name: &str) -> Option<String> {
+    extract_field(toml, name, "sha256")
+}
+
+/// Extract the optional `filename` field from a named manifest section.
+/// Returns `None` if the field is absent (caller uses `{name}.onnx` as fallback).
+fn extract_filename(toml: &str, name: &str) -> Option<String> {
+    extract_field(toml, name, "filename")
 }
 
 /// Compute the lowercase hex SHA-256 of `data`.

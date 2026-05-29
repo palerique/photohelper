@@ -59,4 +59,41 @@ pub enum Error {
         /// Maximum valid value (10.0).
         max: f32,
     },
+
+    /// `ImageEmbedding::from_raw` received an empty vector.
+    #[error("embedding vector is empty (zero dimensions)")]
+    EmbeddingEmpty,
+
+    /// `ImageEmbedding::from_raw` received a vector whose L2-norm is NaN, Inf,
+    /// or outside the expected range [0.99, 1.01].
+    ///
+    /// The norm must be finite and near-unit; `MobileClip::embed` L2-normalizes
+    /// before constructing `ImageEmbedding`, so this error signals model misbehaviour.
+    #[error("embedding L2-norm is not finite or out of range [0.99, 1.01]: {norm}")]
+    EmbeddingNotNormalized {
+        /// The actual L2-norm of the embedding vector.
+        norm: f32,
+    },
+
+    /// Model emitted an all-zeros embedding vector; L2-normalization would produce NaN.
+    #[error("model produced a zero-length embedding vector (all values ≈ 0)")]
+    EmbeddingZeroVector,
+
+    /// `ImageEmbedding::cosine_similarity` received embeddings of different dimensions.
+    #[error("embedding dimension mismatch: expected {expected}, got {got}")]
+    EmbeddingDimMismatch {
+        /// Expected dimension (self.dim()).
+        expected: usize,
+        /// Actual dimension of the other embedding.
+        got: usize,
+    },
+
+    /// CLIP inference failed for a specific photo.
+    #[error("MobileCLIP inference failed for {path}: {source}")]
+    MobileClipInferenceFailed {
+        /// Source path of the photo being embedded.
+        path: PathBuf,
+        /// Underlying error (ort runtime or output-validation failure).
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
