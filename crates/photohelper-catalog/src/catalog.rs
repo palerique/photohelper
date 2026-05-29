@@ -15,7 +15,7 @@ use photohelper_core::Error;
 use photohelper_core::model::{AbsPath, Photo, PhotoId};
 
 use crate::row::{PhotoRow, SELECT_ALL_COLUMNS, insert_error};
-use crate::schema::{INIT_SQL, SCHEMA_VERSION};
+use crate::schema::{INIT_SQL, MIGRATE_V1_TO_V2_SQL, SCHEMA_VERSION};
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
@@ -207,6 +207,10 @@ impl Catalog {
             "PRAGMA journal_mode = WAL",
             "PRAGMA synchronous = NORMAL",
             "PRAGMA busy_timeout = 5000",
+            // Enable FK enforcement so `cull_scores.photo_id` REFERENCES
+            // `photos(id)` is actually checked at INSERT time (per D2a
+            // and `docs/decisions/0002-catalog-schema-v2.md`).
+            "PRAGMA foreign_keys = ON",
         ] {
             conn.execute_batch(pragma).map_err(|e| Error::CatalogOpen {
                 path: catalog_path.to_path_buf(),
@@ -223,12 +227,12 @@ impl Catalog {
             })?;
         match user_version {
             0 => {
-                // R2-T8 fix: use IMMEDIATE so init takes the RESERVED lock
-                // up-front, matching the prose contract in
-                // `docs/decisions/0001-catalog-schema-v1.md` § Init transaction.
-                // The file-lock already serialises openers (so DEFERRED would
-                // be safe), but IMMEDIATE makes the SQLite-level intent
-                // explicit and matches the upsert path at line ~291.
+                // Fresh DB: run v1 init then immediately apply v1→v2
+                // migration so new catalogs start at SCHEMA_VERSION
+                // without an intermediate state.
+                // R2-T8 fix: use IMMEDIATE so init takes the RESERVED
+                // lock up-front (file-lock already serialises openers,
+                // but IMMEDIATE makes the SQLite-level intent explicit).
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(|e| Error::CatalogOpen {
@@ -243,8 +247,12 @@ impl Catalog {
                     path: catalog_path.to_path_buf(),
                     source: Box::new(e),
                 })?;
+                apply_v1_to_v2(&mut conn, catalog_path)?;
             }
-            n if n == SCHEMA_VERSION => {}
+            1 => {
+                apply_v1_to_v2(&mut conn, catalog_path)?;
+            }
+            v if v == SCHEMA_VERSION => {}
             other => {
                 return Err(Error::CatalogSchemaTooNew {
                     found: other,
@@ -489,6 +497,29 @@ impl Catalog {
     }
 }
 
+/// Apply the v1 → v2 schema migration: add `cull_scores` table + index
+/// and set `PRAGMA user_version = 2`. Wrapped in `BEGIN IMMEDIATE` to
+/// match the init-path contract; `CREATE TABLE IF NOT EXISTS` makes the
+/// DDL idempotent in case a prior run committed the table but crashed
+/// before bumping `user_version`.
+fn apply_v1_to_v2(conn: &mut Connection, path: &Path) -> Result<(), Error> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| Error::CatalogOpen {
+            path: path.to_path_buf(),
+            source: Box::new(e),
+        })?;
+    tx.execute_batch(MIGRATE_V1_TO_V2_SQL)
+        .map_err(|e| Error::CatalogOpen {
+            path: path.to_path_buf(),
+            source: Box::new(e),
+        })?;
+    tx.commit().map_err(|e| Error::CatalogOpen {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })
+}
+
 /// Test-only extension methods (D5a — `poison_for_testing` knob).
 #[cfg(test)]
 impl Catalog {
@@ -560,19 +591,23 @@ mod tests {
     fn open_schema_version_too_new_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let cat = dir.path().join("ahead.db");
-        // Build a DB with user_version = 2 (newer than SCHEMA_VERSION = 1).
+        // Build a DB with user_version = SCHEMA_VERSION + 1 (too new).
+        // Using SCHEMA_VERSION + 1 so this test stays correct when the
+        // constant is bumped in a future session (PR1-T19 fix).
         {
             let conn = Connection::open(&cat).unwrap();
-            conn.execute_batch("PRAGMA user_version = 2").unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))
+                .unwrap();
         }
         let err = Catalog::open(&cat, 1).unwrap_err();
-        assert!(matches!(
-            err,
-            Error::CatalogSchemaTooNew {
-                found: 2,
-                expected: 1
-            }
-        ));
+        assert!(
+            matches!(
+                err,
+                Error::CatalogSchemaTooNew { found, expected }
+                if found == SCHEMA_VERSION + 1 && expected == SCHEMA_VERSION
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
@@ -583,14 +618,43 @@ mod tests {
             let _c1 = Catalog::open(&cat, 1).unwrap();
         }
         let c2 = Catalog::open(&cat, 1).unwrap();
-        // After second open, user_version should still be 1.
+        // After second open, user_version must still be SCHEMA_VERSION (PR1-T25 fix).
         let v: i64 = c2
             .conn
             .lock()
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn catalog_fresh_db_initializes_to_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = dir.path().join("fresh.db");
+        let c = Catalog::open(&cat, 1).unwrap();
+        let conn = c.conn.lock().unwrap();
+        // Fresh catalog must be at SCHEMA_VERSION = 2.
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "fresh DB must initialize to SCHEMA_VERSION"
+        );
+        // cull_scores table must exist (created by MIGRATE_V1_TO_V2_SQL).
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='cull_scores'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "cull_scores table must be present in a fresh v2 DB"
+        );
     }
 
     // =========================================================
