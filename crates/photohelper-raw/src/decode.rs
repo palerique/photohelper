@@ -36,6 +36,8 @@ use std::path::Path;
 
 use static_assertions::assert_impl_all;
 
+use photohelper_core::model::RgbImage;
+
 use crate::ffi::{self, RawPath};
 use crate::{Error, RawDecodeCause};
 
@@ -127,6 +129,30 @@ impl RawImage {
 pub fn read_raw(path: &Path) -> Result<RawImage, Error> {
     let raw_path = RawPath::new(path)?;
     ffi::parse_libraw_image(&raw_path)
+}
+
+/// Decode a Canon CR3 (or other LibRaw-supported RAW) file via the
+/// AHD demosaic pipeline and return a demosaiced 8-bit sRGB [`RgbImage`].
+///
+/// Calls `libraw_dcraw_process` (default parameters: AHD demosaic,
+/// 8-bit output) then `libraw_dcraw_make_mem_image`. The resulting pixel
+/// buffer is copied into Rust-owned memory before the LibRaw handle is
+/// released; no raw pointers survive the call.
+///
+/// This is the entry point for the AI culling pipeline (session 04 §D1e):
+/// the returned `RgbImage` is resized to 224×224 and fed to the NIMA model
+/// by `photohelper_ai::nima::Nima::score`.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::RawDecodeFailed`] with
+/// [`crate::RawDecodeCause::RgbConversionFailed`] if LibRaw produces
+/// output that is not 8-bit 3-channel sRGB. Other [`crate::Error`]
+/// variants cover path-validation, LibRaw API failures, and dimension
+/// mismatches.
+pub fn read_raw_rgb(path: &Path) -> Result<RgbImage, Error> {
+    let raw_path = RawPath::new(path)?;
+    ffi::parse_libraw_rgb_image(&raw_path)
 }
 
 /// The raw Bayer-pattern sensor buffer plus its dimensions, with the

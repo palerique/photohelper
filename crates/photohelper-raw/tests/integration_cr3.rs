@@ -12,7 +12,7 @@ mod common;
 
 use common::{fixture_is_real_cr3, fixture_path};
 use photohelper_core::model::ExifOrientation;
-use photohelper_raw::decode::{CfaPattern, read_raw};
+use photohelper_raw::decode::{CfaPattern, read_raw, read_raw_rgb};
 use photohelper_raw::exif::read_cr3;
 
 #[test]
@@ -89,4 +89,54 @@ fn read_raw_decodes_canon_r8_bayer_plane_from_raw_fixture() {
         && (m[1][1] - 1.0).abs() < 1e-6
         && (m[2][2] - 1.0).abs() < 1e-6;
     assert!(!is_identity, "color matrix should not be identity");
+}
+
+/// Compute mean and population standard deviation of an 8-bit pixel buffer.
+fn mean_and_stddev(pixels: &[u8]) -> (f64, f64) {
+    let n = pixels.len() as f64;
+    let mean = pixels.iter().map(|&b| f64::from(b)).sum::<f64>() / n;
+    let variance = pixels
+        .iter()
+        .map(|&b| {
+            let d = f64::from(b) - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / n;
+    (mean, variance.sqrt())
+}
+
+/// D1e integration test — per plan §Deliverable D1e § Integration test.
+///
+/// Checks two invariants for both CC0 Canon R8 fixtures:
+/// 1. Dimension invariant: `pixels.len() == w * h * 3`
+/// 2. Content plausibility: `mean ∈ (20, 240)` AND `std_dev > 5`
+///    (rules out all-zeros / all-max degenerate output and silent LibRaw
+///    copy bugs per plan PR1-T16)
+#[test]
+fn read_raw_rgb_cc0_fixture() {
+    for name in &["CRAW_FULL_FRAME.CR3", "RAW_FULL_FRAME.CR3"] {
+        let p = fixture_is_real_cr3(&fixture_path(name));
+        let img =
+            read_raw_rgb(&p).unwrap_or_else(|e| panic!("read_raw_rgb failed for {name}: {e}"));
+
+        let w = img.width().get() as usize;
+        let h = img.height().get() as usize;
+
+        // Dimension invariant: buffer must be exactly w×h×3 bytes.
+        assert_eq!(
+            img.pixels().len(),
+            w * h * 3,
+            "fixture={name} dimension invariant failed (w={w}, h={h})"
+        );
+
+        // Plausibility: mean and std_dev rule out degenerate all-zero /
+        // all-saturated / static output from a broken LibRaw integration.
+        let (mean, stddev) = mean_and_stddev(img.pixels());
+        assert!(
+            mean > 20.0 && mean < 240.0,
+            "fixture={name} mean={mean:.2} not in (20, 240)"
+        );
+        assert!(stddev > 5.0, "fixture={name} stddev={stddev:.2} not > 5.0");
+    }
 }
