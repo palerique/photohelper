@@ -26,9 +26,10 @@ use clap::Parser;
 mod commands;
 mod heartbeat;
 
-use photohelper_ai::{MODEL_MANIFEST_NAME, VerifiedModelBytes};
+use photohelper_ai::{CLIP_MODEL_MANIFEST_NAME, MODEL_MANIFEST_NAME, VerifiedModelBytes};
 
 use commands::cull::{CullArgs, run_cull};
+use commands::dedup::{DedupeArgs, run_dedup};
 use commands::ingest::run_ingest;
 
 /// Cross-platform CLI for AI-powered Canon RAW processing.
@@ -69,6 +70,8 @@ enum Command {
     Ingest(IngestArgs),
     /// AI aesthetic culling via the NIMA model (scores photos in `[1, 10]`).
     Cull(CullArgs),
+    /// Duplicate detection via CLIP ViT-B/32 embeddings + cosine-similarity clustering.
+    Dedup(DedupeArgs),
     /// Apply develop settings via XMP sidecars (planned for v0.1).
     Develop,
     /// Export to JPEG with resize + watermark (planned for v0.1).
@@ -164,6 +167,30 @@ fn main() -> ExitCode {
                 Err(e) => {
                     tracing::error!("{e:#}");
                     ExitCode::from(exit_code::EX_IOERR)
+                }
+            }
+        }
+        Command::Dedup(args) => {
+            let model_dir = std::env::var("PHOTOHELPER_MODEL_DIR").map_or_else(
+                |_| {
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|p| p.join("models")))
+                        .unwrap_or_else(|| std::path::PathBuf::from("models"))
+                },
+                std::path::PathBuf::from,
+            );
+            match VerifiedModelBytes::from_manifest(&model_dir, CLIP_MODEL_MANIFEST_NAME) {
+                Ok(model) => match run_dedup(&cli, args, &model) {
+                    Ok(code) => ExitCode::from(code),
+                    Err(err) => {
+                        tracing::error!("{err:#}");
+                        ExitCode::from(exit_code_for_error(&err))
+                    }
+                },
+                Err(e) => {
+                    tracing::error!("{e:#}");
+                    ExitCode::from(exit_code::EX_UNAVAILABLE)
                 }
             }
         }

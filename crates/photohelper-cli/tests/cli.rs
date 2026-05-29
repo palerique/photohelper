@@ -941,3 +941,156 @@ fn cull_strict_exits_nonzero_on_decode_fail() {
         .code(1) // EX_STRICT_FAIL = 1 (POSIX generic failure)
         .stderr(contains("decode-failed: 1"));
 }
+
+// =====================================================================
+// D3: dedup integration tests
+// =====================================================================
+
+fn clip_model_dir() -> PathBuf {
+    nima_model_dir() // both NIMA and CLIP live in the same models dir
+}
+
+/// D3 test 1: ingest CC0 fixtures → dedup → embeddings + clusters written.
+///
+/// Requires the CLIP ONNX model (Git LFS). Skips if model not present.
+#[test]
+fn dedup_end_to_end_embeds_and_clusters_cc0_fixtures() {
+    let model_dir = clip_model_dir();
+    let clip_manifest = model_dir.join("manifest.toml");
+    if !clip_manifest.exists() {
+        return; // Git LFS not pulled; skip.
+    }
+
+    let fixture_dir = cr3_fixture_dir();
+    if !fixture_dir.join("CRAW_FULL_FRAME.CR3").exists() {
+        return; // LFS fixtures not pulled; skip.
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+
+    // Ingest the CC0 fixtures first.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "ingest",
+            fixture_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0)
+        .stderr(contains("ingested: 2"));
+
+    // Dedup: embed + cluster.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_path.to_str().unwrap(), "dedup"])
+        .assert()
+        .code(0)
+        .stderr(contains("embedded: 2"));
+
+    // Verify embeddings and dup_clusters rows exist.
+    let conn = rusqlite::Connection::open(&cat_path).unwrap();
+    let emb_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(emb_count, 2, "both CC0 CR3 fixtures must be embedded");
+    let cluster_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM dup_clusters", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        cluster_count, 2,
+        "both photos must have cluster assignments"
+    );
+}
+
+/// D3 test 2: second dedup run walks 0 photos (already embedded → SQL filter).
+#[test]
+fn dedup_idempotency_second_run_walks_zero() {
+    let model_dir = clip_model_dir();
+    if !model_dir.join("manifest.toml").exists() {
+        return;
+    }
+    let fixture_dir = cr3_fixture_dir();
+    if !fixture_dir.join("CRAW_FULL_FRAME.CR3").exists() {
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "ingest",
+            fixture_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
+
+    // First dedup.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_path.to_str().unwrap(), "dedup"])
+        .assert()
+        .code(0)
+        .stderr(contains("embedded: 2"));
+
+    // Second dedup: unembedded_rows filter → walked: 0.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_path.to_str().unwrap(), "dedup"])
+        .assert()
+        .code(0)
+        .stderr(contains("walked: 0"));
+}
+
+/// D3 test 3: strict mode exits 1 when a photo's file is missing.
+#[test]
+fn dedup_strict_exits_nonzero_on_file_missing() {
+    let model_dir = clip_model_dir();
+    if !model_dir.join("manifest.toml").exists() {
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let fake_cr3 = tmp.path().join("gone.cr3");
+
+    // Insert a stub CR3 file so ingest can hash it.
+    std::fs::write(&fake_cr3, vec![0xFFu8; 1024 * 1024]).unwrap();
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "ingest",
+            tmp.path().to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
+
+    // Remove the file so dedup sees it as missing.
+    std::fs::remove_file(&fake_cr3).unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_path.to_str().unwrap(), "dedup", "--strict"])
+        .assert()
+        .code(1) // EX_STRICT_FAIL = 1
+        .stderr(contains("file-missing: 1"));
+}
