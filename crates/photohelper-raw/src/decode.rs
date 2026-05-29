@@ -151,6 +151,9 @@ pub fn read_raw(path: &Path) -> Result<RawImage, Error> {
 /// variants cover path-validation, LibRaw API failures, and dimension
 /// mismatches.
 pub fn read_raw_rgb(path: &Path) -> Result<RgbImage, Error> {
+    // TD-012: AHD demosaic stop-gap — the algorithm is the LibRaw default for
+    // non-Fuji Bayer sensors; upgrade to configurable pipeline when DxO-quality
+    // demosaic lands. See TECH-DEBT.md § TD-012.
     let raw_path = RawPath::new(path)?;
     ffi::parse_libraw_rgb_image(&raw_path)
 }

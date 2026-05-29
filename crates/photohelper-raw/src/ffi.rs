@@ -614,8 +614,10 @@ pub(crate) fn parse_libraw_rgb_image(raw_path: &RawPath) -> Result<RgbImage, Err
         });
     }
 
-    // Run the default dcraw pipeline: AHD demosaic (user_qual=3) with
-    // output_bps=8 (both LibRaw defaults). No params need setting.
+    // Run the default dcraw pipeline: AHD demosaic for non-Fuji Bayer sensors
+    // (user_qual=-1 default; quality resolves to 3 = AHD internally from
+    // `2 + !IO.fuji_width`) with output_bps=8 (both LibRaw defaults).
+    // No params need setting.
     // SAFETY: handle is valid and libraw_unpack has returned 0.
     let rc = unsafe { libraw_dcraw_process(guard.handle) };
     if rc != 0 {
@@ -722,10 +724,16 @@ fn extract_rgb_image(img_ptr: *mut LibrawProcessedImage, path: &Path) -> Result<
         },
     })?;
 
-    // RgbImage::new validates pixels.len() == width * height * 3.
+    // RgbImage::new validates pixels.len() == width * height * 3. A mismatch
+    // here means LibRaw's data_size was inconsistent with its own width/height
+    // fields — route to LibRawCallFailed rather than RgbConversionFailed (which
+    // would incorrectly claim the format was wrong after it was already validated).
     RgbImage::new(pixels, width_nz, height_nz).map_err(|_| Error::RawDecodeFailed {
         path: path.to_path_buf(),
-        cause: RawDecodeCause::RgbConversionFailed { bits, colors },
+        cause: RawDecodeCause::LibRawCallFailed {
+            libraw_code: 0,
+            op: "pixel buffer length != width*height*3 (LibRaw data_size mismatch)",
+        },
     })
 }
 

@@ -872,17 +872,34 @@ fn cull_scores_real_canon_r8_cr3_fixture() {
         .query_row("SELECT COUNT(*) FROM cull_scores", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 2, "both CC0 CR3 fixtures must be scored");
-    let (score,): (f64,) = conn
-        .query_row(
-            "SELECT aesthetic_score FROM cull_scores ORDER BY aesthetic_score LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?,)),
-        )
-        .unwrap();
-    assert!(
-        (1.0..=10.0).contains(&score),
-        "aesthetic_score {score} must be in [1.0, 10.0]"
-    );
+    let scores: Vec<f64> = {
+        let mut stmt = conn
+            .prepare("SELECT aesthetic_score FROM cull_scores")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    for score in &scores {
+        assert!(
+            (1.0..=10.0).contains(score),
+            "aesthetic_score {score} must be in [1.0, 10.0]"
+        );
+    }
+
+    // Theme-E idempotency: second cull run finds no unscored photos (the
+    // unsuperseded_unscored_rows SQL excludes already-scored photos via NOT IN),
+    // so walked=0. This verifies the SQL filter is active and cull exits cleanly.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_path.to_str().unwrap(), "cull"])
+        .assert()
+        .code(0)
+        .stderr(contains("walked: 0"))
+        .stderr(contains("scored: 0"));
 }
 
 /// D3 test: ingest a synthetic (undecodeable) CR3 → cull --strict → exit ≠ 0.

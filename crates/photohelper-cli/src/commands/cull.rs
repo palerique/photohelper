@@ -41,7 +41,6 @@ struct CullStats {
     file_missing: AtomicU64,
     content_changed: AtomicU64,
     catalog_inconsistency: AtomicU64,
-    catalog_written: AtomicU64,
     derive_failed: AtomicU64,
 }
 
@@ -56,7 +55,6 @@ impl CullStats {
             file_missing: AtomicU64::new(0),
             content_changed: AtomicU64::new(0),
             catalog_inconsistency: AtomicU64::new(0),
-            catalog_written: AtomicU64::new(0),
             derive_failed: AtomicU64::new(0),
         }
     }
@@ -113,11 +111,8 @@ pub fn run_cull(
         .with_context(|| "querying unsuperseded unscored rows")?;
 
     if rows.is_empty() {
-        eprintln!(
-            "walked: 0, scored: 0, already-scored: 0, decode-failed: 0, \
-             infer-failed: 0, file-missing: 0, content-changed: 0, \
-             catalog-inconsistency: 0, derive-failed: 0"
-        );
+        // Use CullStats::new() so the format stays in sync with summary_line().
+        eprintln!("{}", CullStats::new().summary_line());
         return Ok(0);
     }
 
@@ -141,7 +136,16 @@ pub fn run_cull(
         stats.walked.fetch_add(1, Ordering::Relaxed);
         let source_path = row.source_path().to_path_buf();
 
-        // Step 1: Re-derive PhotoId (content-change detection).
+        // Step 1: Existence pre-check — must precede derive (PhotoId::derive
+        // calls fs::metadata, so a missing file would route to derive_failed
+        // rather than file_missing if the check came second).
+        if !source_path.exists() {
+            tracing::warn!(path = %source_path.display(), "file missing since ingest; skipping");
+            stats.file_missing.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
+        // Step 2: Re-derive PhotoId (content-change detection).
         let current_id = match PhotoId::derive(&source_path) {
             Ok(id) => id,
             Err(e) => {
@@ -160,12 +164,6 @@ pub fn run_cull(
                 "content changed since ingest; skipping"
             );
             stats.content_changed.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-
-        // Step 2: Existence pre-check (avoids decode error on missing files).
-        if !source_path.exists() {
-            stats.file_missing.fetch_add(1, Ordering::Relaxed);
             return;
         }
 
@@ -194,11 +192,9 @@ pub fn run_cull(
         match catalog.insert_cull_score(row.photo_id(), MODEL_SLUG, score.as_f64(), scored_at) {
             Ok(InsertScoreOutcome::Inserted) => {
                 stats.scored.fetch_add(1, Ordering::Relaxed);
-                stats.catalog_written.fetch_add(1, Ordering::Relaxed);
             }
             Ok(InsertScoreOutcome::AlreadyScored) => {
                 stats.already_scored.fetch_add(1, Ordering::Relaxed);
-                stats.catalog_written.fetch_add(1, Ordering::Relaxed);
             }
             Err(e) => {
                 tracing::warn!(
@@ -215,6 +211,8 @@ pub fn run_cull(
         tracing::warn!("heartbeat thread died before end-of-cull; liveness signal was unavailable");
     }
     stop.signal();
+    // join() result discarded intentionally — early death is already surfaced
+    // by the is_finished() WARN above; the panic payload adds no extra value.
     let _ = heartbeat_handle.join();
 
     eprintln!("{}", stats.summary_line());
@@ -233,8 +231,16 @@ pub fn run_cull(
         return Ok(exit_code::EX_STRICT_FAIL);
     }
     // "Nothing useful happened" check: walked at least one photo but produced
-    // zero new or existing scores — likely a catalog / path mismatch.
-    if walked > 0 && (scored + already_scored) == 0 {
+    // zero new or existing scores AND no per-photo errors explain the gap —
+    // indicates a catalog / path mismatch. Guard `all_per_photo_errors == 0`
+    // prevents false EX_USAGE when files are systematically missing/changed.
+    let all_per_photo_errors = derive_failed
+        + decode_failed
+        + infer_failed
+        + stats.file_missing.load(Ordering::Relaxed)
+        + stats.content_changed.load(Ordering::Relaxed)
+        + stats.catalog_inconsistency.load(Ordering::Relaxed);
+    if walked > 0 && (scored + already_scored) == 0 && all_per_photo_errors == 0 {
         return Ok(exit_code::EX_USAGE);
     }
     Ok(0)

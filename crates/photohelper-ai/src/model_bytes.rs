@@ -5,12 +5,20 @@ use std::sync::Arc;
 
 use crate::error::Error;
 
-/// The model slug for the NIMA aesthetic scorer.
+/// The model slug for the NIMA aesthetic scorer (catalog `model_slug` column).
 ///
 /// Defined here (in `photohelper-ai`, alongside the scorer) rather than in
 /// the CLI command layer, so the slug travels with the model definition when
 /// a second scorer is added. (R2-M4 remediation)
 pub const MODEL_SLUG: &str = "nima-aesthetic-v1";
+
+/// The ONNX filename stem and `manifest.toml` section name for the NIMA model.
+///
+/// `VerifiedModelBytes::from_manifest(dir, MODEL_MANIFEST_NAME)` loads the
+/// model; the `.onnx` file is `{dir}/{MODEL_MANIFEST_NAME}.onnx`. Keeping this
+/// constant alongside `MODEL_SLUG` ensures both identifiers travel with the
+/// model definition.
+pub const MODEL_MANIFEST_NAME: &str = "nima_mobilenet_aesthetic";
 
 /// SHA-256-verified ONNX model bytes.
 ///

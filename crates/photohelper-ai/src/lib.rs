@@ -11,5 +11,5 @@ pub mod model_bytes;
 pub mod nima;
 
 pub use error::Error;
-pub use model_bytes::{MODEL_SLUG, VerifiedModelBytes};
+pub use model_bytes::{MODEL_MANIFEST_NAME, MODEL_SLUG, VerifiedModelBytes};
 pub use nima::{Nima, NimaScore};

@@ -269,9 +269,9 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-016 — `HeartbeatStop` + `heartbeat_loop` duplicated in `cull.rs`
 
-- **Status**: Open (prospective — `cull.rs` not yet created; D4 deferred due to D0 ABORT + DN-026)
+- **Status**: Open (duplication materialized — `cull.rs` exists as of session 04, commit dcdec49)
 - **Opened**: 2026-05-28 (session 3, D4 plan-review R1 remediation — PR1-T33)
-- **Stop-gap location**: Prospective — `crates/photohelper-cli/src/commands/cull.rs` will carry the duplicate when D4 lands. The file does not exist yet (session 03 D0 ABORTed before D4 was implemented). This TD becomes actionable when the AI culling pipeline is implemented in a future session.
+- **Stop-gap location**: `crates/photohelper-cli/src/commands/cull.rs:127,243` (heartbeat_loop_cull + HeartbeatStop usage) — session 04 commit dcdec49. In-source: `// TD-016: heartbeat_loop_cull duplicates logic from heartbeat_loop in ingest.rs`.
 - **Fundamental fix**: extract `HeartbeatStop`, `HeartbeatHandle`, and `heartbeat_loop` into a `crates/photohelper-cli/src/heartbeat.rs` module. Both `ingest.rs` and `cull.rs` import from that module. The module is `pub(crate)`. If the `develop` or `export` subcommand (session 04–05) also needs a heartbeat, that is the trigger for the refactor.
 - **Binding trigger**: session that adds a heartbeat to the `develop`, `export`, or `run` subcommand. Three consumers is the threshold for extracting the abstraction (CLAUDE.md "Three similar lines is better than a premature abstraction").
 - **Scope estimate**: ~30 LoC (new module + two import updates) / zero risk.

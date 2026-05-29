@@ -25,7 +25,7 @@ use clap::Parser;
 
 mod commands;
 
-use photohelper_ai::VerifiedModelBytes;
+use photohelper_ai::{MODEL_MANIFEST_NAME, VerifiedModelBytes};
 
 use commands::cull::{CullArgs, run_cull};
 use commands::ingest::run_ingest;
@@ -138,7 +138,8 @@ fn main() -> ExitCode {
         },
         Command::Cull(args) => {
             // model_dir: PHOTOHELPER_MODEL_DIR env var if set, else binary-adjacent models/.
-            // current_exe() failure → EX_IOERR (cannot locate binary).
+            // current_exe() failure silently falls back to relative "models/"; EX_IOERR
+            // is returned later if from_manifest then fails at that path.
             let model_dir = std::env::var("PHOTOHELPER_MODEL_DIR").map_or_else(
                 |_| {
                     std::env::current_exe()
@@ -148,14 +149,14 @@ fn main() -> ExitCode {
                 },
                 std::path::PathBuf::from,
             );
-            match VerifiedModelBytes::from_manifest(&model_dir, "nima_mobilenet_aesthetic") {
+            match VerifiedModelBytes::from_manifest(&model_dir, MODEL_MANIFEST_NAME) {
                 Ok(model) => {
-                    let model_path = model_dir.join("nima_mobilenet_aesthetic.onnx");
+                    let model_path = model_dir.join(format!("{MODEL_MANIFEST_NAME}.onnx"));
                     match run_cull(&cli, args, &model, model_path) {
                         Ok(code) => ExitCode::from(code),
                         Err(err) => {
                             tracing::error!("{err:#}");
-                            ExitCode::from(exit_code::EX_IOERR)
+                            ExitCode::from(exit_code_for_error(&err))
                         }
                     }
                 }
