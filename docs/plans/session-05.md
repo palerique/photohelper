@@ -1,6 +1,6 @@
 # Session 05 — Duplicate-detection pipeline (MobileCLIP embeddings + dup\_clusters)
 
-> Status: PLAN v2 (post-R1 remediation; Round 2 pending)
+> Status: PLAN v3 (post-R2 remediation; CLEAN — implementation ready)
 > Branch: `session-05/dedup-mobileclip`
 > Started: 2026-05-29
 
@@ -345,21 +345,20 @@ infinity, values ≤ 0.0, and values > 1.0 with a human-readable error message.
 
 #### `DedupeStats`
 
-`AtomicU64` fields (10 total):
+`AtomicU64` fields (9 concurrent-write fields, all incremented from rayon workers):
 `walked`, `embedded`, `derive_failed`, `decode_failed`, `infer_failed`,
-`file_missing`, `content_changed`, `catalog_inconsistency`, `cluster_write_failed`,
-`cluster_count` (plain u64, set after Phase 2).
+`file_missing`, `content_changed`, `catalog_inconsistency`, `cluster_write_failed`.
 
 Note: `already_embedded` is **not** a per-photo counter here. Within a single dedup process,
 `unembedded_rows` returns unique rows (photos.id is PK), so `AlreadyEmbedded` returned by
 `insert_embedding` always indicates an inter-process race → `catalog_inconsistency`.
-If a "photos already embedded at session start" count is needed for UX, compute it as
-`total_photos - unembedded_rows.len()` as a local before the walk.
 
-`cluster_count` and `singletons` are computed after Phase 2 from the `ClusteringResult`
-struct returned by `threshold_cluster` (see algorithm spec below).
+`cluster_count` and `singleton_count` are NOT fields of `DedupeStats`. They come from
+`ClusteringResult` returned by `threshold_cluster` and are used as local `u64` variables
+in `run_dedup` after Phase 2. Storing them in `DedupeStats` would require special handling
+(`Arc::get_mut` or interior mutability) since the Arc is still live after Phase 1.
 
-Summary line format (stderr):
+Summary line format (stderr) — values mixed from `Arc<DedupeStats>` and post-Phase-2 locals:
 ```
 walked: N, embedded: N, derive-failed: N, decode-failed: N, infer-failed: N,
 file-missing: N, content-changed: N, catalog-inconsistency: N,
@@ -398,7 +397,8 @@ Phase 2 — Cluster (sequential, after Phase 1 completes):
     match Catalog::insert_dup_cluster(photo_id, MODEL_SLUG, cluster_id, threshold, now):
       Ok(()) => {}
       Err(e) => { WARN(...); cluster_write_failed++ }
-  stats.cluster_count = result.cluster_count (plain u64; Phase 2 is sequential)
+  cluster_count = result.cluster_count   // local u64; not in DedupeStats
+  singletons = result.singleton_count   // local u64; not in DedupeStats
 
 Print summary to stderr.
 ```
@@ -410,6 +410,9 @@ being dissimilar. This is the v0.1 choice — near-duplicate chains are transiti
 TD-017's DBSCAN upgrade addresses this if users report confusing cross-cluster groupings.
 
 #### `threshold_cluster` algorithm
+
+`ClusteringResult` is a `pub(crate)` struct in `crates/photohelper-cli/src/commands/dedup.rs`:
+`{ assignments: Vec<(PhotoId, i64)>, cluster_count: usize, singleton_count: usize }`.
 
 ```
 Input: &[(PhotoId, ImageEmbedding)], threshold: f32
@@ -447,7 +450,9 @@ TD-016 binding trigger fires → **D4 (heartbeat.rs extraction) MUST land this s
 
 - 0: success (no per-photo errors; clustering may be incomplete if cluster_write_failed > 0
   but that is not a per-photo error).
-- 1 (EX_STRICT_FAIL): `--strict` + any per-photo error counter > 0.
+- 1 (EX_STRICT_FAIL): `--strict` + any Phase-1 per-photo error counter > 0.
+  **Note**: `cluster_write_failed > 0` does NOT trigger EX_STRICT_FAIL — cluster-insert
+  errors are Phase-2 write failures, not per-photo embedding errors.
 - 64 (EX_USAGE): unembedded_rows returned rows, but `embedded == 0 AND all_per_photo_errors == 0`
   (likely wrong catalog path or model-slug mismatch — "nothing useful happened").
 - 69 (EX_UNAVAILABLE): model file not found (same as other stubs).
@@ -545,7 +550,7 @@ Close TD-010 when both tests are green.
 |---|---|---|
 | D1a ImageEmbedding | 6 | from_raw happy, empty rejects, norm+NaN+Inf rejects, cosine_similarity happy, cosine_similarity dim-mismatch, from_f32_le_bytes round-trip |
 | D1c MobileClip | 3 | embed on CC0 fixture (dim + norm assert), golden cosine_sim vs committed vector (≥0.999 arm64; ≥0.98 x86_64), EmbeddingZeroVector error path |
-| D2a schema v3 | 4 | migration idempotent v2→v3, migration chain v1→v3, FK enforcement (dup_clusters with nonexistent embedding rejects), schema_version_too_new gate |
+| D2a schema v3 | 4 | migration idempotent v2→v3, migration chain v1→v3, FK enforcement (insert into dup_clusters with nonexistent embedding → `SqliteError { code: ConstraintViolation }` — requires PRAGMA foreign_keys=ON already set by Catalog::open), schema_version_too_new gate |
 | D2b catalog API | 5 | insert_embedding, all_embeddings round-trip, unembedded_rows filter, insert_dup_cluster (replace), AlreadyEmbedded→catalog_inconsistency |
 | D3 dedup | 5 | e2e (with summary-line assertions), idempotency, strict-mode, threshold=1.0→all-singletons, empty-catalog→exit0 |
 | D4 TD-010 remaining | 2 | build_global WARN, heartbeat-death-WARN in-process |
@@ -614,7 +619,7 @@ D2c sub-component review R1 → remediate → R2
     ↓
 D3 (dedup subcommand + threshold_cluster + tests)
     ↓
-D4 (heartbeat.rs extraction + TD-010 close; conditional on D3 trigger, expected to fire)
+D4 (heartbeat.rs extraction + TD-010 close — mandatory)
     ↓
 D5 (ledger updates)
     ↓
