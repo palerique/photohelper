@@ -202,7 +202,7 @@
 - **Why it matters**: When MobileCLIP (or an alternative embedding model) arrives in session 04+, the schema design can be done correctly with the consumer's actual shape known. A premature schema must be migrated again (v3+), wasting a migration slot. Session 03 ships only `cull_scores` in v2.
 - **Owner**: session 04+ that adds the MobileCLIP producer. That session's plan MUST include: embedding table schema (`model_slug TEXT`, `dim INTEGER`, `quantization TEXT`, `embedding BLOB`), dimension validation at insert time, `dup_clusters` table for group assignment (separate from per-photo embeddings), and `v2→v3` migration.
 - **Binding trigger**: **Escalated (2026-05-29)**: user explicitly requested dedup feature for a future session. Session 05 is the target. Session 05's plan MUST include MobileCLIP dup-detection as a primary deliverable. If session 05 scope is too large, scope to session 06 with explicit acknowledgment.
-- **Status**: open — escalated to session 05 target. Schema design deferred correctly (consumer-first approach).
+- **Status**: **CLOSED** — session 05 (2026-05-29). Dedup pipeline shipped: CLIP ViT-B/32 LAION2B int8 embeddings (dim=512, MIT license), `embeddings` + `dup_clusters` schema v3 tables, `apply_v2_to_v3` migration, `dedup` CLI subcommand with union-find `threshold_cluster`, `photohelper-dedup.sh` script. All shape requirements (model_slug, dim, quantization, embedding BLOB, FK enforcement) met in session 05 D2a+D2b+D3. MobileCLIP direct use not needed — CLIP ViT-B/32 substituted (MobileCLIP `apple-amlr` license blocks use; see DN-028).
 
 ### DN-025 — NIMA cross-platform score tolerance (apple-silicon vs Linux x86_64) (2026-05-28, session 03)
 
