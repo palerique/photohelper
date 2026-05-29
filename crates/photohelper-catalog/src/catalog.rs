@@ -752,7 +752,14 @@ impl Catalog {
                         )),
                     })?;
             let photo_id = photohelper_core::catalog_glue::photo_id_from_row_bytes(id_arr);
-            out.push((photo_id, embedding, dim_i64 as usize));
+            let dim = usize::try_from(dim_i64).map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("embeddings.dim value {dim_i64} is out of usize range: {e}"),
+                )),
+            })?;
+            out.push((photo_id, embedding, dim));
         }
         Ok(out)
     }
@@ -1574,6 +1581,24 @@ mod tests {
             cluster_id, 7,
             "INSERT OR REPLACE must overwrite previous assignment"
         );
+        // Verify other columns were also replaced (not just cluster_id).
+        let (threshold, clustered_at): (f64, i64) = conn
+            .query_row(
+                "SELECT similarity_threshold, clustered_at_unix_seconds \
+                 FROM dup_clusters WHERE photo_id = ?1 AND model_slug = ?2",
+                rusqlite::params![p1.photo_id().as_bytes().to_vec(), "clip-v1"],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        // 0.90_f32 cast to f64 is 0.8999999761581421; use f32 epsilon tolerance.
+        assert!(
+            (threshold - f64::from(0.90_f32)).abs() < f64::EPSILON,
+            "similarity_threshold must be replaced to 0.90 (f32), got {threshold}"
+        );
+        assert_eq!(
+            clustered_at, 3000,
+            "clustered_at_unix_seconds must be replaced to 3000"
+        );
     }
 
     #[test]
@@ -1592,6 +1617,31 @@ mod tests {
             matches!(err, Error::CatalogInsert { .. }),
             "dim=0 must return CatalogInsert, not AlreadyEmbedded"
         );
+    }
+
+    #[test]
+    fn insert_embedding_dim_bounds_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("bounds.db"), 1).unwrap();
+        let photo = make_test_photo(dir.path(), 1);
+        cat.upsert(&photo, 0).unwrap();
+        let pid = photo.photo_id();
+
+        // dim=65537 (above upper bound) must also be caught.
+        let err = cat
+            .insert_embedding(pid, "clip-v1", &make_unit_embedding_bytes(512), 65537, 1000)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogInsert { .. }),
+            "dim=65537 must return CatalogInsert, got {err:?}"
+        );
+
+        // dim=65536 (at upper bound) must succeed.
+        let large_emb = make_unit_embedding_bytes(65536);
+        let out = cat
+            .insert_embedding(pid, "clip-v1", &large_emb, 65536, 1000)
+            .unwrap();
+        assert_eq!(out, InsertEmbeddingOutcome::Inserted);
     }
 
     #[test]
