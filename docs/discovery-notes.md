@@ -170,7 +170,7 @@
 - **Why it matters**: Operators run these to see what's available and get a stale promise. Trust erodes.
 - **Owner**: session 03's first chore commit. One-line edit per stub source file — drop "planned for session 02" or replace with "not yet implemented; see SESSION-STATE.md for the current roadmap".
 - **Binding trigger**: session 03 session-start sweep — the SESSION-STATE.md Goal block surfaces this as a quick-win first-commit candidate.
-- **Status**: **CLOSED** — session 03 D6 commit (`chore(cli): refresh stub-subcommand messages (closes DN-020)`). `stub()` rewritten to emit `"not yet implemented in v0.1 (ingest + cull only); see README.md for the current scope."`. `planned_in` parameter removed; 6 call sites updated; test assertions tightened to the new wording; negative test added confirming `cull --help` does not show the stub message.
+- **Status**: **CLOSED** — session 03 D6 commit (`chore(cli): refresh stub-subcommand messages (closes DN-020)`). `stub()` rewritten (final wording after R1 review T-H remediation): `"not yet implemented in v0.1 (ingest only); see README.md for the current scope."` (`"ingest + cull only"` was the D6 draft; corrected to `"ingest only"` in R1 remediation because `cull` is also a stub). `planned_in` parameter removed; 6 call sites updated; test assertions tightened to the new wording; negative test added confirming `cull --help` does not show the stub message.
 
 ### DN-021 — Two-shell PATH drift footgun: scripts merged on `main` but invisible to a separate terminal session that hasn't pulled (2026-05-28, session 02.5)
 

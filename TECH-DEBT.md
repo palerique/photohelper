@@ -256,9 +256,9 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-015 — `--model-path` power-user override dropped from v0.1
 
-- **Status**: Open
+- **Status**: Open (prospective — `cull.rs` not yet created; D4 deferred due to D0 ABORT + DN-026)
 - **Opened**: 2026-05-28 (session 3, D1b plan-review R1 remediation — PR1-T27)
-- **Stop-gap location**: `crates/photohelper-cli/src/commands/cull.rs` clap subcommand definition @ session 03 D4 commit — `--model-path` flag absent. In-source comment on the clap definition: `// TD-015: --model-path deferred; requires --model-sha256 companion`.
+- **Stop-gap location**: Prospective — `crates/photohelper-cli/src/commands/cull.rs` will be the stop-gap location when D4 lands. The file does not exist yet (session 03 D0 ABORTed before D4 was implemented). This TD becomes actionable when DN-026 is resolved and the AI culling pipeline (D1–D4) is implemented in a future session.
 - **Fundamental fix**: add `--model-path <path>` + `--model-sha256 <hex>` CLI flags to `cull`. `VerifiedModelBytes::from_path_with_sha256(path, expected_sha256)` constructor validates user-supplied models. Both flags must be provided together (model without SHA = unverified; reject). Update `ModelRegistry::load_from_path_with_sha256`.
 - **Binding trigger**: first user request to supply a custom NIMA model (e.g. a fine-tuned model or a different aesthetic scorer) OR before v0.2 if power-user workflows are anticipated.
 - **Scope estimate**: ~50 LoC (new constructor + CLI flag pair + validation + tests) / low risk (the verification architecture already handles this via `VerifiedModelBytes`).
@@ -269,9 +269,9 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-016 — `HeartbeatStop` + `heartbeat_loop` duplicated in `cull.rs`
 
-- **Status**: Open
+- **Status**: Open (prospective — `cull.rs` not yet created; D4 deferred due to D0 ABORT + DN-026)
 - **Opened**: 2026-05-28 (session 3, D4 plan-review R1 remediation — PR1-T33)
-- **Stop-gap location**: `crates/photohelper-cli/src/commands/cull.rs` @ session 03 D4 commit (duplicate of `ingest.rs::HeartbeatStop` + `heartbeat_loop`). In-source: `// TD-016: heartbeat duplicated; factor at third subcommand`.
+- **Stop-gap location**: Prospective — `crates/photohelper-cli/src/commands/cull.rs` will carry the duplicate when D4 lands. The file does not exist yet (session 03 D0 ABORTed before D4 was implemented). This TD becomes actionable when the AI culling pipeline is implemented in a future session.
 - **Fundamental fix**: extract `HeartbeatStop`, `HeartbeatHandle`, and `heartbeat_loop` into a `crates/photohelper-cli/src/heartbeat.rs` module. Both `ingest.rs` and `cull.rs` import from that module. The module is `pub(crate)`. If the `develop` or `export` subcommand (session 04–05) also needs a heartbeat, that is the trigger for the refactor.
 - **Binding trigger**: session that adds a heartbeat to the `develop`, `export`, or `run` subcommand. Three consumers is the threshold for extracting the abstraction (CLAUDE.md "Three similar lines is better than a premature abstraction").
 - **Scope estimate**: ~30 LoC (new module + two import updates) / zero risk.
