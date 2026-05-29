@@ -14,3 +14,18 @@ opset        = 13
 sha256       = "f181fa8911dad2c4d5c8fbced3056c30b617d12b00cd411fd40eecd047752228"
 converted_by = "tf2onnx (Apache-2.0)"
 license      = "Apache-2.0"        # derivative of Apache-2.0 source
+
+[clip_vit_b32_laion2b]
+filename         = "clip_vit_b32_laion2b_int8.onnx"
+source_repo      = "https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+source_license   = "MIT"
+architecture     = "CLIP ViT-B/32 visual encoder, int8-quantized (L2-normalized output)"
+training_data    = "LAION-2B (34B samples seen, b79K batch size)"
+input_shape      = [1, 3, 224, 224]   # NCHW; CLIP-standard normalization (see ANL-003)
+output_shape     = [1, 512]            # L2-normalized 512-dim embedding
+opset            = 18                  # produced by torch 2.12.0; onnxruntime quantization applied post-export
+quantization     = "dynamic int8 (QUInt8, per_channel=false, onnxruntime.quantization)"
+sha256           = "09361948663aa58d62cdaee26c291e913d6d87c35b199c15115aeb4f6c1bd508"
+converted_by     = "open_clip (MIT) + torch.onnx.export + onnxruntime.quantization; see scripts/convert-clip-to-onnx.sh"
+license          = "MIT"               # derivative of MIT source
+converted_at     = "2026-05-29"

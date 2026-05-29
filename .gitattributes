@@ -1,3 +1,4 @@
 *.CR3 filter=lfs diff=lfs merge=lfs -text
 *.cr3 filter=lfs diff=lfs merge=lfs -text
 crates/photohelper-ai/models/*.onnx filter=lfs diff=lfs merge=lfs -text
+*.onnx filter=lfs diff=lfs merge=lfs -text
