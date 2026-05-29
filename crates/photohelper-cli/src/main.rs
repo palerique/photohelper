@@ -61,19 +61,19 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
-    /// Walk a directory + catalog RAW photos. Real work this session.
+    /// Walk a directory + catalog RAW photos.
     Ingest(IngestArgs),
-    /// AI culling (planned for session 03+).
+    /// AI culling (planned for v0.1; blocked on NIMA model license — see docs/analysis/ANL-002).
     Cull,
-    /// Apply develop settings via XMP sidecars (planned for session 04+).
+    /// Apply develop settings via XMP sidecars (planned for v0.1).
     Develop,
-    /// Export to JPEG with resize + watermark (planned for session 05).
+    /// Export to JPEG with resize + watermark (planned for v0.1).
     Export,
-    /// Run ingest → cull → develop → export (planned for session 06+).
+    /// Run ingest → cull → develop → export (planned for v0.1).
     Run,
-    /// Manage AI model bundles (planned for session 03+).
+    /// Manage AI model bundles (planned for v0.1).
     Models,
-    /// Inspect / list known camera profiles (planned for session 02+).
+    /// Inspect / list known camera profiles (planned for v0.1).
     Camera,
 }
 
@@ -111,17 +111,14 @@ mod exit_code {
 /// ingest path) to the appropriate POSIX exit code.
 fn exit_code_for_error(err: &anyhow::Error) -> u8 {
     use photohelper_core::Error;
-    if let Some(core_err) = err.downcast_ref::<Error>() {
-        match core_err {
+    err.downcast_ref::<Error>()
+        .map_or(exit_code::EX_IOERR, |e| match e {
             Error::CatalogLockHeld { .. } => exit_code::EX_TEMPFAIL,
             Error::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied => {
                 exit_code::EX_NOPERM
             }
             _ => exit_code::EX_IOERR,
-        }
-    } else {
-        exit_code::EX_IOERR
-    }
+        })
 }
 
 fn main() -> ExitCode {
@@ -147,7 +144,7 @@ fn main() -> ExitCode {
 
 fn stub(name: &str) -> ExitCode {
     eprintln!(
-        "photohelper {name}: not yet implemented in v0.1 (ingest + cull only); \
+        "photohelper {name}: not yet implemented in v0.1 (ingest only); \
          see README.md for the current scope."
     );
     ExitCode::from(exit_code::EX_UNAVAILABLE)

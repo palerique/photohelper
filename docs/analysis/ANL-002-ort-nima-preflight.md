@@ -88,7 +88,15 @@ The only candidate has **no stated license**. The ABORT condition fires.
 
 **Finding: `Session::run` is `&mut self` → per-worker `thread_local!` path (plan option b) is CONFIRMED.**
 
-Verified from `pykeio/ort` main branch source (`src/session/mod.rs`):
+Verified from `pykeio/ort` main branch source (`src/session/mod.rs`).
+
+> **Note**: verification is by source-code inspection only. The plan
+> (`docs/plans/session-03.md:125-126`) prescribed an empirical two-rayon-worker
+> spawn test to confirm at runtime. That test was not conducted because the D0
+> ABORT occurred before `Session` construction was possible (no model binary).
+> Source-code inspection is high-confidence (the `&mut self` receiver is
+> unambiguous in the signature) but the empirical verification remains outstanding
+> for the session that resolves D0 and constructs a real `Session`.
 
 ```rust
 pub fn run<'s, 'i, 'v: 'i, const N: usize>(

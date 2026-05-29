@@ -328,7 +328,7 @@ fn stub_subcommands_exit_69_with_not_yet_implemented_message() {
             .arg(name)
             .assert()
             .code(69)
-            .stderr(contains("not yet implemented in v0.1 (ingest + cull only)"));
+            .stderr(contains("not yet implemented in v0.1 (ingest only)"));
     }
 }
 
@@ -769,33 +769,29 @@ fn ingest_wal_checkpoint_warn_fires_on_reopen_with_dirty_wal() {
         .assert()
         .success();
 
-    // Verify the WAL file exists (SQLite in WAL mode creates it on first write).
-    let db_path = dir.path().join(".photohelper").join("catalog.db");
     let wal_path = dir.path().join(".photohelper").join("catalog.db-wal");
 
-    // The WAL may or may not exist (it's checkpointed on close in some SQLite
-    // versions). If it does not exist, skip the reopen WARN test gracefully
-    // since we can't synthesize a dirty WAL without low-level SQLite internals.
+    // SQLite in WAL mode typically checkpoints and truncates the WAL on a clean
+    // connection close. In that common case we cannot synthesize a dirty WAL
+    // from a subprocess test without low-level file surgery (e.g. forcibly
+    // leaving the WAL non-empty by aborting a connection mid-write).
+    // This test is therefore best-effort: it runs when the WAL is non-empty
+    // after first ingest (uncommon), skips otherwise.
+    // TD: rewrite as an in-process unit test that calls Catalog::open directly
+    // and can control WAL state between opens.
     if !wal_path.exists() || std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0) == 0 {
-        // SQLite fully checkpointed on close — can't reliably test WAL recovery
-        // in a subprocess test without low-level file surgery. Test skipped.
+        // WAL fully checkpointed on close — cannot reliably test recovery here.
+        // This skip is expected on most machines; not a test failure.
         return;
     }
 
-    // Duplicate the WAL by copying it to simulate un-checkpointed frames.
-    // (On a second open, Catalog::open runs PRAGMA wal_checkpoint(TRUNCATE)
-    // which fires the WARN when it recovers > 0 frames.)
-    let wal_backup = dir.path().join(".photohelper").join("catalog.db-wal.bak");
-    std::fs::copy(&wal_path, &wal_backup).unwrap();
-
-    // Second ingest: should WARN about recovered WAL frames.
-    // The WARN text includes "wal_checkpoint" per the catalog source.
+    // Second ingest: if we reach here, the WAL has non-zero frames.
+    // catalog.rs emits: tracing::warn!("previous shutdown was unclean; recovered
+    // {recovered} WAL frames") — assert on that actual message text.
     Command::cargo_bin("photohelper")
         .unwrap()
         .args(["ingest", dir.path().to_str().unwrap()])
         .assert()
         .success()
-        .stderr(contains("wal_checkpoint"));
-
-    drop(db_path);
+        .stderr(contains("previous shutdown was unclean"));
 }

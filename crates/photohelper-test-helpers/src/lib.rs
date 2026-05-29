@@ -99,9 +99,9 @@ impl Drop for HeartbeatDeathTrigger {
     fn drop(&mut self) {
         // Signal and join if not already done, so the test-runner doesn't leak
         // threads even if the test panics before calling `.join()`.
-        if self.handle.is_some() {
+        if let Some(handle) = self.handle.take() {
             self.flag.store(true, Ordering::Relaxed);
-            let _ = self.handle.take().unwrap().join();
+            let _ = handle.join();
         }
     }
 }

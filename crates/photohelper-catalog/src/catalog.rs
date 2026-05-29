@@ -19,9 +19,9 @@ use crate::schema::{INIT_SQL, SCHEMA_VERSION};
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
-/// 13-column INSERT used by both the `Inserted` and `SupersededPrevious`
-/// arms of `Catalog::upsert`. Extracted in R1.T14 to eliminate duplicate-
-/// statement drift risk.
+/// 14-column INSERT (13 bound params + `superseded_at` hardcoded NULL) used by
+/// both the `Inserted` and `SupersededPrevious` arms of `Catalog::upsert`.
+/// Extracted in R1.T14 to eliminate duplicate-statement drift risk.
 const INSERT_PHOTO_SQL: &str = "INSERT INTO photos (
     id, source_path, file_size, mtime_unix_seconds,
     mtime_anomalous, make, model, camera_slug,
@@ -31,7 +31,8 @@ const INSERT_PHOTO_SQL: &str = "INSERT INTO photos (
 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)";
 
 /// Production lock-retry delay between attempts. Tests override via the
-/// public-but-`#[cfg(test)]`-only `with_retry_delay` constructor helper.
+/// `#[doc(hidden)]` `open_with_retry_delay` constructor (not `#[cfg(test)]`-gated;
+/// `#[doc(hidden)]` discourages but does not prevent production use).
 const LOCK_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// Outcome of [`Catalog::upsert`] for an `IngestStats` driver.
@@ -84,8 +85,9 @@ impl Catalog {
         Self::open_with_retry_delay(catalog_path, lock_timeout_seconds, LOCK_RETRY_DELAY)
     }
 
-    /// Test-only constructor allowing a shorter retry delay. Behind
-    /// `#[doc(hidden)]` to discourage production callers.
+    /// Lower-level constructor exposing `retry_delay` for test control.
+    /// `#[doc(hidden)]` discourages (but does not prevent) production callers;
+    /// this method is NOT `#[cfg(test)]`-gated and compiles in all profiles.
     #[doc(hidden)]
     pub fn open_with_retry_delay(
         catalog_path: impl AsRef<Path>,
@@ -300,14 +302,15 @@ impl Catalog {
             Err(poisoned) => {
                 let conn = poisoned.into_inner();
                 // ROLLBACK any open transaction left by the panicked worker.
-                // ApiMisuse (SQLITE_MISUSE) and "no transaction is active" both
-                // indicate no work to undo — ignore. Any other error is unexpected
-                // and propagated so the caller can log it.
+                // SQLITE_ERROR (extended_code 1) is returned with "cannot rollback -
+                // no transaction is active" when the panicked worker held the lock but
+                // had no open transaction — nothing to undo, safe to ignore.
+                // Note: plan v4 cited ApiMisuse (SQLITE_MISUSE = 21) here but empirical
+                // testing showed SQLite returns SQLITE_ERROR (rc=1) for this case.
                 match conn.execute("ROLLBACK", []) {
                     Ok(_) => {}
-                    // extended_code 1 = SQLITE_ERROR; SQLite returns this with the
-                    // message "cannot rollback - no transaction is active" when
-                    // the panicked worker held the lock but had no open txn.
+                    // extended_code 1 = SQLITE_ERROR (not SQLITE_MISUSE/21);
+                    // the message is "cannot rollback - no transaction is active".
                     Err(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == 1 => {}
                     Err(e) => {
                         return Err(Error::CatalogTransaction {
@@ -376,7 +379,7 @@ impl Catalog {
         let file_size_i64 = i64::try_from(photo.file_size()).unwrap_or(i64::MAX);
 
         // R1.T14 fix: single insert call used by both branches —
-        // previously this was a 13-column INSERT duplicated twice
+        // previously this was a 14-column INSERT duplicated twice
         // (drift risk on every schema change). The closure captures
         // the per-call parameter bindings.
         let do_insert = |tx: &rusqlite::Transaction<'_>| -> Result<(), Error> {
@@ -610,7 +613,9 @@ mod tests {
     #[test]
     fn poison_rollback_discards_panicked_workers_partial_insert() {
         // D5b fix: ROLLBACK after poison with no open txn must NOT propagate an error
-        // (ApiMisuse arm), so upsert returns CatalogPoisoned, not CatalogTransaction.
+        // (SQLITE_ERROR / extended_code 1 arm), so upsert returns CatalogPoisoned, not
+        // CatalogTransaction. (Plan v4 cited ApiMisuse/SQLITE_MISUSE=21; empirical test
+        // showed SQLite returns SQLITE_ERROR=1 for "no transaction is active".)
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("c.db");
         let cat = Arc::new(Catalog::open(&db_path, 1).unwrap());

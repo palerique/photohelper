@@ -235,6 +235,10 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
     // Joining also reaps the detached thread that previously leaked once
     // per `run_ingest` call.
     stop.signal();
+    // join() flushes the final heartbeat line before the summary. The Result is
+    // Ok(()) on normal exit or Err(panicked) if the thread died — early death is
+    // already surfaced by the is_finished() WARN above; discarding the join result
+    // here is intentional.
     let _ = heartbeat_handle.join();
 
     eprintln!("{}", stats.summary_line());
