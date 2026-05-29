@@ -47,7 +47,7 @@ impl ImageEmbedding {
     #[must_use]
     #[allow(
         dead_code,
-        reason = "used by mobileclip.rs (D1c) and dedup.rs (D3), not yet written"
+        reason = "called only by tests; will be used by dedup.rs (threshold_cluster, D3) — not yet implemented"
     )]
     pub(crate) fn as_slice(&self) -> &[f32] {
         &self.0

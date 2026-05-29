@@ -53,6 +53,14 @@ pub struct MobileClip {
 
 static_assertions::assert_impl_all!(MobileClip: Send, Sync);
 
+impl std::fmt::Debug for MobileClip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MobileClip")
+            .field("bytes_len", &self.bytes.len())
+            .finish()
+    }
+}
+
 impl MobileClip {
     /// Construct from verified CLIP model bytes.
     pub fn new(model: &VerifiedModelBytes) -> Self {
