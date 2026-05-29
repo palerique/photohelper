@@ -299,6 +299,39 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-019 — No per-dedup-run audit trail (`dedup_runs` table absent from v3 schema)
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 05, D2a — `dup_clusters` schema)
+- **Stop-gap location**: `crates/photohelper-catalog/src/schema.rs` (`MIGRATE_V2_TO_V3_SQL`) +
+  `crates/photohelper-catalog/src/catalog.rs` (future `insert_dup_cluster`) @ session 05 D2a commit.
+  In-source: `// TD-019: per-cull-run audit trail absent` (analogous comment to TD-013 in insert_cull_score).
+- **Fundamental fix**: add a `dedup_runs` table analogous to the planned `cull_runs` (TD-013):
+  ```sql
+  CREATE TABLE IF NOT EXISTS dedup_runs (
+      id INTEGER PRIMARY KEY,
+      model_slug TEXT NOT NULL,
+      similarity_threshold REAL NOT NULL,
+      started_at_unix_seconds INTEGER NOT NULL,
+      finished_at_unix_seconds INTEGER,
+      cluster_count INTEGER,
+      singleton_count INTEGER
+  );
+  ```
+  Move `similarity_threshold` from `dup_clusters` (per-row stop-gap) into `dedup_runs`.
+  Add `dedup_run_id INTEGER REFERENCES dedup_runs(id)` to `dup_clusters`.
+  Requires a v3→v4 migration (add `dedup_runs`; add `dedup_run_id` to `dup_clusters`).
+- **Binding trigger**: first user report "I ran dedup twice, what changed between runs?" OR
+  before v0.3 (when dedup is expected to be a recurring workflow). Mirrors TD-013 trigger timing.
+- **Scope estimate**: ~80 LoC (`dedup_runs` table + `dedup_run_id` FK + `run_dedup` transaction
+  wrapping + query path extension + tests + v3→v4 migration) / medium risk.
+- **Consequence of inaction**: users running dedup repeatedly cannot compare run outcomes or
+  trace which model version + threshold produced which cluster assignment. v0.1 single-run
+  assumption is codified in the schema; changing it later requires a migration.
+- **Related**: TD-013 (analogous cull-run audit trail gap); `docs/decisions/0003-catalog-schema-v3.md`.
+
+---
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).

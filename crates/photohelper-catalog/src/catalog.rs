@@ -15,7 +15,7 @@ use photohelper_core::Error;
 use photohelper_core::model::{AbsPath, Photo, PhotoId};
 
 use crate::row::{CullRow, PhotoRow, SELECT_ALL_COLUMNS, insert_error};
-use crate::schema::{INIT_SQL, MIGRATE_V1_TO_V2_SQL, SCHEMA_VERSION};
+use crate::schema::{INIT_SQL, MIGRATE_V1_TO_V2_SQL, MIGRATE_V2_TO_V3_SQL, SCHEMA_VERSION};
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
@@ -220,9 +220,10 @@ impl Catalog {
             "PRAGMA journal_mode = WAL",
             "PRAGMA synchronous = NORMAL",
             "PRAGMA busy_timeout = 5000",
-            // Enable FK enforcement so `cull_scores.photo_id` REFERENCES
-            // `photos(id)` is actually checked at INSERT time (per D2a
-            // and `docs/decisions/0002-catalog-schema-v2.md`).
+            // Enable FK enforcement so `cull_scores.photo_id` REFERENCES `photos(id)`,
+            // `embeddings.photo_id` REFERENCES `photos(id)`, and
+            // `dup_clusters.(photo_id, model_slug)` REFERENCES `embeddings(photo_id, model_slug)`
+            // are all enforced at INSERT time.
             "PRAGMA foreign_keys = ON",
         ] {
             conn.execute_batch(pragma).map_err(|e| Error::CatalogOpen {
@@ -240,12 +241,9 @@ impl Catalog {
             })?;
         match user_version {
             0 => {
-                // Fresh DB: run v1 init then immediately apply v1→v2
-                // migration so new catalogs start at SCHEMA_VERSION
-                // without an intermediate state.
-                // R2-T8 fix: use IMMEDIATE so init takes the RESERVED
-                // lock up-front (file-lock already serialises openers,
-                // but IMMEDIATE makes the SQLite-level intent explicit).
+                // Fresh DB: run v1 init then chain both migrations so new
+                // catalogs start at SCHEMA_VERSION without intermediate states.
+                // R2-T8 fix: use IMMEDIATE so init takes the RESERVED lock up-front.
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(|e| Error::CatalogOpen {
@@ -261,9 +259,14 @@ impl Catalog {
                     source: Box::new(e),
                 })?;
                 apply_v1_to_v2(&mut conn, catalog_path)?;
+                apply_v2_to_v3(&mut conn, catalog_path)?;
             }
             1 => {
                 apply_v1_to_v2(&mut conn, catalog_path)?;
+                apply_v2_to_v3(&mut conn, catalog_path)?;
+            }
+            2 => {
+                apply_v2_to_v3(&mut conn, catalog_path)?;
             }
             v if v == SCHEMA_VERSION => {}
             other => {
@@ -659,6 +662,27 @@ fn apply_v1_to_v2(conn: &mut Connection, path: &Path) -> Result<(), Error> {
     })
 }
 
+/// Apply the v2 → v3 schema migration: add `embeddings` and `dup_clusters` tables,
+/// then set `PRAGMA user_version = 3`. Wrapped in `BEGIN IMMEDIATE` matching the
+/// v1→v2 convention; `CREATE TABLE IF NOT EXISTS` makes the DDL idempotent.
+fn apply_v2_to_v3(conn: &mut Connection, path: &Path) -> Result<(), Error> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| Error::CatalogOpen {
+            path: path.to_path_buf(),
+            source: Box::new(e),
+        })?;
+    tx.execute_batch(MIGRATE_V2_TO_V3_SQL)
+        .map_err(|e| Error::CatalogOpen {
+            path: path.to_path_buf(),
+            source: Box::new(e),
+        })?;
+    tx.commit().map_err(|e| Error::CatalogOpen {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })
+}
+
 /// Test-only extension methods (D5a — `poison_for_testing` knob).
 #[cfg(test)]
 impl Catalog {
@@ -773,7 +797,7 @@ mod tests {
         let cat = dir.path().join("fresh.db");
         let c = Catalog::open(&cat, 1).unwrap();
         let conn = c.conn.lock().unwrap();
-        // Fresh catalog must be at SCHEMA_VERSION = 2.
+        // Fresh catalog must be at SCHEMA_VERSION = 3.
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
@@ -792,7 +816,20 @@ mod tests {
             .unwrap();
         assert_eq!(
             count, 1,
-            "cull_scores table must be present in a fresh v2 DB"
+            "cull_scores table must be present in a fresh v3 DB"
+        );
+        // embeddings table must exist (created by MIGRATE_V2_TO_V3_SQL).
+        let count2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='embeddings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count2, 1,
+            "embeddings table must be present in a fresh v3 DB"
         );
     }
 
@@ -926,6 +963,123 @@ mod tests {
     // D2b: cull_scores integration tests
     // =========================================================
 
+    // =========================================================
+    // D2a: schema v3 migration tests
+    // =========================================================
+
+    #[test]
+    fn migration_v2_to_v3_is_idempotent() {
+        // Build a v2 DB, open twice — second open must not fail or change version.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v2.db");
+        {
+            // Create a v2 DB manually (INIT_SQL → user_version=1, then v1→v2).
+            let mut conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(crate::schema::INIT_SQL).unwrap();
+            apply_v1_to_v2(&mut conn, &db_path).unwrap();
+        }
+        // First open: applies v2→v3 migration. Drop the catalog (releases lock)
+        // before the second open — two concurrent opens would deadlock on the lock.
+        drop(Catalog::open(&db_path, 1).unwrap());
+        // Second open: v3 already; must succeed with no error.
+        let cat2 = Catalog::open(&db_path, 1).unwrap();
+        let conn = cat2.conn.lock().unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "second open must keep version at SCHEMA_VERSION"
+        );
+        // Both tables must exist.
+        for table in &["embeddings", "dup_clusters"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{table} must be present after idempotent v2→v3");
+        }
+    }
+
+    #[test]
+    fn migration_chain_v1_to_v3() {
+        // Build a v1 DB and verify opening upgrades all the way to v3.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v1chain.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(crate::schema::INIT_SQL).unwrap();
+        }
+        let cat = Catalog::open(&db_path, 1).unwrap();
+        let conn = cat.conn.lock().unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "v1 DB must chain migrate to SCHEMA_VERSION"
+        );
+        // All three tables (photos, cull_scores, embeddings) must exist.
+        for table in &["photos", "cull_scores", "embeddings", "dup_clusters"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "{table} must be present after v1→v3 chain migration"
+            );
+        }
+    }
+
+    #[test]
+    fn dup_clusters_fk_violation_rejects_nonexistent_embedding() {
+        // Verify PRAGMA foreign_keys = ON enforces dup_clusters → embeddings FK.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("fk.db");
+        let cat = Catalog::open(&db_path, 1).unwrap();
+        let conn = cat.conn.lock().unwrap();
+        // Insert a valid photo.
+        let fake_photo_id = [0xAAu8; 32];
+        conn.execute(
+            "INSERT INTO photos (id, source_path, file_size, mtime_unix_seconds, \
+             mtime_anomalous, ingested_at_unix_seconds) VALUES (?1, '/tmp/x.cr3', 1000, 1000, 0, 1000)",
+            rusqlite::params![fake_photo_id.to_vec()],
+        )
+        .unwrap();
+        // Attempting to insert into dup_clusters without a matching embeddings row
+        // must fail with a FK violation (SqliteFailure with ConstraintViolation).
+        let res = conn.execute(
+            "INSERT INTO dup_clusters (photo_id, model_slug, cluster_id, similarity_threshold, \
+             clustered_at_unix_seconds) VALUES (?1, 'clip-v1', 0, 0.95, 1000)",
+            rusqlite::params![fake_photo_id.to_vec()],
+        );
+        assert!(
+            res.is_err(),
+            "FK violation: dup_clusters insert without matching embeddings must fail"
+        );
+        let err = res.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error {
+                        code: rusqlite::ffi::ErrorCode::ConstraintViolation,
+                        ..
+                    },
+                    _
+                )
+            ),
+            "expected ConstraintViolation FK error, got: {err:?}"
+        );
+    }
+
     #[test]
     fn migration_v1_to_v2_upgrades_and_enforces_fk() {
         // Build a v1 DB (user_version = 1, only photos table).
@@ -943,7 +1097,7 @@ mod tests {
             let v: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(v, SCHEMA_VERSION, "catalog must upgrade v1 DB to v2");
+            assert_eq!(v, SCHEMA_VERSION, "catalog must upgrade v1 DB to v3");
         }
 
         // Insert a photos row so we have a valid photo_id for the FK.
