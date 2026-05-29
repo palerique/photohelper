@@ -183,7 +183,8 @@ The v1 plan's `NimaInferenceCause` name was a plan-level inconsistency (PR1-T22)
   `[1.0, 10.0]`. All-zeros softmax → weighted-mean = NaN → caught here → `Err`.
   Note: this case is intentional (degenerate model output is not a valid score).
 - `from_catalog_f64(v: f64) -> Result<Self, Error>`: saturating cast to `f32`;
-  WARN via `tracing::warn!` if `(v as f32 - v as f32).abs() > 1e-6`; then validate
+  WARN via `tracing::warn!` if `((v as f32) as f64 - v).abs() > 1e-6` (round-trip
+  comparison; R2-M1: prior formula `v as f32 - v as f32` was a tautology); then validate
   range. (PR1-T24: needed when reading back scores from `cull_scores.aesthetic_score`)
 - `Ord` via `f32::total_cmp` (sound: NaN rejected at construction)
 - `Copy + Clone + PartialEq + Eq + PartialOrd + Ord`
@@ -209,17 +210,29 @@ The v1 plan's `NimaInferenceCause` name was a plan-level inconsistency (PR1-T22)
                  Err(e) => return Err(Error::ModelLoad { source: Box::new(e) }),
              }
          }
-         let sess = guard.as_mut().unwrap(); // safe: just inserted
+         // R2-M3: unwrap_used lint requires explicit allow at this site.
+         // SAFETY(unwrap): guard is Some here — the if-is_none block above either
+         // sets *guard = Some(_) or returns Err, so this branch is only reached
+         // when guard is guaranteed Some.
+         #[allow(clippy::unwrap_used, reason = "guard proven Some by if-is_none branch")]
+         let sess = guard.as_mut().unwrap();
          sess.run([input])
              .map_err(|e| Error::InferenceFailed { path: self.path.clone(), source: Box::new(e) })
      })
      ```
      Construction failure propagates as `Err(ModelLoad)`; `thread_local!` slot
-     stays `None` so next photo retries. The `unwrap()` on line 7 is safe because
-     the `if guard.is_none()` branch always sets `Some(_)` or returns `Err`.
+     stays `None` so next photo retries. The `#[allow(clippy::unwrap_used)]` is
+     required to pass `just lint` (workspace `unwrap_used = warn`, CI `-D warnings`).
   5. Extract 10-class softmax output; compute `sum((i+1.0) * p[i] for i in 0..10)`
   6. `NimaScore::from_f32(mean)` → surface validation error as `InferenceFailed`
+- `pub const MODEL_SLUG: &str = "nima-aesthetic-v1"` at crate root (R2-M4)
 - `static_assertions::assert_impl_all!(Nima: Send, Sync)`
+- **Golden vector fixture** (R2-H3): after D0' records actual fixture scores:
+  - Store 10-class softmax as `crates/photohelper-ai/tests/fixtures/nima/golden_{fixture}.f32`
+    (40 bytes raw little-endian `f32` × 10 values)
+  - CI band: `[score - 2.0, score + 2.0]` clamped to `[1.0, 10.0]` (generous for
+    cross-arch FMA drift; tight enough to catch model-loading failures)
+  - Add `just nima-regenerate-golden` recipe: runs D0'-prime script, updates golden files
 - **Sub-component review fires here** (`docs/code-reviews/session-04-photohelper-ai-round{1,2}.md`)
 
 ---
@@ -377,10 +390,10 @@ ORDER BY ingested_at_unix_seconds
 | `already_scored` | `insert_cull_score` returns `AlreadyScored` |
 | `decode_failed` | `read_raw_rgb` returns `Err` |
 | `infer_failed` | `Nima::score` returns `Err` |
-| `file_missing` | `read_raw_rgb` returns `Io { kind: NotFound }` specifically |
+| `file_missing` | Pre-check `!source_path.exists()` before `read_raw_rgb` (R2-H1) |
 | `content_changed` | `PhotoId::derive` re-derivation: `current_id != catalog_id` |
-| `catalog_inconsistency` | `insert_cull_score` FK violation (photo deleted mid-run) |
-| `catalog_written` | `insert_cull_score` returns `Ok(_)` (any outcome) |
+| `catalog_inconsistency` | Any `insert_cull_score` error (R2-H2: no FK-vs-other discrimination) |
+| `catalog_written` | `insert_cull_score` returns `Ok(_)` (any outcome; omitted from summary line as redundant: always = scored + already_scored; R2-L1) |
 | `derive_failed` | `PhotoId::derive` returns `Err` (I/O failure reading file for re-derivation) |
 
 **`run_cull`** pipeline per photo (inside rayon `par_bridge().for_each()`):
@@ -389,18 +402,22 @@ for each CullRow { photo_id, source_path } from unsuperseded_unscored_rows:
 1. Re-derive PhotoId from source_path (PR1-T17: content-change detection restored)
    - Err → derive_failed++; continue
    - Ok(current_id) if current_id != photo_id → content_changed++; continue
-2. read_raw_rgb(source_path)
-   - Err(Io { NotFound }) → file_missing++; continue
+2. Pre-check (R2-H1): if `!source_path.as_ref().exists()` → `file_missing++`; `continue`
+   (photohelper-raw::Error has no Io variant; existence check is the correct pre-filter)
+3. read_raw_rgb(source_path)
    - Err(_) → decode_failed++; continue
-3. Nima::score(rgb)
+4. Nima::score(rgb)
    - Err → infer_failed++; continue
-4. insert_cull_score(photo_id, MODEL_SLUG, score, now())
-   - Err (FK violation) → catalog_inconsistency++; tracing::warn! with source_path
+5. insert_cull_score(photo_id, MODEL_SLUG, score, now())
+   - Err(_) → catalog_inconsistency++; `tracing::warn!(path=%source_path.display(), err=%e, "catalog write failed after inference")` (R2-H2: any insert error maps here; no FK-vs-other discrimination)
    - Ok(Inserted) → scored++; catalog_written++
    - Ok(AlreadyScored) → already_scored++; catalog_written++
 ```
 
-**`MODEL_SLUG`** constant: `"nima-aesthetic-v1"` (matches session-03 plan's scorer placeholder)
+**`MODEL_SLUG`** constant: `pub const MODEL_SLUG: &str = "nima-aesthetic-v1"` defined in
+`photohelper-ai` (as a crate-level constant, NOT in `cull.rs` — R2-M4: the slug ties the
+model binary to its DB identifier and must travel with the model definition when a second
+scorer lands). `cull.rs` imports it from `photohelper_ai::MODEL_SLUG`.
 
 **`--strict` predicate** (PR1-T14): exits non-zero if
 `decode_failed + infer_failed + derive_failed > 0`.
@@ -421,10 +438,21 @@ walked: N, scored: N, already-scored: N, decode-failed: N, infer-failed: N,
 file-missing: N, content-changed: N, catalog-inconsistency: N, derive-failed: N
 ```
 
-**`main.rs` wiring**:
+**`main.rs` wiring** (R2-M2 spec):
 ```rust
 Command::Cull(args) => {
-    let model_dir = /* default: binary-adjacent models/ or env override */;
+    // model_dir: PHOTOHELPER_MODEL_DIR env var if set, else binary-adjacent models/.
+    // current_exe() failure → EX_IOERR. No dir-existence check — from_manifest
+    // returns ManifestNotFound if the directory or file is absent.
+    let model_dir = std::env::var("PHOTOHELPER_MODEL_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.join("models")))
+                .unwrap_or_else(|| std::path::PathBuf::from("models"))
+        });
     match VerifiedModelBytes::from_manifest(&model_dir, "nima_mobilenet_aesthetic") {
         Ok(model) => run_cull(&cli, &args, &model),
         Err(e) => { tracing::error!("{e:#}"); ExitCode::from(exit_code::EX_IOERR) }
@@ -465,11 +493,11 @@ no stub text — remains valid.
 | D1c | `nima_score_out_of_range_rejected` | photohelper-ai unit | `from_f32(-0.1)`, `from_f32(10.1)`, **`from_f32(f32::NAN)`** → `Err` (PR1-T32) |
 | D1c | `nima_scores_cc0_r8_cr3_fixture` | photohelper-ai integration | Apple Silicon: `abs(score - golden) < 1e-3`; Linux x86_64 CI: `score ∈ [band_low, band_high]` per D0' measurements and DN-025 (PR1-T15) |
 | D1e | `read_raw_rgb_cc0_fixture` | photohelper-raw integration | `len == w*h*3` AND mean ∈ (20, 240) AND std_dev > 5 (PR1-T16) |
-| D2a | `catalog_fresh_db_initializes_to_v2` | photohelper-catalog unit | Fresh DB: `PRAGMA user_version = 2`; both tables exist; row insertable in each (PR1-T25) |
+| D2a | `catalog_fresh_db_initializes_to_v2` | photohelper-catalog unit | Fresh DB: `assert_eq!(v, SCHEMA_VERSION)` (NOT hardcoded 2; R2-M5); both tables exist; row insertable in each (PR1-T25) |
 | D2a | `open_schema_version_too_new_returns_error` UPDATE | photohelper-catalog unit | Change from `user_version=2, expected=1` to `user_version=SCHEMA_VERSION+1` (PR1-T19) |
 | D2a | `open_init_idempotent` UPDATE | photohelper-catalog unit | Change `assert_eq!(v, 1)` to `assert_eq!(v, SCHEMA_VERSION)` |
 | D2b | `catalog_v1_to_v2_migration` | photohelper-catalog unit | v1 DB upgrades; photos row survives; cull_scores insertable |
-| D2b | `insert_score_outcome_already_scored` | photohelper-catalog unit | Second `insert_cull_score` same key → `AlreadyScored` (via `changes() == 0`) |
+| D2b | `insert_score_outcome_already_scored` | photohelper-catalog unit | Second `insert_cull_score` same key → `AlreadyScored` (via `changes() == 0`). Setup: direct SQL `INSERT INTO photos (id, ...)` with synthetic 32-byte blob to satisfy FK; R2-L2. |
 | D3 | `cull_scores_real_canon_r8_cr3_fixture` | CLI integration | ingest CC0 fixture → `cull` → 1 row in `cull_scores` with score ∈ [1.0, 10.0] |
 | D3 | `cull_strict_exits_nonzero_on_decode_fail` | CLI integration | Ingest synthetic 0xCC-byte `.cr3` (via `fixture_dir_with_one_cr3`), run `cull --strict`; `read_raw_rgb` fails → `decode_failed > 0` → exit ≠ 0 (PR1-T3) |
 | D3 | `stub_subcommands_exits_69` UPDATE | CLI integration | Remove `"cull"` from iteration list (PR1-T2) |
