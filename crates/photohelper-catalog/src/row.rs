@@ -3,6 +3,8 @@
 //! Column-name knowledge is confined to this module so column reorders
 //! don't silently break positional reads.
 
+use std::path::{Path, PathBuf};
+
 use photohelper_core::Error;
 use photohelper_core::catalog_glue;
 use photohelper_core::model::PhotoId;
@@ -63,6 +65,49 @@ impl PhotoRow {
             ingested_at_unix_seconds: row.get("ingested_at_unix_seconds")?,
             superseded_at_unix_seconds: row.get("superseded_at_unix_seconds")?,
         })
+    }
+}
+
+/// A 2-field projection used by the AI culling pipeline: enough to
+/// re-derive the `PhotoId` and locate the file on disk, without pulling
+/// all 14 columns of `PhotoRow`.
+///
+/// Produced by [`super::Catalog::unsuperseded_unscored_rows`].
+///
+/// `source_path` is the path as canonicalized at ingest time, not re-validated
+/// at query time. The culling pipeline is responsible for per-file existence
+/// checks; keeping the batch-query path free of filesystem calls ensures that
+/// one deleted file cannot abort the entire work list
+/// (Theme-A fix: see `docs/code-reviews/session-04-catalog-migration-round1.md § Theme A`).
+#[derive(Clone, Debug)]
+pub struct CullRow {
+    /// `PhotoId` as stored in the catalog (used for content-change detection
+    /// and as the FK key in `cull_scores`).
+    photo_id: PhotoId,
+    /// Source path as canonicalized at ingest time, not re-validated at query time.
+    /// The file may have been moved or deleted since ingest; callers must check
+    /// existence before opening.
+    source_path: PathBuf,
+}
+
+impl CullRow {
+    /// Construct a `CullRow` from DB-retrieved values. `pub(crate)` keeps
+    /// construction inside the catalog layer.
+    pub(crate) fn new(photo_id: PhotoId, source_path: PathBuf) -> Self {
+        Self {
+            photo_id,
+            source_path,
+        }
+    }
+
+    /// `PhotoId` as stored in the catalog.
+    pub fn photo_id(&self) -> PhotoId {
+        self.photo_id
+    }
+
+    /// Source path as a `&Path` reference.
+    pub fn source_path(&self) -> &Path {
+        &self.source_path
     }
 }
 

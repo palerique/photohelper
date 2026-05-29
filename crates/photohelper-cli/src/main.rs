@@ -25,6 +25,9 @@ use clap::Parser;
 
 mod commands;
 
+use photohelper_ai::{MODEL_MANIFEST_NAME, VerifiedModelBytes};
+
+use commands::cull::{CullArgs, run_cull};
 use commands::ingest::run_ingest;
 
 /// Cross-platform CLI for AI-powered Canon RAW processing.
@@ -63,8 +66,8 @@ struct Cli {
 enum Command {
     /// Walk a directory + catalog RAW photos.
     Ingest(IngestArgs),
-    /// AI culling (planned for v0.1; blocked on NIMA model license — see docs/analysis/ANL-002).
-    Cull,
+    /// AI aesthetic culling via the NIMA model (scores photos in `[1, 10]`).
+    Cull(CullArgs),
     /// Apply develop settings via XMP sidecars (planned for v0.1).
     Develop,
     /// Export to JPEG with resize + watermark (planned for v0.1).
@@ -133,7 +136,36 @@ fn main() -> ExitCode {
                 ExitCode::from(exit_code_for_error(&err))
             }
         },
-        Command::Cull => stub("cull"),
+        Command::Cull(args) => {
+            // model_dir: PHOTOHELPER_MODEL_DIR env var if set, else binary-adjacent models/.
+            // current_exe() failure silently falls back to relative "models/"; EX_IOERR
+            // is returned later if from_manifest then fails at that path.
+            let model_dir = std::env::var("PHOTOHELPER_MODEL_DIR").map_or_else(
+                |_| {
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|p| p.join("models")))
+                        .unwrap_or_else(|| std::path::PathBuf::from("models"))
+                },
+                std::path::PathBuf::from,
+            );
+            match VerifiedModelBytes::from_manifest(&model_dir, MODEL_MANIFEST_NAME) {
+                Ok(model) => {
+                    let model_path = model_dir.join(format!("{MODEL_MANIFEST_NAME}.onnx"));
+                    match run_cull(&cli, args, &model, model_path) {
+                        Ok(code) => ExitCode::from(code),
+                        Err(err) => {
+                            tracing::error!("{err:#}");
+                            ExitCode::from(exit_code_for_error(&err))
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("{e:#}");
+                    ExitCode::from(exit_code::EX_IOERR)
+                }
+            }
+        }
         Command::Develop => stub("develop"),
         Command::Export => stub("export"),
         Command::Run => stub("run"),

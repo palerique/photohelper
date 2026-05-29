@@ -88,6 +88,14 @@ static_assertions = "1"
 trybuild = "1"
 filetime = "0.2"
 
+# AI inference (ONNX Runtime via ort, Apache-2.0)
+# Exact RC pin per TD-014 (upgrade when ort 2.0.0 stable releases).
+# default-features = false: disables bundled ONNX Runtime download; we use
+# ort's default CPU execution provider.
+# features: "std" required for non-no_std targets; "ndarray" enables array I/O.
+# TD-014: ort RC pin =2.0.0-rc.12; upgrade to stable 2.0.0 when released.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native"] }
+
 # Release profile tuned for batch image processing: thin LTO keeps build times
 # manageable while giving most of the speedup of fat LTO; codegen-units = 1
 # unlocks further cross-crate inlining.

@@ -633,6 +633,111 @@ pub enum IngestOutcome {
     SkippedHashWindowTooSmall,
 }
 
+// =====================================================================
+// RgbImage — demosaiced 8-bit RGB pixel buffer (session 04 D1b)
+// =====================================================================
+
+/// A decoded, demosaiced 8-bit sRGB image.
+///
+/// Produced by `photohelper_raw::decode::read_raw_rgb` and consumed by
+/// `photohelper_ai::nima::Nima::score`. Living in `photohelper-core` to
+/// break the circular dependency that would arise if it lived in either the
+/// `raw` or `ai` crate (plan session-04 §D1b — PR1-T7 remediation).
+///
+/// # Invariants
+///
+/// - `pixels.len() == width.get() as usize * height.get() as usize * 3`
+///   (three bytes per pixel: R, G, B in row-major order)
+/// - `width.get() > 0` and `height.get() > 0` (guaranteed by `NonZeroU32`)
+/// - Pixel values are in `[0, 255]` sRGB; caller is responsible for
+///   applying model-specific preprocessing (e.g. MobileNet `preprocess_input`)
+///   before inference.
+#[derive(Debug, Clone)]
+pub struct RgbImage {
+    pixels: Vec<u8>,
+    width: std::num::NonZeroU32,
+    height: std::num::NonZeroU32,
+}
+
+impl RgbImage {
+    /// Construct an `RgbImage` from raw pixel bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `width == 0`, `height == 0`, or
+    /// `pixels.len() != width * height * 3` (computed in `u64` to avoid
+    /// overflow on large images).
+    pub fn new(
+        pixels: Vec<u8>,
+        width: std::num::NonZeroU32,
+        height: std::num::NonZeroU32,
+    ) -> Result<Self, Error> {
+        let expected = u64::from(width.get()) * u64::from(height.get()) * 3;
+        if pixels.len() as u64 != expected {
+            return Err(Error::Io {
+                path: std::path::PathBuf::new(),
+                op: "rgb-image-construct",
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "RgbImage buffer mismatch: expected {} bytes ({}x{}x3), got {}",
+                        expected,
+                        width.get(),
+                        height.get(),
+                        pixels.len()
+                    ),
+                ),
+            });
+        }
+        Ok(Self {
+            pixels,
+            width,
+            height,
+        })
+    }
+
+    /// Width in pixels.
+    #[must_use]
+    pub fn width(&self) -> std::num::NonZeroU32 {
+        self.width
+    }
+
+    /// Height in pixels.
+    #[must_use]
+    pub fn height(&self) -> std::num::NonZeroU32 {
+        self.height
+    }
+
+    /// Raw pixel bytes: R, G, B packed in row-major order.
+    #[must_use]
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    /// Get the R, G, B triple at column `x`, row `y` (0-indexed).
+    /// Returns `None` if coordinates are out of bounds.
+    #[must_use]
+    pub fn pixel_rgb(&self, x: u32, y: u32) -> Option<[u8; 3]> {
+        if x >= self.width.get() || y >= self.height.get() {
+            return None;
+        }
+        let base = (y as usize * self.width.get() as usize + x as usize) * 3;
+        // Invariant: base + 3 <= pixels.len() guaranteed by the constructor's
+        // len == width * height * 3 check and the bounds check above.
+        if let Some(&[r, g, b]) = self.pixels.get(base..base + 3).and_then(|s| {
+            let arr: &[u8; 3] = s.try_into().ok()?;
+            Some(arr)
+        }) {
+            Some([r, g, b])
+        } else {
+            None
+        }
+    }
+}
+
+// static Send+Sync assertion (RgbImage holds only Vec<u8> and NonZeroU32)
+static_assertions::assert_impl_all!(RgbImage: Send, Sync);
+
 #[cfg(test)]
 mod tests {
     use super::*;

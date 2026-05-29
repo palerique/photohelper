@@ -11,15 +11,11 @@ description = "AI inference (ONNX Runtime / tract) for culling + improvement"
 [lints]
 workspace = true
 
-[features]
-default = []
-# Compile-time gates land alongside the inference wiring in later sessions:
-#   ai-culling      = ["dep:ort"]    # NIMA / ARNIQA / face-mesh / MobileCLIP
-#   ai-denoise      = ["dep:ort"]    # SCUNet
-#   ai-sharpen      = ["dep:ort"]    # Real-ESRGAN
-#   tract-fallback  = ["dep:tract"]  # pure-Rust runtime
-
 [dependencies]
-# `photohelper-core` re-added when the AI crate consumes `Photo` / `RawImage`
-# in session 03+; dropped in D4 to satisfy the new
-# `unused_crate_dependencies` workspace lint.
+photohelper-core = { path = "../photohelper-core" }
+ort.workspace = true
+# TD-014: ort pin =2.0.0-rc.12; upgrade to stable 2.0.0 when released.
+thiserror.workspace = true
+static_assertions.workspace = true
+sha2.workspace = true
+tracing.workspace = true

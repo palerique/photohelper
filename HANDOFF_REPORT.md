@@ -712,3 +712,165 @@ just session-start
 ```
 
 Then fire the session-end review (`/eight-agent-review` or `eight-agent-review` skill), remediate, update STATE + HANDOFF, push, PR, merge.
+
+---
+
+## Checkpoint 10 — session 04 paused for context refresh (2026-05-29; D1e pending)
+
+**Status**: PAUSED. Branch: `session-04/ai-culling-pipeline`. `just ci` GREEN (133 tests).
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code, session 04 implementation window 1)
+
+### What landed this window
+
+**Plan-review** (before this implementation window):
+- Plan v1 committed; R1 ran (6 CRITICAL + 13 HIGH + 10 MEDIUM + 3 LOW) → plan v2
+- R2 ran (3 HIGH + 5 MEDIUM + 2 LOW) → plan v3 (CLEAN); implementation unblocked
+
+**Implementation commits** (D0'→D1d):
+
+| Commit | Subject |
+|---|---|
+| `scripts/verify-nima-d0-prime.sh` | D0': verify NIMA inference on CC0 CR3 fixtures |
+| D0' commit | ANL-002 addendum + DN-026 CLOSED (scores [3.7377, 3.9253]; 0.62s/photo; deterministic) |
+| D1a | Wire `ort =2.0.0-rc.12` dep + download-binaries + tls-native |
+| D1b+D1c | `RgbImage` in photohelper-core; `VerifiedModelBytes`, `NimaScore`, `Nima`, `Error` in photohelper-ai |
+| D1d | NIMA ONNX model via Git LFS + `scripts/verify-model-sha256.sh` + `just verify-model-sha256` |
+
+Also: `scripts/convert-nima-to-onnx.sh` committed (pre-session-04 tool that resolved DN-026).
+DN-024 (dedup/MobileCLIP) escalated to session 05 per user request.
+
+### Key implementation details (canonical; binding for D1e-D3)
+
+**D0' scores** (Canon R8 CC0 fixtures):
+- `CRAW_FULL_FRAME.CR3`: aesthetic_score = **3.7377**
+- `RAW_FULL_FRAME.CR3`: aesthetic_score = **3.9253**
+- CI band (Linux x86_64): `score ∈ [1.74, 5.74]` (score ± 2.0, clamped to [1, 10])
+- Apple Silicon tolerance: ±1e-3 (deterministic; delta=0.00 confirmed)
+
+**ort API notes** (verified empirically during D1c):
+- `Session` type: `ort::session::Session` (NOT re-exported at crate root in 2.0.0-rc.12)
+- Session construction: `ort::session::Session::builder()?.commit_from_memory(&bytes)?`
+- Input tensor: `ort::value::Tensor::<f32>::from_array(([1_usize,224,224,3], boxed_slice))?`
+- Session inputs: `ort::inputs!["name" => tensor]` → `Vec<(Cow<str>, SessionInputValue)>` (NOT a Result)
+- Session outputs: `outputs.get("output_name")` returns `Option<&DynValue>`
+- Output extraction: `value.try_extract_tensor::<f32>()` → `Result<(&Shape, &[f32])>`
+- Input/output names: `sess.inputs().first().map_or_else(...)` (`.inputs()` is a method, not a field)
+- Borrow issue: extract input/output names to `String` BEFORE `sess.run()` to avoid borrow conflict
+
+**ort feature flags required** (workspace Cargo.toml):
+```toml
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native"] }
+```
+
+**thread_local! pattern in Nima::score**:
+- `if guard.is_none() { match builder.commit_from_memory(...) { Ok(s) => *guard = Some(s), Err(e) => return Err(Error::ModelLoad{...}) } }`
+- `let sess = guard.as_mut().unwrap(); // #[allow(clippy::unwrap_used, reason="proven Some")]`
+- Session stays `None` on construction failure so next photo retries
+
+**RgbImage** is in `photohelper_core::model` (NOT photohelper-ai) — plan PR1-T7 remediation.
+Both `photohelper-raw` (producer) and `photohelper-ai` (consumer) import from `photohelper-core`.
+
+### Precise next steps when context restored
+
+1. **Read `SESSION-STATE.md`** (canonical re-orientation).
+2. **Read this Checkpoint 10** (you're here).
+3. **Read `docs/plans/session-04.md § D1e`** for the FFI extension spec:
+   - Three new `unsafe extern "C"` bindings: `libraw_dcraw_process`, `libraw_dcraw_make_mem_image`, `libraw_dcraw_clear_mem`
+   - Six C-shim accessor functions for `libraw_processed_image_t` fields (in `cpp/photohelper_libraw_shim.c`)
+   - `pub fn read_raw_rgb(path: &Path) -> Result<RgbImage, Error>` in `crates/photohelper-raw/src/decode.rs`
+   - Integration test: `read_raw_rgb_cc0_fixture` with len check + mean∈(20,240) + std_dev>5
+4. **Implement D1e** (the FFI bindings are the blocking work; ~100 LoC in ffi.rs + C shim + decode.rs)
+5. **Then D2a** (`apply_v1_to_v2` migration + `cull_scores` table + SCHEMA_VERSION=2 + FK PRAGMA)
+6. **Then D2b** (`Catalog::unsuperseded_unscored_rows` + `insert_cull_score` with changes() mechanism)
+7. **Sub-component review** (D2b boundary: `docs/code-reviews/session-04-catalog-migration-round{1,2}.md`)
+8. **Then D3** (`run_cull` + `cull` subcommand + `CullStats` 10 fields + heartbeat + tests)
+9. **Session-end R1+R2** when D3 is complete.
+
+### Resume from a fresh context
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-04/ai-culling-pipeline
+just session-start
+```
+
+Then paste the restart prompt.
+
+---
+
+## Checkpoint 11 — session 04 SHIPPED (2026-05-29; full AI culling pipeline)
+
+**Status**: SHIPPED. Session-04 GOAL fully met end-to-end.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code session 04)
+
+### What landed this session
+
+**D0'**: Re-ran NIMA inference verification after DN-026 closure. Scores:
+CRAW_FULL_FRAME.CR3 = 3.7377, RAW_FULL_FRAME.CR3 = 3.9253. ANL-002 addendum.
+DN-026 CLOSED.
+
+**D1a**: Wired `ort =2.0.0-rc.12` dep with `download-binaries` + `tls-native`.
+
+**D1b+D1c**: `RgbImage` in photohelper-core (breaks ai↔raw circular dep). In
+photohelper-ai: `VerifiedModelBytes` (SHA-256 manifest verification), `NimaScore`
+(f32 newtype, range [1,10], Ord via total_cmp), `Nima` (thread_local! per-worker
+ort::Session). `MODEL_SLUG` + `MODEL_MANIFEST_NAME` constants.
+
+**D1d**: NIMA ONNX model in Git LFS (Apache-2.0 converted from idealo/image-
+quality-assessment). `scripts/verify-model-sha256.sh` + `just verify-model-sha256`
+CI gate.
+
+**D1e**: `read_raw_rgb(path) → Result<RgbImage, Error>` via LibRaw dcraw_process
+pipeline. 3 new FFI bindings (dcraw_process, make_mem_image, clear_mem) + 6 C
+shim accessors for libraw_processed_image_t. Integration test verifies both CC0
+CR3 fixtures: dim invariant + mean∈(20,240) + std_dev>5.
+
+**D2a**: Catalog schema v2 — `cull_scores` table (photo_id FK, model_slug,
+aesthetic_score REAL [1,10], scored_at_unix_seconds). `PRAGMA foreign_keys = ON`.
+`apply_v1_to_v2` migration (idempotent DDL). Decision doc 0002 + 0001 amendment.
+`SCHEMA_VERSION = 2`. 3 new catalog unit tests.
+
+**D2b**: `CullRow` (PathBuf source_path, private fields + accessors — Theme-A fix
+from sub-component R1). `InsertScoreOutcome` (Inserted | AlreadyScored).
+`Catalog::unsuperseded_unscored_rows(model_slug)` (SQL NOT IN filter, ORDER BY).
+`Catalog::insert_cull_score(photo_id, model_slug, f64, i64)` (INSERT OR IGNORE +
+changes(), range guard). Sub-component review R1+R2 complete; D2b has 5 catalog
+tests.
+
+**D3**: `crates/photohelper-cli/src/commands/cull.rs` — full `run_cull` pipeline
+(exists-check → derive → decode → NIMA → persist), `CullStats` (9 AtomicU64
+fields), `CullArgs` (`--strict`), heartbeat (TD-016 stop-gap). `main.rs` wired
+with `PHOTOHELPER_MODEL_DIR` env var + `MODEL_MANIFEST_NAME` constant.
+3 CLI integration tests: real CC0 fixture end-to-end, strict decode-fail exit code,
+idempotency (second run walks 0 rows — SQL filter verified).
+
+**Session-end review R1+R2**: R1 surfaced 1 CRITICAL + 4 HIGH + 9 MEDIUM; all
+remediated. R2 was clean (0 findings, all 13 watch-list items closed).
+
+### Test count
+133 (baseline) → **143** (+10: 1 raw integration, 3 catalog unit, 3 CLI integration,
+3 other catalog from sub-component review).
+
+### TDs closed / filed this session
+
+Closed: DN-026 (NIMA ONNX model license — resolved by converting idealo model to
+ONNX under Apache-2.0). TD-016 status updated from "prospective" to "Open
+(materialized)".
+
+Filed: TD-012 in-source comment added to read_raw_rgb. TD-013 in-source comment
+added to insert_cull_score.
+
+### What is not yet in place
+
+- D3 `--dry-run` (TD-015 deferred)
+- Duplicate-detection pipeline (DN-024 → session 05)
+- `develop` / `export` / `watermark` subcommands
+- Windows build verification + release engineering
+
+### How to resume (session 05)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-05/<kebab-slug>
+just session-start
+```

@@ -226,6 +226,22 @@ pub enum RawDecodeCause {
     /// NaN or infinite entries. Usually a corrupt CR3.
     #[error("Color matrix invalid (NaN entries)")]
     ColorMatrixInvalid,
+
+    /// `libraw_dcraw_make_mem_image` returned a processed image whose bit
+    /// depth or channel count is not the expected 8-bit 3-channel sRGB.
+    /// `bits` must be 8 and `colors` must be 3; any other values indicate
+    /// LibRaw produced output in an unexpected format (16-bit output_bps,
+    /// RGBA, etc.).
+    #[error(
+        "RGB conversion produced unexpected format: bits={bits}, colors={colors} \
+         (expected bits=8, colors=3)"
+    )]
+    RgbConversionFailed {
+        /// LibRaw-reported bits per sample in the processed image.
+        bits: u16,
+        /// LibRaw-reported channel count in the processed image.
+        colors: u16,
+    },
 }
 
 #[cfg(test)]

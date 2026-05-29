@@ -67,3 +67,39 @@ const uint16_t *ph_libraw_raw_image(libraw_data_t *lr) {
 uint64_t ph_libraw_raw_image_samples(libraw_data_t *lr) {
     return (uint64_t)libraw_get_raw_width(lr) * (uint64_t)libraw_get_raw_height(lr);
 }
+
+/* === Processed-image accessors (RgbImage inputs — D1e) =========== */
+/* These operate on the libraw_processed_image_t struct returned by
+ * libraw_dcraw_make_mem_image(). The Rust caller must free that pointer
+ * via libraw_dcraw_clear_mem() after copying the data. */
+
+/* Width of the demosaiced image in pixels. */
+uint32_t ph_libraw_img_width(libraw_processed_image_t *img) {
+    return (uint32_t)img->width;
+}
+
+/* Height of the demosaiced image in pixels. */
+uint32_t ph_libraw_img_height(libraw_processed_image_t *img) {
+    return (uint32_t)img->height;
+}
+
+/* Bits per sample: 8 for 8-bit output (default), 16 for 16-bit. */
+uint16_t ph_libraw_img_bits(libraw_processed_image_t *img) {
+    return (uint16_t)img->bits;
+}
+
+/* Number of colour channels: 3 for RGB (normal), 4 for RGBA. */
+uint16_t ph_libraw_img_colors(libraw_processed_image_t *img) {
+    return (uint16_t)img->colors;
+}
+
+/* Size of the pixel data buffer in bytes (= width * height * colors * bits/8). */
+uint32_t ph_libraw_img_data_size(libraw_processed_image_t *img) {
+    return (uint32_t)img->data_size;
+}
+
+/* Pointer to the pixel data buffer, row-major, LibRaw-owned.
+ * The Rust caller must memcpy before calling libraw_dcraw_clear_mem(). */
+unsigned char *ph_libraw_img_data(libraw_processed_image_t *img) {
+    return img->data;
+}

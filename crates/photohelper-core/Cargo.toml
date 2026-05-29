@@ -20,6 +20,7 @@ workspace = true
 blake3.workspace = true
 base64.workspace = true
 thiserror.workspace = true
+static_assertions.workspace = true
 # `time` crate dropped in session 02 D4 (unused — the only `time::`
 # references in this crate are `std::time::UNIX_EPOCH`, not the `time`
 # crate); the new `unused_crate_dependencies` workspace lint caught it.

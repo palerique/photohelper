@@ -1,11 +1,12 @@
 # Decision 0001 — Catalog schema v1
 
 **Status**: Accepted (session 01, 2026-05-28); v1 → v2 migration ownership
-amended (session 02, 2026-05-28 — see § Amendments).
-**Owners**: session 01 (v1 minimal schema); **session 03** (v1 → v2
-migration when cull-score + dup-group tables land per DN-005;
-rescheduled from session 02 per amendment below).
-**Authoritative for**: `crates/photohelper-catalog/src/schema.rs`.
+amended (session 02, 2026-05-28); §Migration policy superseded (session 04,
+2026-05-29 — see § Amendments).
+**Owners**: session 01 (v1 minimal schema); session 04 (`ai-culling-pipeline`,
+2026-05-29 — v1 → v2 migration via match-arm approach; dup-group deferred).
+**Authoritative for**: `crates/photohelper-catalog/src/schema.rs` (v1 DDL
+only; v2 DDL + migration policy: `docs/decisions/0002-catalog-schema-v2.md`).
 
 ## Context
 
@@ -107,6 +108,9 @@ previous row when content at the same `source_path` changes.
 ## What's deliberately NOT in v1
 
 - **Cull score columns** (`quality`, `blur`, `eye_state`, etc.) —
+  *(these column names never materialized; session 04 shipped a separate
+  `cull_scores` table with `aesthetic_score`; see
+  `docs/decisions/0002-catalog-schema-v2.md`)*
   session 03+ when `cull` lands. Per DN-005 the migration framework
   (currently absent — single-table v1 doesn't need it) materializes
   alongside that schema change.
@@ -120,6 +124,15 @@ previous row when content at the same `source_path` changes.
   enforced in Rust (`PhotoRow::from_row` typed conversions).
 
 ## Migration policy
+
+> **SUPERSEDED by `docs/decisions/0002-catalog-schema-v2.md` §
+> Migration-runner rationale (session 04, 2026-05-29).** The
+> `Vec<dyn Migration>` trait runner described in the original text below
+> was NOT adopted. The v1 → v2 migration uses a simple `match` arm +
+> `apply_v1_to_v2(conn)` function (no trait). See decision-doc 0002 for
+> the full rationale and the migration table.
+
+Original text (preserved for audit trail):
 
 v1 stays at `PRAGMA user_version = 1` forever. The next change
 (v1 → v2 in **session 03**, rescheduled from session 02 per
@@ -174,3 +187,11 @@ Session 03's first plan commit MUST include "migration framework v1 →
 v2" as a §Deliverables item; if it doesn't, the session-03 plan-review
 must reject. (Identical binding-trigger discipline to DN-011's
 session-02 LibRaw EXIF requirement.)
+
+### 2026-05-29 (session 04) — §Migration policy superseded; v1→v2 shipped without trait runner
+
+Session 04 (`ai-culling-pipeline`) shipped the v1 → v2 migration using a
+`match` arm + `apply_v1_to_v2(conn)` function — no `Vec<dyn Migration>`
+trait runner. Rationale and the definitive migration table are in
+`docs/decisions/0002-catalog-schema-v2.md`. §Migration policy above is
+superseded; all other sections of this document remain authoritative.

@@ -20,6 +20,7 @@ photohelper-core = { path = "../photohelper-core" }
 photohelper-cameras = { path = "../photohelper-cameras" }
 photohelper-catalog = { path = "../photohelper-catalog" }
 photohelper-raw = { path = "../photohelper-raw" }
+photohelper-ai = { path = "../photohelper-ai" }
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

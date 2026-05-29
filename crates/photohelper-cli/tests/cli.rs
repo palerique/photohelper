@@ -322,7 +322,8 @@ fn ingest_lock_timeout_above_max_exits_2_clap_default() {
 
 #[test]
 fn stub_subcommands_exit_69_with_not_yet_implemented_message() {
-    for name in ["cull", "develop", "export", "run", "models", "camera"] {
+    // "cull" removed after D3 wired the real handler (plan PR1-T2).
+    for name in ["develop", "export", "run", "models", "camera"] {
         Command::cargo_bin("photohelper")
             .unwrap()
             .arg(name)
@@ -794,4 +795,149 @@ fn ingest_wal_checkpoint_warn_fires_on_reopen_with_dirty_wal() {
         .assert()
         .success()
         .stderr(contains("previous shutdown was unclean"));
+}
+
+// =====================================================================
+// D3: cull integration tests
+// =====================================================================
+
+/// Path to the NIMA model directory (crates/photohelper-ai/models/).
+fn nima_model_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("crates")
+        .join("photohelper-ai")
+        .join("models")
+}
+
+/// Path to the CC0 Canon R8 CR3 fixture directory.
+fn cr3_fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests")
+        .join("fixtures")
+        .join("cr3")
+}
+
+/// D3 test: ingest CC0 CR3 fixtures → cull → verify cull_scores row.
+///
+/// Skipped if LFS fixtures are absent (CI without LFS pull).
+/// Exercises the full D3 pipeline end-to-end against real sensor data.
+#[test]
+fn cull_scores_real_canon_r8_cr3_fixture() {
+    let fixtures = cr3_fixture_dir();
+    if !fixtures.join("RAW_FULL_FRAME.CR3").exists() {
+        return;
+    }
+    let model_dir = nima_model_dir();
+    if !model_dir.join("manifest.toml").exists() {
+        return;
+    }
+
+    let cat_dir = tempfile::tempdir().unwrap();
+    let cat_path = cat_dir.path().join("c.db");
+
+    // Ingest the CC0 fixture directory.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "ingest",
+            fixtures.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
+
+    // Cull: NIMA inference on the ingested photos.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_path.to_str().unwrap(), "cull"])
+        .assert()
+        .code(0)
+        .stderr(contains("scored: 2"));
+
+    // Verify cull_scores rows exist with scores in [1.0, 10.0].
+    let conn = rusqlite::Connection::open(&cat_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM cull_scores", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2, "both CC0 CR3 fixtures must be scored");
+    let scores: Vec<f64> = {
+        let mut stmt = conn
+            .prepare("SELECT aesthetic_score FROM cull_scores")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    for score in &scores {
+        assert!(
+            (1.0..=10.0).contains(score),
+            "aesthetic_score {score} must be in [1.0, 10.0]"
+        );
+    }
+
+    // Theme-E idempotency: second cull run finds no unscored photos (the
+    // unsuperseded_unscored_rows SQL excludes already-scored photos via NOT IN),
+    // so walked=0. This verifies the SQL filter is active and cull exits cleanly.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_path.to_str().unwrap(), "cull"])
+        .assert()
+        .code(0)
+        .stderr(contains("walked: 0"))
+        .stderr(contains("scored: 0"));
+}
+
+/// D3 test: ingest a synthetic (undecodeable) CR3 → cull --strict → exit ≠ 0.
+///
+/// The synthetic fixture has 0xCC bytes — `read_raw_rgb` will fail with a
+/// LibRaw decode error → `decode_failed > 0` → `--strict` escalation.
+#[test]
+fn cull_strict_exits_nonzero_on_decode_fail() {
+    let model_dir = nima_model_dir();
+    if !model_dir.join("manifest.toml").exists() {
+        return;
+    }
+
+    // Ingest the synthetic CR3 fixture.
+    let (dir, _cr3) = fixture_dir_with_one_cr3();
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["ingest", dir.path().to_str().unwrap()])
+        .assert()
+        .code(0);
+
+    // Cull --strict: decode failure must cause non-zero exit.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            dir.path()
+                .join(".photohelper")
+                .join("catalog.db")
+                .to_str()
+                .unwrap(),
+            "cull",
+            "--strict",
+        ])
+        .assert()
+        .code(1) // EX_STRICT_FAIL = 1 (POSIX generic failure)
+        .stderr(contains("decode-failed: 1"));
 }

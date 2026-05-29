@@ -23,12 +23,12 @@ repos:
       - id: check-added-large-files
         args: ["--maxkb=256"]
         # `crates/photohelper-raw/vendor/` holds the vendored LibRaw
-        # tarball (~1.6 MB) that satisfies LGPL §6(a) per ADR-0002. The
-        # tarball is content-addressed via a committed SHA-256 sidecar
-        # and verified at every build, so accidental modification can't
-        # land unnoticed. Excluded from the 256 KB cap because it IS
-        # the source distribution we ship with every release.
-        exclude: ^crates/photohelper-raw/vendor/
+        # tarball (~1.6 MB) that satisfies LGPL §6(a) per ADR-0002.
+        # `crates/photohelper-ai/models/` holds the NIMA ONNX model
+        # (~12.3 MB) committed via Git LFS; the LFS pointer file is tiny
+        # but the actual blob exceeds 256 KB. Both are content-addressed
+        # via committed SHA-256 sidecars.
+        exclude: ^(crates/photohelper-raw/vendor/|crates/photohelper-ai/models/)
 
   # --- Repo-local: protocol enforcement (stack-agnostic) ---
   - repo: local

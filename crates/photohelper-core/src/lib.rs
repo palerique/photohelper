@@ -16,6 +16,7 @@ pub mod error;
 pub mod model;
 
 pub use error::Error;
+pub use model::RgbImage;
 
 /// Crate version, sourced from `Cargo.toml`.
 #[must_use]

@@ -30,7 +30,7 @@ use std::num::NonZeroU32;
 use std::os::raw::{c_char, c_int, c_uint};
 use std::path::{Path, PathBuf};
 
-use photohelper_core::model::ExifOrientation;
+use photohelper_core::model::{ExifOrientation, RgbImage};
 
 use crate::decode::{
     BayerPlane, CamRgbToXyzD65Matrix, CfaPattern, RawImage, SensorBitDepth, SensorLevels,
@@ -53,6 +53,15 @@ pub(crate) struct LibrawData {
 // `LibrawGuard` wraps a single handle and is not Send by default
 // (raw pointer), which is exactly the constraint we want.
 
+/// Opaque pointer-target for LibRaw's `libraw_processed_image_t`.
+/// Allocated by `libraw_dcraw_make_mem_image` and freed by
+/// `libraw_dcraw_clear_mem`. We never dereference it from Rust — the
+/// C-shim functions do that work.
+#[repr(C)]
+pub(crate) struct LibrawProcessedImage {
+    _opaque: [u8; 0],
+}
+
 unsafe extern "C" {
     // === Lifecycle ===========================================
     fn libraw_init(flags: c_uint) -> *mut LibrawData;
@@ -69,7 +78,15 @@ unsafe extern "C" {
     fn libraw_get_raw_width(lr: *mut LibrawData) -> c_int;
     fn libraw_get_raw_height(lr: *mut LibrawData) -> c_int;
 
-    // === photohelper C shim =================================
+    // === New for D1e: dcraw processing pipeline =============
+    fn libraw_dcraw_process(lr: *mut LibrawData) -> c_int;
+    fn libraw_dcraw_make_mem_image(
+        lr: *mut LibrawData,
+        errc: *mut c_int,
+    ) -> *mut LibrawProcessedImage;
+    fn libraw_dcraw_clear_mem(img: *mut LibrawProcessedImage);
+
+    // === photohelper C shim (EXIF + Bayer-decode inputs) ====
     fn ph_libraw_make(lr: *mut LibrawData) -> *const c_char;
     fn ph_libraw_model(lr: *mut LibrawData) -> *const c_char;
     fn ph_libraw_flip(lr: *mut LibrawData) -> i32;
@@ -78,6 +95,14 @@ unsafe extern "C" {
     fn ph_libraw_black(lr: *mut LibrawData) -> i32;
     fn ph_libraw_raw_image(lr: *mut LibrawData) -> *const u16;
     fn ph_libraw_raw_image_samples(lr: *mut LibrawData) -> u64;
+
+    // === D1e: processed-image C shim (RgbImage inputs) =====
+    fn ph_libraw_img_width(img: *mut LibrawProcessedImage) -> u32;
+    fn ph_libraw_img_height(img: *mut LibrawProcessedImage) -> u32;
+    fn ph_libraw_img_bits(img: *mut LibrawProcessedImage) -> u16;
+    fn ph_libraw_img_colors(img: *mut LibrawProcessedImage) -> u16;
+    fn ph_libraw_img_data_size(img: *mut LibrawProcessedImage) -> u32;
+    fn ph_libraw_img_data(img: *mut LibrawProcessedImage) -> *mut u8;
 }
 
 /// RAII guard around a `libraw_init()`-allocated processor handle.
@@ -551,6 +576,165 @@ fn cfa_pattern_from_filters(filters: u32) -> Option<CfaPattern> {
 fn libraw_color(filters: u32, row: u32, col: u32) -> u8 {
     let shift = (((row << 1) & 14) + (col & 1)) << 1;
     ((filters >> shift) & 3) as u8
+}
+
+/// FFI orchestration for AHD-demosaiced RGB output: open + unpack +
+/// dcraw_process (default 8-bit sRGB) + copy the `w*h*3` byte buffer,
+/// close the handle. Returns an owned [`RgbImage`] with no LibRaw-owned
+/// pointers surviving.
+///
+/// `libraw_dcraw_clear_mem` is called after the data copy regardless of
+/// whether `extract_rgb_image` returns `Ok` or `Err` — no double-free
+/// and no leak on any code path.
+pub(crate) fn parse_libraw_rgb_image(raw_path: &RawPath) -> Result<RgbImage, Error> {
+    let guard = LibrawGuard::open(raw_path).map_err(exif_to_decode_err)?;
+    let path = raw_path.as_path();
+
+    // SAFETY: guard.handle is valid; CString is NUL-terminated.
+    let rc = unsafe { libraw_open_file(guard.handle, raw_path.as_c_ptr()) };
+    if rc != 0 {
+        return Err(Error::RawDecodeFailed {
+            path: path.to_path_buf(),
+            cause: RawDecodeCause::LibRawCallFailed {
+                libraw_code: rc,
+                op: "libraw_open_file",
+            },
+        });
+    }
+
+    // SAFETY: open succeeded; libraw_unpack is the documented next step.
+    let rc = unsafe { libraw_unpack(guard.handle) };
+    if rc != 0 {
+        return Err(Error::RawDecodeFailed {
+            path: path.to_path_buf(),
+            cause: RawDecodeCause::LibRawCallFailed {
+                libraw_code: rc,
+                op: "libraw_unpack",
+            },
+        });
+    }
+
+    // Run the default dcraw pipeline: AHD demosaic for non-Fuji Bayer sensors
+    // (user_qual=-1 default; quality resolves to 3 = AHD internally from
+    // `2 + !IO.fuji_width`) with output_bps=8 (both LibRaw defaults).
+    // No params need setting.
+    // SAFETY: handle is valid and libraw_unpack has returned 0.
+    let rc = unsafe { libraw_dcraw_process(guard.handle) };
+    if rc != 0 {
+        return Err(Error::RawDecodeFailed {
+            path: path.to_path_buf(),
+            cause: RawDecodeCause::LibRawCallFailed {
+                libraw_code: rc,
+                op: "libraw_dcraw_process",
+            },
+        });
+    }
+
+    // Allocate a LibRaw-managed heap buffer for the processed image.
+    // errc is set to 0 on success or to a LibRaw error code on failure.
+    // The returned pointer MUST be freed via libraw_dcraw_clear_mem.
+    let mut errc: c_int = 0;
+    // SAFETY: handle is valid and libraw_dcraw_process returned 0; errc
+    // is a stack-allocated c_int whose raw pointer outlives this call;
+    // the returned pointer is LibRaw-managed and valid until
+    // libraw_dcraw_clear_mem is called.
+    let img_ptr = unsafe { libraw_dcraw_make_mem_image(guard.handle, &raw mut errc) };
+    if img_ptr.is_null() {
+        return Err(Error::RawDecodeFailed {
+            path: path.to_path_buf(),
+            cause: RawDecodeCause::LibRawCallFailed {
+                libraw_code: errc,
+                op: "libraw_dcraw_make_mem_image",
+            },
+        });
+    }
+
+    // Copy pixels out of the LibRaw-owned buffer; then free unconditionally.
+    let result = extract_rgb_image(img_ptr, path);
+    // SAFETY: img_ptr is non-null and was returned by libraw_dcraw_make_mem_image;
+    // called exactly once here (after extract_rgb_image returns, success or
+    // failure) so the buffer is freed without double-free or leak.
+    unsafe { libraw_dcraw_clear_mem(img_ptr) };
+    result
+}
+
+/// Copy pixel data out of the LibRaw-owned processed-image buffer and
+/// construct an [`RgbImage`].
+///
+/// Does NOT call `libraw_dcraw_clear_mem` — the caller (`parse_libraw_rgb_image`)
+/// is responsible for freeing `img_ptr` exactly once after this returns.
+fn extract_rgb_image(img_ptr: *mut LibrawProcessedImage, path: &Path) -> Result<RgbImage, Error> {
+    // Read all numeric fields from the processed image in one unsafe block.
+    // SAFETY: img_ptr is non-null (caller checked); the shim functions
+    // access individual primitive fields of the LibRaw-managed struct.
+    let (bits, colors, width, height, data_size, data_ptr) = unsafe {
+        (
+            ph_libraw_img_bits(img_ptr),
+            ph_libraw_img_colors(img_ptr),
+            ph_libraw_img_width(img_ptr),
+            ph_libraw_img_height(img_ptr),
+            ph_libraw_img_data_size(img_ptr),
+            ph_libraw_img_data(img_ptr),
+        )
+    };
+
+    // Validate 8-bit 3-channel (sRGB) format — any other shape is unexpected.
+    if bits != 8 || colors != 3 {
+        return Err(Error::RawDecodeFailed {
+            path: path.to_path_buf(),
+            cause: RawDecodeCause::RgbConversionFailed { bits, colors },
+        });
+    }
+
+    if data_ptr.is_null() || data_size == 0 {
+        return Err(Error::RawDecodeFailed {
+            path: path.to_path_buf(),
+            cause: RawDecodeCause::LibRawCallFailed {
+                libraw_code: 0,
+                op: "ph_libraw_img_data returned null or zero size",
+            },
+        });
+    }
+
+    let data_size_usize = usize::try_from(data_size).map_err(|_| Error::RawDecodeFailed {
+        path: path.to_path_buf(),
+        cause: RawDecodeCause::LibRawCallFailed {
+            libraw_code: 0,
+            op: "ph_libraw_img_data_size exceeds usize",
+        },
+    })?;
+
+    // SAFETY: data_ptr is non-null (checked above); data_size is the byte
+    // count of the LibRaw-owned pixel buffer (w*h*3 for 8-bit RGB). We
+    // copy immediately into a Vec<u8> before the caller frees img_ptr.
+    let pixels: Vec<u8> = unsafe { std::slice::from_raw_parts(data_ptr, data_size_usize) }.to_vec();
+
+    let width_nz = NonZeroU32::new(width).ok_or_else(|| Error::RawDecodeFailed {
+        path: path.to_path_buf(),
+        cause: RawDecodeCause::LibRawCallFailed {
+            libraw_code: 0,
+            op: "ph_libraw_img_width returned zero",
+        },
+    })?;
+    let height_nz = NonZeroU32::new(height).ok_or_else(|| Error::RawDecodeFailed {
+        path: path.to_path_buf(),
+        cause: RawDecodeCause::LibRawCallFailed {
+            libraw_code: 0,
+            op: "ph_libraw_img_height returned zero",
+        },
+    })?;
+
+    // RgbImage::new validates pixels.len() == width * height * 3. A mismatch
+    // here means LibRaw's data_size was inconsistent with its own width/height
+    // fields — route to LibRawCallFailed rather than RgbConversionFailed (which
+    // would incorrectly claim the format was wrong after it was already validated).
+    RgbImage::new(pixels, width_nz, height_nz).map_err(|_| Error::RawDecodeFailed {
+        path: path.to_path_buf(),
+        cause: RawDecodeCause::LibRawCallFailed {
+            libraw_code: 0,
+            op: "pixel buffer length != width*height*3 (LibRaw data_size mismatch)",
+        },
+    })
 }
 
 /// Derive bit depth from the white (saturation) level. Result is

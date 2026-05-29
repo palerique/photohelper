@@ -22,3 +22,9 @@
 
 # Serena MCP per-machine project state (LSP indexes, on-boarding cache, etc.)
 .serena/
+
+# NIMA conversion venv (reproducible via scripts/convert-nima-to-onnx.sh)
+scripts/.nima-convert-venv/
+
+# Source Keras weights (not committed; ONNX is the authoritative artifact via LFS)
+crates/photohelper-ai/models/*.hdf5
