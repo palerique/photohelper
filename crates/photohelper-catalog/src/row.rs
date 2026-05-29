@@ -5,7 +5,7 @@
 
 use photohelper_core::Error;
 use photohelper_core::catalog_glue;
-use photohelper_core::model::PhotoId;
+use photohelper_core::model::{AbsPath, PhotoId};
 
 /// One row of the `photos` table.
 #[derive(Clone, Debug)]
@@ -64,6 +64,20 @@ impl PhotoRow {
             superseded_at_unix_seconds: row.get("superseded_at_unix_seconds")?,
         })
     }
+}
+
+/// A 2-field projection used by the AI culling pipeline: enough to
+/// re-derive the `PhotoId` and locate the file on disk, without pulling
+/// all 14 columns of `PhotoRow`.
+///
+/// Produced by [`super::Catalog::unsuperseded_unscored_rows`].
+#[derive(Clone, Debug)]
+pub struct CullRow {
+    /// `PhotoId` as stored in the catalog (used for content-change detection
+    /// and as the FK key in `cull_scores`).
+    pub photo_id: PhotoId,
+    /// Canonical absolute path to the source file.
+    pub source_path: AbsPath,
 }
 
 /// Columns selected by `from_row`. Keep in sync with the struct.

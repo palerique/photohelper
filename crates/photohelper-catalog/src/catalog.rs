@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use photohelper_core::Error;
 use photohelper_core::model::{AbsPath, Photo, PhotoId};
 
-use crate::row::{PhotoRow, SELECT_ALL_COLUMNS, insert_error};
+use crate::row::{CullRow, PhotoRow, SELECT_ALL_COLUMNS, insert_error};
 use crate::schema::{INIT_SQL, MIGRATE_V1_TO_V2_SQL, SCHEMA_VERSION};
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
@@ -54,6 +54,19 @@ pub enum UpsertOutcome {
     },
     /// Identical PhotoId already in the catalog (re-ingest or hardlink).
     AlreadyCatalogued,
+}
+
+/// Outcome of [`Catalog::insert_cull_score`].
+///
+/// Discriminated via `conn.changes()` after `INSERT OR IGNORE` — the
+/// standard SQLite idiom that avoids a pre-SELECT round-trip (plan
+/// PR1-T13).
+#[derive(Debug, PartialEq, Eq)]
+pub enum InsertScoreOutcome {
+    /// Row was inserted; this is the first score for this photo × model.
+    Inserted,
+    /// Row already existed (duplicate cull run or race); nothing changed.
+    AlreadyScored,
 }
 
 /// SQLite-backed catalog. `Send + Sync` for `Arc<Catalog>` sharing across
@@ -443,6 +456,122 @@ impl Catalog {
         Ok(outcome)
     }
 
+    /// Fetch all non-superseded photos that have not yet been scored by
+    /// `model_slug`, ordered by ingest time. The AI culling pipeline calls
+    /// this to get the work list for each cull run.
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned` if a prior worker panicked mid-write.
+    /// - `Error::CatalogOpen` for query failures.
+    pub fn unsuperseded_unscored_rows(&self, model_slug: &str) -> Result<Vec<CullRow>, Error> {
+        let guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
+            path: self.canonical_path.clone(),
+        })?;
+        let sql = "SELECT id, source_path FROM photos \
+                   WHERE superseded_at_unix_seconds IS NULL \
+                     AND id NOT IN (SELECT photo_id FROM cull_scores WHERE model_slug = ?1) \
+                   ORDER BY ingested_at_unix_seconds";
+        let mut stmt = guard.prepare(sql).map_err(|e| Error::CatalogOpen {
+            path: self.canonical_path.clone(),
+            source: Box::new(e),
+        })?;
+        let rows = stmt
+            .query_map(rusqlite::params![model_slug], |row| {
+                let id_bytes: Vec<u8> = row.get("id")?;
+                let id_arr: [u8; 32] = id_bytes.as_slice().try_into().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(0, "id".into(), rusqlite::types::Type::Blob)
+                })?;
+                let photo_id = photohelper_core::catalog_glue::photo_id_from_row_bytes(id_arr);
+                let path_str: String = row.get("source_path")?;
+                Ok((photo_id, path_str))
+            })
+            .map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (photo_id, path_str) = r.map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+            let source_path =
+                AbsPath::canonicalize(std::path::Path::new(&path_str)).map_err(|e| {
+                    Error::CatalogOpen {
+                        path: self.canonical_path.clone(),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("stored path is not canonicalisable: {path_str}: {e}"),
+                        )),
+                    }
+                })?;
+            out.push(CullRow {
+                photo_id,
+                source_path,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Persist a cull score for `photo_id` × `model_slug`.
+    ///
+    /// Uses `INSERT OR IGNORE` so concurrent workers that score the same
+    /// photo race safely — the first writer wins, the rest see `AlreadyScored`.
+    /// `conn.changes()` after the INSERT discriminates the outcome without a
+    /// pre-SELECT round-trip (plan PR1-T13).
+    ///
+    /// `score` is the raw aesthetic score in `[1.0, 10.0]`; pass
+    /// `nima_score.get() as f64` at the call site.
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned` if a prior worker panicked.
+    /// - `Error::CatalogInsert` for SQLite failures (includes FK violations).
+    pub fn insert_cull_score(
+        &self,
+        photo_id: PhotoId,
+        model_slug: &str,
+        score: f64,
+        scored_at_unix_seconds: i64,
+    ) -> Result<InsertScoreOutcome, Error> {
+        let mut guard = match self.conn.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                let conn = poisoned.into_inner();
+                match conn.execute("ROLLBACK", []) {
+                    Ok(_) => {}
+                    Err(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == 1 => {}
+                    Err(e) => {
+                        return Err(Error::CatalogTransaction {
+                            op: "rollback-after-worker-panic",
+                            source: Box::new(e),
+                        });
+                    }
+                }
+                return Err(Error::CatalogPoisoned {
+                    path: self.canonical_path.clone(),
+                });
+            }
+        };
+        let id_bytes = photo_id.as_bytes().to_vec();
+        let tx = guard
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| insert_error(photo_id, e))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO cull_scores \
+             (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![&id_bytes, model_slug, score, scored_at_unix_seconds],
+        )
+        .map_err(|e| insert_error(photo_id, e))?;
+        let outcome = if tx.changes() == 1 {
+            InsertScoreOutcome::Inserted
+        } else {
+            InsertScoreOutcome::AlreadyScored
+        };
+        tx.commit().map_err(|e| insert_error(photo_id, e))?;
+        Ok(outcome)
+    }
+
     /// Borrow the canonical catalog path.
     #[must_use]
     pub fn canonical_path(&self) -> &Path {
@@ -722,6 +851,97 @@ mod tests {
             1,
             "fresh catalog must accept inserts after poisoned one is dropped"
         );
+    }
+
+    // =========================================================
+    // D2b: cull_scores integration tests
+    // =========================================================
+
+    #[test]
+    fn migration_v1_to_v2_upgrades_and_enforces_fk() {
+        // Build a v1 DB (user_version = 1, only photos table).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v1.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            // Write v1 schema manually so we start at version 1.
+            conn.execute_batch(crate::schema::INIT_SQL).unwrap();
+        }
+        // Open with the catalog — must migrate to v2.
+        let cat = Catalog::open(&db_path, 1).unwrap();
+        {
+            let conn = cat.conn.lock().unwrap();
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, SCHEMA_VERSION, "catalog must upgrade v1 DB to v2");
+        }
+
+        // Insert a photos row so we have a valid photo_id for the FK.
+        let photo = make_test_photo(dir.path(), 42);
+        cat.upsert(&photo, 0).unwrap();
+        let pid = photo.photo_id();
+
+        // insert_cull_score with a valid photo_id → Inserted.
+        let outcome = cat
+            .insert_cull_score(pid, "nima-aesthetic-v1", 5.0, 1_000_000)
+            .unwrap();
+        assert_eq!(outcome, InsertScoreOutcome::Inserted);
+
+        // Second insert with same photo_id + model_slug → AlreadyScored.
+        let outcome2 = cat
+            .insert_cull_score(pid, "nima-aesthetic-v1", 6.0, 2_000_000)
+            .unwrap();
+        assert_eq!(outcome2, InsertScoreOutcome::AlreadyScored);
+
+        // FK enforcement: insert with a non-existent photo_id fails.
+        let fake_pid = photo_id_from_row_bytes([99u8; 32]);
+        let err = cat
+            .insert_cull_score(fake_pid, "nima-aesthetic-v1", 7.0, 3_000_000)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogInsert { .. }),
+            "FK violation must surface as CatalogInsert, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn unsuperseded_unscored_rows_excludes_scored_and_superseded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Arc::new(Catalog::open(dir.path().join("c.db"), 1).unwrap());
+
+        let p1 = make_test_photo(dir.path(), 1);
+        let p2 = make_test_photo(dir.path(), 2);
+        let p3 = make_test_photo(dir.path(), 3);
+        cat.upsert(&p1, 1000).unwrap();
+        cat.upsert(&p2, 2000).unwrap();
+        cat.upsert(&p3, 3000).unwrap();
+
+        let slug = "nima-aesthetic-v1";
+
+        // Before any scores, all 3 rows are in the work list.
+        let rows = cat.unsuperseded_unscored_rows(slug).unwrap();
+        assert_eq!(rows.len(), 3);
+
+        // Score p1 — must disappear from the work list.
+        cat.insert_cull_score(p1.photo_id(), slug, 5.0, 0).unwrap();
+        let rows = cat.unsuperseded_unscored_rows(slug).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.photo_id != p1.photo_id()));
+
+        // Supersede p2 — mark superseded directly via SQL (no delete path in v0.1).
+        {
+            let conn = cat.conn.lock().unwrap();
+            let id_bytes = p2.photo_id().as_bytes().to_vec();
+            conn.execute(
+                "UPDATE photos SET superseded_at_unix_seconds = 9999 WHERE id = ?1",
+                rusqlite::params![&id_bytes],
+            )
+            .unwrap();
+        }
+        let rows = cat.unsuperseded_unscored_rows(slug).unwrap();
+        assert_eq!(rows.len(), 1, "only p3 must remain");
+        assert_eq!(rows[0].photo_id, p3.photo_id());
     }
 
     // =========================================================
