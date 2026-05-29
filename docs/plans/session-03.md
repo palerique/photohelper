@@ -235,8 +235,10 @@ Rust. PR1-T6 remediation: no `Scorer` trait; D4 takes concrete `&Nima`.)**
   First run creates the file; subsequent runs overwrite (recovery path for
   failing golden-vector test).
 - `crates/photohelper-ai/src/nima.rs`: `Nima` struct holds a
-  `LoadedModel`; `Nima::score(rgb: &RgbImage) -> Result<NimaScore>` is
-  the public entry. `NimaScore` newtype wraps `f32` constrained to
+  `LoadedModel` (private). Public API:
+  - `Nima::new(model: LoadedModel) -> Self` — infallible constructor
+    (model bytes already verified by `VerifiedModelBytes`; wraps the model).
+  - `Nima::score(rgb: &RgbImage) -> Result<NimaScore>` — public entry. `NimaScore` newtype wraps `f32` constrained to
   `[1.0, 10.0]` (fallible constructor; reject NaN, ±∞, out-of-range).
   - **NimaScore traits (PR1-T31 + T23/T20/T-α/T-δ remediation)**:
     `Copy + Clone + Debug + PartialEq + Eq + PartialOrd + Ord`.
@@ -557,34 +559,33 @@ duplicated in cull.rs.)**
       static WORKER_NIMA: RefCell<Option<Nima>> = RefCell::new(None);
   }
   // Inside par_bridge closure:
-  WORKER_NIMA.with(|cell| {
+  WORKER_NIMA.with(|cell| -> Result<(), Error> {
       let mut borrow = cell.borrow_mut();
-      let nima = borrow.get_or_insert_with(|| {
-          Nima::new(LoadedModel::from_verified(&verified_bytes))
-      });
+      if borrow.is_none() {
+          // Construct Session once per worker thread (not once per photo).
+          // Nima::new is infallible (model bytes already verified);
+          // LoadedModel::from_verified is fallible (OOM / ort init error).
+          let model = LoadedModel::from_verified(&verified_bytes)
+              .map_err(|e| Error::ModelLoadFailed { source: e.into() })?;
+          *borrow = Some(Nima::new(model));
+      }
+      let nima = borrow.as_mut().unwrap(); // safe: we just set it above
       nima.score(&rgb)
   })
+  // Caller matches the Result and routes Err to inference_failed counter.
   ```
-  Session-construction failure inside `get_or_insert_with` is handled by the
-  `inference_failed` dispatch row (pre-photo WARN; abort approach TBD by impl).
+  If `LoadedModel::from_verified` fails (OOM, ort init error), the error
+  propagates to the per-photo error dispatch → `inference_failed` counter +
+  WARN. The `thread_local!` slot remains `None` for that worker; the next
+  photo re-attempts construction (which also fails, incrementing
+  `inference_failed` again). If all workers fail, the OOM diagnostic WARN
+  fires (see above).
   Memory cost: N workers × ~50 MB model = ~400 MB on 8-core apple-silicon.
   No `Mutex` wrapping; no async.
 
   OOM diagnostic: if `inference_failed == num_workers` at run completion, emit
   session-level WARN: "All N inference workers failed at session init; if
   inference_failed matches worker count, check available memory."
-
-- **Per-photo pipeline (T6 remediation — content_changed detection)**:
-  for each `(catalog_id, source_path)` row, BEFORE calling `read_raw_rgb`:
-  ```rust
-  let current_id = PhotoId::derive(&source_path)?;
-  if current_id != catalog_id {
-      stats.content_changed.fetch_add(1, Relaxed);
-      tracing::warn!(...);
-      continue; // skip; do not decode or score
-  }
-  ```
-  `PhotoId::derive` reads ~128 KB per file — negligible vs. full decode + inference.
 
 - **Per-photo error dispatch table (PR1-T13 + PR1-T14 + T7 remediation)**:
 
