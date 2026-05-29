@@ -502,13 +502,10 @@ impl Catalog {
                 path: self.canonical_path.clone(),
                 source: Box::new(e),
             })?;
-            // R1-A: store the raw path without calling std::fs::canonicalize.
+            // Theme-A: store the raw path without calling std::fs::canonicalize.
             // Existence and canonicality checks happen per-file in run_cull so
             // a single missing file does not abort the entire work list.
-            out.push(CullRow {
-                photo_id,
-                source_path: std::path::PathBuf::from(&path_str),
-            });
+            out.push(CullRow::new(photo_id, PathBuf::from(path_str)));
         }
         Ok(out)
     }
@@ -556,13 +553,14 @@ impl Catalog {
                 });
             }
         };
-        if !score.is_finite() || !(1.0_f64..=10.0_f64).contains(&score) {
-            return Err(insert_error(
+        if !(1.0_f64..=10.0_f64).contains(&score) {
+            return Err(Error::CatalogInsert {
                 photo_id,
-                rusqlite::Error::InvalidParameterName(format!(
-                    "aesthetic_score {score} is not finite or not in [1.0, 10.0]"
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("aesthetic_score {score} is outside the valid range [1.0, 10.0]"),
                 )),
-            ));
+            });
         }
         let id_bytes = photo_id.as_bytes().to_vec();
         let tx = guard
@@ -866,6 +864,45 @@ mod tests {
     }
 
     // =========================================================
+    // R2-C: insert_cull_score range guard tests
+    // =========================================================
+
+    #[test]
+    fn insert_cull_score_rejects_out_of_range_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("c.db"), 1).unwrap();
+        let photo = make_test_photo(dir.path(), 1);
+        cat.upsert(&photo, 0).unwrap();
+        let pid = photo.photo_id();
+        // All of the following must be rejected.
+        for bad_score in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            0.999,
+            -1.0,
+            10.001,
+        ] {
+            assert!(
+                cat.insert_cull_score(pid, "nima-v1", bad_score, 0).is_err(),
+                "score {bad_score} must be rejected"
+            );
+        }
+        // Boundary values that MUST be accepted.
+        assert_eq!(
+            cat.insert_cull_score(pid, "boundary-min", 1.0, 0).unwrap(),
+            InsertScoreOutcome::Inserted,
+            "score 1.0 must be accepted"
+        );
+        assert_eq!(
+            cat.insert_cull_score(pid, "boundary-max", 10.0, 0).unwrap(),
+            InsertScoreOutcome::Inserted,
+            "score 10.0 must be accepted"
+        );
+    }
+
+    // =========================================================
     // R1-H: insert_cull_score poison path test
     // =========================================================
 
@@ -972,25 +1009,31 @@ mod tests {
         assert_eq!(rows.len(), 3);
         // R1-C: verify ORDER BY ingested_at_unix_seconds ordering.
         assert_eq!(
-            rows[0].photo_id,
+            rows[0].photo_id(),
             p1.photo_id(),
             "oldest ingest must be first"
         );
-        assert_eq!(rows[1].photo_id, p2.photo_id());
-        assert_eq!(rows[2].photo_id, p3.photo_id());
-        // R1-D: scoring for model-A must not exclude from model-B work list.
+        assert_eq!(rows[1].photo_id(), p2.photo_id());
+        assert_eq!(rows[2].photo_id(), p3.photo_id());
+        // Score p1 — must disappear from slug's work list.
+        cat.insert_cull_score(p1.photo_id(), slug, 5.0, 0).unwrap();
+        let rows = cat.unsuperseded_unscored_rows(slug).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.photo_id() != p1.photo_id()));
+
+        // R2-A (R1-D corrected): scoring p1 for model-A must NOT exclude p1 from
+        // model-B's work list. This assertion only detects the bug when run AFTER
+        // scoring, so the NOT IN subquery's model_slug filter is actually exercised.
         let rows_other = cat.unsuperseded_unscored_rows("other-model-v1").unwrap();
         assert_eq!(
             rows_other.len(),
             3,
-            "scoring for one model must not exclude from a different model's work list"
+            "p1 scored for nima-aesthetic-v1 must still appear in other-model-v1 work list"
         );
-
-        // Score p1 — must disappear from the work list.
-        cat.insert_cull_score(p1.photo_id(), slug, 5.0, 0).unwrap();
-        let rows = cat.unsuperseded_unscored_rows(slug).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.photo_id != p1.photo_id()));
+        assert!(
+            rows_other.iter().any(|r| r.photo_id() == p1.photo_id()),
+            "p1 must be present in other-model-v1 results despite being scored for nima-aesthetic-v1"
+        );
 
         // Supersede p2 — mark superseded directly via SQL (no delete path in v0.1).
         {
@@ -1004,7 +1047,7 @@ mod tests {
         }
         let rows = cat.unsuperseded_unscored_rows(slug).unwrap();
         assert_eq!(rows.len(), 1, "only p3 must remain");
-        assert_eq!(rows[0].photo_id, p3.photo_id());
+        assert_eq!(rows[0].photo_id(), p3.photo_id());
     }
 
     // =========================================================
