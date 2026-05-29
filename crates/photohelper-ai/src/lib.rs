@@ -9,11 +9,13 @@
 
 pub mod embedding;
 pub mod error;
+pub mod mobileclip;
 pub mod model_bytes;
 pub mod nima;
 
 pub use embedding::ImageEmbedding;
 pub use error::Error;
+pub use mobileclip::MobileClip;
 pub use model_bytes::{MODEL_MANIFEST_NAME, MODEL_SLUG, VerifiedModelBytes};
 pub use nima::{Nima, NimaScore};
 
