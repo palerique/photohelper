@@ -874,3 +874,47 @@ git switch main && git pull --ff-only origin main
 git switch -c session-05/<kebab-slug>
 just session-start
 ```
+
+---
+
+## Checkpoint 12 — post-session-04 script fixes (2026-05-29; context refresh)
+
+**Status**: main is clean (PR #7 merged). Two uncommitted script improvements
+committed to main as a post-ship chore.
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code, post-session-04 window)
+
+### What landed this window
+
+After session 04 shipped, the user ran the pipeline manually and hit two issues:
+
+1. **`photohelper-cull.sh` missing `PHOTOHELPER_MODEL_DIR`**: The script ran
+   `cargo run ... cull` without the env var, so the binary looked for the model
+   at `target/debug/models/manifest.toml` (binary-adjacent), not in
+   `crates/photohelper-ai/models/`. Fixed by exporting
+   `PHOTOHELPER_MODEL_DIR="$ROOT_DIR/crates/photohelper-ai/models"` in the script.
+
+2. **`photohelper-list-catalog.sh` no score column**: The list script only queried
+   `photos`, not `cull_scores`. Added `--sort score` support (ORDER BY
+   `cs.aesthetic_score DESC`) and a `score` column (LEFT JOIN `cull_scores`
+   on `model_slug = 'nima-aesthetic-v1'`; shows `printf('%.4f', …)` or `-` for
+   unscored photos). Usage updated in script header and `print_usage()`.
+
+### Manual verification
+
+User ran the full pipeline end-to-end:
+- `scripts/photohelper-ingest.sh ~/Pictures/tests` → 370 Canon R8 CR3s ingested
+- `scripts/photohelper-cull.sh --catalog ~/Pictures/tests/.photohelper/catalog.db`
+  → `walked: 370, scored: 370, decode-failed: 0` (all passed, ~30s wall-clock)
+
+### Next steps (session 05)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-05/<kebab-slug>
+just session-start
+cat SESSION-STATE.md
+```
+
+Candidate scope for session 05: duplicate-detection pipeline (DN-024 MobileCLIP)
+or `develop` pipeline start (XMP sidecar I/O). Review open TDs and DNs at
+session start to decide.

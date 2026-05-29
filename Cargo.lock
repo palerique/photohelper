@@ -841,6 +841,7 @@ dependencies = [
  "filetime",
  "fs4",
  "num_cpus",
+ "photohelper-ai",
  "photohelper-cameras",
  "photohelper-catalog",
  "photohelper-core",

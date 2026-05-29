@@ -46,7 +46,7 @@ Modes (mutually exclusive; default = --list):
 List-mode flags:
   --all            Include superseded rows (default: active only).
   --limit N        Cap rows shown (default 50; use 0 for no limit).
-  --sort FIELD     capture (default) | path | ingested
+  --sort FIELD     capture (default) | path | ingested | score
 
 Examples:
   photohelper-list-catalog.sh "$HOME/Pictures/tests"
@@ -54,6 +54,7 @@ Examples:
   photohelper-list-catalog.sh "$HOME/Pictures/tests" --count
   photohelper-list-catalog.sh "$HOME/Pictures/tests" --paths-only --limit 0
   photohelper-list-catalog.sh "$HOME/Pictures/tests" --limit 0 --sort path
+  photohelper-list-catalog.sh "$HOME/Pictures/tests" --sort score --limit 20
 EOF
 }
 
@@ -116,9 +117,9 @@ while [[ $# -gt 0 ]]; do
             fi
             SORT_BY="$2"
             case "$SORT_BY" in
-                capture|path|ingested) ;;
+                capture|path|ingested|score) ;;
                 *)
-                    echo "error: --sort must be one of capture|path|ingested (got '$SORT_BY')" >&2
+                    echo "error: --sort must be one of capture|path|ingested|score (got '$SORT_BY')" >&2
                     exit 64
                     ;;
             esac
@@ -190,9 +191,10 @@ fi
 
 ORDER_BY=""
 case "$SORT_BY" in
-    capture)  ORDER_BY="ORDER BY capture_time_unix_seconds" ;;
-    path)     ORDER_BY="ORDER BY source_path" ;;
-    ingested) ORDER_BY="ORDER BY ingested_at_unix_seconds" ;;
+    capture)  ORDER_BY="ORDER BY p.capture_time_unix_seconds" ;;
+    path)     ORDER_BY="ORDER BY p.source_path" ;;
+    ingested) ORDER_BY="ORDER BY p.ingested_at_unix_seconds" ;;
+    score)    ORDER_BY="ORDER BY cs.aesthetic_score DESC" ;;
 esac
 
 LIMIT_CLAUSE=""
@@ -232,20 +234,31 @@ case "$MODE" in
         "
         ;;
     list)
+        # Qualify WHERE clause for the JOIN alias.
+        WHERE_CLAUSE_P=""
+        if [[ $INCLUDE_SUPERSEDED -eq 0 ]]; then
+            WHERE_CLAUSE_P="WHERE p.superseded_at_unix_seconds IS NULL"
+        fi
         sqlite3 -header -column "$CATALOG_FILE" "
-            SELECT source_path,
-                   make,
-                   model,
-                   camera_slug,
-                   width || 'x' || height AS dim,
-                   datetime(capture_time_unix_seconds, 'unixepoch') AS captured_utc,
-                   file_size,
-                   CASE WHEN superseded_at_unix_seconds IS NULL
+            SELECT p.source_path,
+                   p.make,
+                   p.model,
+                   p.camera_slug,
+                   p.width || 'x' || p.height AS dim,
+                   datetime(p.capture_time_unix_seconds, 'unixepoch') AS captured_utc,
+                   p.file_size,
+                   CASE WHEN p.superseded_at_unix_seconds IS NULL
                         THEN 'active'
                         ELSE 'superseded'
-                   END AS state
-              FROM photos
-              $WHERE_CLAUSE
+                   END AS state,
+                   CASE WHEN cs.aesthetic_score IS NOT NULL
+                        THEN printf('%.4f', cs.aesthetic_score)
+                        ELSE '-'
+                   END AS score
+              FROM photos p
+              LEFT JOIN cull_scores cs
+                ON cs.photo_id = p.id AND cs.model_slug = 'nima-aesthetic-v1'
+              $WHERE_CLAUSE_P
               $ORDER_BY
               $LIMIT_CLAUSE;
         "

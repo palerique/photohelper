@@ -7,16 +7,17 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 3 (`ai-culling-skeleton` — 2026-05-28) — **SHIPPED** via PR #6
-(`64452ad`). Session narrowed to D5+D6+D7 after D0 ABORT.
+**Last session**: 4 (`ai-culling-pipeline` — 2026-05-29) — **SHIPPED** via PR #7
+(`0069dac`). Full AI culling pipeline: NIMA inference, catalog v2, `cull` subcommand,
+143 tests. Post-ship: `photohelper-cull.sh` fixed (PHOTOHELPER_MODEL_DIR wired) +
+`photohelper-list-catalog.sh` enhanced (`--sort score` + score column in list mode).
 
-**Current session**: **04** (`ai-culling-pipeline`) — **SHIPPED** via PR #N.
-Branch deleted after merge.
+**Current session**: not started — resume from main.
 
-**Goal** (session 04): Full AI culling pipeline — D0'→D1a→D1b/c→D1d→D1e→D2a/b→D3. DONE.
-
-**Action (next session)**: Session 05 — dedup pipeline (DN-024 MobileCLIP) or
+**Goal (next session)**: Session 05 — dedup pipeline (DN-024 MobileCLIP) or
 `develop` pipeline start. Begin with `git switch main && git pull --ff-only origin main`.
+
+**Action**: Start session 05 per the standard protocol.
 
 **Status**: SHIPPED. `just ci` GREEN (143 tests). Session-end R1+R2 CLEAN.
 Completed this session: D0' (ANL-002+DN-026 closed), D1a (ort dep), D1b+D1c
