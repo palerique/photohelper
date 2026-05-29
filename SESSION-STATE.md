@@ -8,28 +8,24 @@
 > rolling-archive convention. The git log is the full timeline.
 
 **Last session**: 3 (`ai-culling-skeleton` — 2026-05-28) — **SHIPPED** via PR #6
-(`64452ad`). Session narrowed to D5+D6+D7 after D0 ABORT. DN-026 resolved
-pre-session-04 via `scripts/convert-nima-to-onnx.sh` (tf2onnx Path A).
+(`64452ad`). Session narrowed to D5+D6+D7 after D0 ABORT.
 
-**Current session**: **04** (`ai-culling-pipeline`) — **PLAN-REVIEW COMPLETE;
-READY FOR IMPLEMENTATION.** Branch: `session-04/ai-culling-pipeline`. Plan v3
-(final) at HEAD. Plan-review ran 2 rounds (R1: 6 CRITICAL + 13 HIGH → closed;
-R2: 3 HIGH + 5 MEDIUM + 2 LOW → closed).
+**Current session**: **04** (`ai-culling-pipeline`) — **PAUSED FOR CONTEXT REFRESH.**
+Branch: `session-04/ai-culling-pipeline`. Implementation ~50% complete.
+`just ci` GREEN. 133 tests.
 
-**Goal** (session 04): Full AI culling pipeline — D0' (ANL-002 addendum + DN-026
-closure) → D1a (ort dep) → D1b/c (VerifiedModelBytes + Nima + NimaScore) →
-D1d (ONNX via LFS) → D1e (read_raw_rgb) → D2a/b (catalog v2 migration +
-cull_scores + insert_cull_score) → D3 (run_cull + cull subcommand).
+**Goal** (session 04): Full AI culling pipeline — D0'→D1a→D1b/c→D1d→D1e→D2a/b→D3.
 
-**Action**: **CONTINUE IMPLEMENTATION.** D1e (read_raw_rgb FFI) → D2a/b (catalog
-v2 migration + cull_scores + insert_cull_score) → D3 (run_cull + cull subcommand).
-Sub-component review at D2b boundary per plan checkpoints. Then session-end R1+R2.
+**Action**: **RESUME IMPLEMENTATION at D1e.** Next commit:
+`feat(raw): D1e — read_raw_rgb (libraw_dcraw_process FFI + RgbImage output)`
+Then D2a → D2b → D3 → sub-component review at D2b → session-end R1+R2.
 
-**Status**: `just ci` GREEN (133 tests; +0 new tests yet in session-04 beyond D0').
-Completed: D0' (ANL-002+DN-026), D1a (ort dep), D1b+D1c (RgbImage+VerifiedModelBytes
-+NimaScore+Nima+Error), D1d (ONNX via LFS + verify-model-sha256 gate).
-Remaining: D1e (read_raw_rgb in photohelper-raw), D2a/b (catalog migration),
-D3 (cull subcommand), tests, sub-component review at D2b, session-end review.
+**Status**: `just ci` GREEN (133 tests). Session paused for context refresh.
+Completed this window: D0' (ANL-002+DN-026 closed), D1a (ort dep), D1b+D1c
+(RgbImage in core + VerifiedModelBytes+NimaScore+Nima+Error in ai), D1d (ONNX
+via LFS + verify-model-sha256 CI gate). DN-024 (dedup) escalated → session 05.
+Remaining: D1e (read_raw_rgb FFI), D2a/b (catalog migration + cull_scores),
+D3 (run_cull + cull subcommand), tests, sub-component review, session-end.
 
 **Plan-review history (session 04 — COMPLETE)**:
 - R1 → 6 CRITICAL + 13 HIGH + 10 MEDIUM + 3 LOW → plan v2
