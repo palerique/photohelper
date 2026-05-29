@@ -572,3 +572,74 @@ just session-start
 ```
 
 Then paste the restart prompt (see handoff block below).
+
+---
+
+## Checkpoint 8 — session 03 plan-review COMPLETE (2026-05-28; PAUSED for context refresh, implementation ready)
+
+**Status**: PAUSED. Branch: `session-03/ai-culling-skeleton` at `5eb2bc1`. Plan-review ran 4 rounds to CLEAN. No implementation code yet. CI GREEN (118 tests).
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code, session 03 plan-review rounds 2–4 window)
+
+### What landed this window
+
+This window completed the full session 03 plan-review protocol (Rounds 2–4), beginning where Checkpoint 7 paused (R1 complete, R1 remediation needed).
+
+**11 commits on `session-03/ai-culling-skeleton`**:
+
+- `dc95639` — **plan v2** (R1 remediation: 10 CRITICAL + 18 HIGH + 5 MEDIUM). Major structural changes: D0 resequenced first; no Migration trait (match arm); `dup_groups` deferred; no Scorer trait (concrete `&Nima`); `VerifiedModelBytes` type-state; per-worker ort Session; D5c restructured (no panic in `heartbeat_loop`); `read_raw_rgb` via LibRaw `dcraw_process`; 5 new TDs (TD-012–TD-016); 4 new DNs (DN-022–DN-025).
+- `49e218b` — SESSION-STATE update (plan v2 committed, R2 pending)
+- `e9a8e96` — **plan-review Round 2 artifact** (3 CRITICAL + 10 HIGH + 9 MEDIUM + 4 LOW). All 10 R1 watch-list items VERIFIED PASS. New CRITICALs: Python onnx CI breakage (T1), `force_heartbeat_panic_in_thread` unimplementable (T2), `CullStats` counter type unspecified (T3).
+- `285675e` — **plan v3** (R2 remediation). Closed all 3 CRITICALs + 10 HIGHs + 9 MEDIUMs.
+- `5911262` — **plan-review Round 3 artifact** (3 CRITICAL + 4 HIGH + 2 MEDIUM + 1 LOW). R3 watch-list 11/11 PASS. New CRITICALs: `NimaScore: Ord` without `Eq` compile error (T-α), D5e subprocess test structurally impossible (T-β), per-worker Session frequency unspecified (T-γ).
+- `a9f7152` — **plan v4** (R3 remediation). Closed 3 CRITICALs + 4 HIGHs + 2 MEDIUMs.
+- `da5478e` — plan v4 addendum: `run_cull` signature made D0-conditional on `Session::run` receiver type.
+- `b158af2` — plan v4 fixup: removed stale `?` pseudocode duplicate; added `Nima::new` constructor to D1c; fixed `thread_local!` `Result` handling.
+- `b239a38` — **plan-review Round 4 artifact — CLEAN** (0 CRITICAL + 0 HIGH; 2 MEDIUM resolved inline). R4 watch-list 7/7 PASS. Plan-review declared complete.
+- `5eb2bc1` — SESSION-STATE update (plan-review complete, implementation ready)
+
+### New TDs opened this window
+
+- **TD-012**: LibRaw AHD demosaic stop-gap for NIMA preprocessing.
+- **TD-013**: Per-cull-run audit trail absent from `cull_scores`.
+- **TD-014**: ort RC pin `=<pin-from-D0>` requires upgrade to stable 2.0.0.
+- **TD-015**: `--model-path` power-user override deferred from v0.1.
+- **TD-016**: `HeartbeatStop` + `heartbeat_loop` duplicated in `cull.rs` (factor at third subcommand).
+
+### New DNs opened this window
+
+- **DN-022**: LibRaw demosaic algorithm selection for NIMA preprocessing.
+- **DN-023**: `cull_scores.photo_id` ON DELETE CASCADE absent from v2 schema.
+- **DN-024**: MobileCLIP dup-detection compute deferred to session 04+.
+- **DN-025**: NIMA cross-platform score tolerance (apple-silicon vs Linux x86_64).
+
+### Plan v4 key design decisions (canonical; binding for implementation)
+
+1. **D0 is binding**: `Session::run` receiver type (confirmed at D0 §Threading semantics) determines D4 design: `&self` → one `Arc<Nima>` shared; `&mut self` → `thread_local!` per-worker construction.
+2. **No `Migration` trait**: `apply_v1_to_v2()` match-arm approach. `SCHEMA_VERSION = 2`.
+3. **`cull_scores` only in v2** (no `dup_groups`).
+4. **`VerifiedModelBytes` wraps `Arc<[u8]>`**: `from_verified` takes borrow; workers clone cheaply.
+5. **`NimaScore: Copy + Clone + PartialEq + Eq + PartialOrd + Ord`**: `Ord` via `f32::total_cmp`.
+6. **D5c heartbeat-death test is in-process only** (not subprocess).
+7. **`run_cull` signature D0-conditional**: two paths shown in plan; D0 picks one.
+8. **`CullStats` has 8 `AtomicU64` fields** (explicitly enumerated including `derive_failed` + `catalog_inconsistency`).
+9. **`PhotoId::derive` uses `match` in `for_each` closure** (not `?`).
+
+### Precise next steps when context restored
+
+1. **Read `SESSION-STATE.md`** (canonical re-orientation).
+2. **Read this Checkpoint 8** (you're here).
+3. **Skim `docs/plans/session-03.md` §Deliverables** to understand the implementation order: D6 (first chore) → D0 (pre-flight, binding) → D1a → D1b/c → D1d → D2a/b/c → D3 → D4 → D5 → D7.
+4. **Skim `docs/code-reviews/session-03-plan-round4.md`** — the "plan-review declared complete" artifact (summary of all 4 rounds).
+5. **Begin implementation**: first commit is `chore(cli): refresh stub-subcommand messages (closes DN-020)` targeting `main.rs:127-130` (the D6 first-chore per plan §D6).
+6. **Then D0** (pre-flight): `chore(ai): pre-flight ort + NIMA audit (Deliverable 0)` — verify ort RC CVE-posture, verify NIMA license, run inference on CC0 fixtures, verify `Session::run` receiver type (the binding output that determines D4's signature and concurrency model).
+7. **Sub-component reviews** fire after D1a+D1b+D1c land (photohelper-ai) and after D2a+D2b land (catalog migration).
+
+### Resume from a fresh context
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-03/ai-culling-skeleton
+just session-start
+```
+
+Then paste the restart prompt rendered at the end of this pause turn.
