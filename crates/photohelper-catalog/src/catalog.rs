@@ -297,7 +297,14 @@ impl Catalog {
         }
 
         let canonical_path = AbsPath::canonicalize(catalog_path).map_or_else(
-            |_| catalog_path.to_path_buf(),
+            |e| {
+                tracing::warn!(
+                    error = %e,
+                    path = %catalog_path.display(),
+                    "could not canonicalize catalog path; using raw path in error messages"
+                );
+                catalog_path.to_path_buf()
+            },
             |p| p.as_path().to_path_buf(),
         );
 
@@ -495,19 +502,12 @@ impl Catalog {
                 path: self.canonical_path.clone(),
                 source: Box::new(e),
             })?;
-            let source_path =
-                AbsPath::canonicalize(std::path::Path::new(&path_str)).map_err(|e| {
-                    Error::CatalogOpen {
-                        path: self.canonical_path.clone(),
-                        source: Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("stored path is not canonicalisable: {path_str}: {e}"),
-                        )),
-                    }
-                })?;
+            // R1-A: store the raw path without calling std::fs::canonicalize.
+            // Existence and canonicality checks happen per-file in run_cull so
+            // a single missing file does not abort the entire work list.
             out.push(CullRow {
                 photo_id,
-                source_path,
+                source_path: std::path::PathBuf::from(&path_str),
             });
         }
         Ok(out)
@@ -521,11 +521,15 @@ impl Catalog {
     /// pre-SELECT round-trip (plan PR1-T13).
     ///
     /// `score` is the raw aesthetic score in `[1.0, 10.0]`; pass
-    /// `nima_score.get() as f64` at the call site.
+    /// `nima_score.as_f64()` at the call site.
     ///
     /// # Errors
     /// - `Error::CatalogPoisoned` if a prior worker panicked.
-    /// - `Error::CatalogInsert` for SQLite failures (includes FK violations).
+    /// - `Error::CatalogInsert` for SQLite failures (includes FK violations)
+    ///   and out-of-range `score` values.
+    // TD-013: per-cull-run audit trail absent; scored_at_unix_seconds records when
+    // the score was written but there is no cull_run_id column linking related rows
+    // into a single batch. See TECH-DEBT.md § TD-013.
     pub fn insert_cull_score(
         &self,
         photo_id: PhotoId,
@@ -552,6 +556,14 @@ impl Catalog {
                 });
             }
         };
+        if !score.is_finite() || !(1.0_f64..=10.0_f64).contains(&score) {
+            return Err(insert_error(
+                photo_id,
+                rusqlite::Error::InvalidParameterName(format!(
+                    "aesthetic_score {score} is not finite or not in [1.0, 10.0]"
+                )),
+            ));
+        }
         let id_bytes = photo_id.as_bytes().to_vec();
         let tx = guard
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -854,6 +866,26 @@ mod tests {
     }
 
     // =========================================================
+    // R1-H: insert_cull_score poison path test
+    // =========================================================
+
+    #[test]
+    fn insert_cull_score_poison_returns_catalog_poisoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Arc::new(Catalog::open(dir.path().join("c.db"), 1).unwrap());
+        let photo = make_test_photo(dir.path(), 1);
+        cat.upsert(&photo, 0).unwrap();
+        cat.poison_for_testing();
+        let err = cat
+            .insert_cull_score(photo.photo_id(), "nima-v1", 5.0, 0)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CatalogPoisoned { .. }),
+            "expected CatalogPoisoned after poison, got {err:?}"
+        );
+    }
+
+    // =========================================================
     // D2b: cull_scores integration tests
     // =========================================================
 
@@ -893,6 +925,22 @@ mod tests {
             .insert_cull_score(pid, "nima-aesthetic-v1", 6.0, 2_000_000)
             .unwrap();
         assert_eq!(outcome2, InsertScoreOutcome::AlreadyScored);
+        // R1-I: INSERT OR IGNORE must preserve first writer's score (5.0, not 6.0).
+        {
+            let conn = cat.conn.lock().unwrap();
+            let stored: f64 = conn
+                .query_row(
+                    "SELECT aesthetic_score FROM cull_scores \
+                     WHERE photo_id = ?1 AND model_slug = ?2",
+                    rusqlite::params![&pid.as_bytes().to_vec(), "nima-aesthetic-v1"],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                (stored - 5.0).abs() < f64::EPSILON,
+                "INSERT OR IGNORE must preserve first writer's score; got {stored}"
+            );
+        }
 
         // FK enforcement: insert with a non-existent photo_id fails.
         let fake_pid = photo_id_from_row_bytes([99u8; 32]);
@@ -919,9 +967,24 @@ mod tests {
 
         let slug = "nima-aesthetic-v1";
 
-        // Before any scores, all 3 rows are in the work list.
+        // Before any scores, all 3 rows are in the work list, oldest-first.
         let rows = cat.unsuperseded_unscored_rows(slug).unwrap();
         assert_eq!(rows.len(), 3);
+        // R1-C: verify ORDER BY ingested_at_unix_seconds ordering.
+        assert_eq!(
+            rows[0].photo_id,
+            p1.photo_id(),
+            "oldest ingest must be first"
+        );
+        assert_eq!(rows[1].photo_id, p2.photo_id());
+        assert_eq!(rows[2].photo_id, p3.photo_id());
+        // R1-D: scoring for model-A must not exclude from model-B work list.
+        let rows_other = cat.unsuperseded_unscored_rows("other-model-v1").unwrap();
+        assert_eq!(
+            rows_other.len(),
+            3,
+            "scoring for one model must not exclude from a different model's work list"
+        );
 
         // Score p1 — must disappear from the work list.
         cat.insert_cull_score(p1.photo_id(), slug, 5.0, 0).unwrap();

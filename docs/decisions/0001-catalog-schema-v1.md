@@ -108,6 +108,9 @@ previous row when content at the same `source_path` changes.
 ## What's deliberately NOT in v1
 
 - **Cull score columns** (`quality`, `blur`, `eye_state`, etc.) —
+  *(these column names never materialized; session 04 shipped a separate
+  `cull_scores` table with `aesthetic_score`; see
+  `docs/decisions/0002-catalog-schema-v2.md`)*
   session 03+ when `cull` lands. Per DN-005 the migration framework
   (currently absent — single-table v1 doesn't need it) materializes
   alongside that schema change.

@@ -3,9 +3,11 @@
 //! Column-name knowledge is confined to this module so column reorders
 //! don't silently break positional reads.
 
+use std::path::PathBuf;
+
 use photohelper_core::Error;
 use photohelper_core::catalog_glue;
-use photohelper_core::model::{AbsPath, PhotoId};
+use photohelper_core::model::PhotoId;
 
 /// One row of the `photos` table.
 #[derive(Clone, Debug)]
@@ -71,13 +73,20 @@ impl PhotoRow {
 /// all 14 columns of `PhotoRow`.
 ///
 /// Produced by [`super::Catalog::unsuperseded_unscored_rows`].
+///
+/// `source_path` is the raw `PathBuf` as stored in the catalog. The
+/// culling pipeline is responsible for per-file existence and
+/// canonicality checks; keeping the batch-query path free of filesystem
+/// calls ensures that one deleted file cannot abort the entire work list
+/// (R1-A fix: see `docs/code-reviews/session-04-catalog-migration-round1.md`).
 #[derive(Clone, Debug)]
 pub struct CullRow {
     /// `PhotoId` as stored in the catalog (used for content-change detection
     /// and as the FK key in `cull_scores`).
     pub photo_id: PhotoId,
-    /// Canonical absolute path to the source file.
-    pub source_path: AbsPath,
+    /// Source path as stored at ingest time (raw, not re-canonicalized).
+    /// Callers should check existence before opening the file.
+    pub source_path: PathBuf,
 }
 
 /// Columns selected by `from_row`. Keep in sync with the struct.
