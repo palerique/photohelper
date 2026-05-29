@@ -19,14 +19,14 @@ hit network errors on first launch attempt).
 **Goal**: Session 05 — duplicate-detection pipeline (DN-024 MobileCLIP embeddings +
 dup_clusters). Plan at `docs/plans/session-05.md`.
 
-**Action**: Begin implementation — D0 pre-flight first (MobileCLIP license audit + inference probe).
-Commit `docs/analysis/ANL-003-mobileclip-preflight.md` before any model binary.
-If D0 ABORT: close session as D0-ABORT per plan.
+**Action**: D5 ledger updates → session-end review R1+R2 → PR.
 
-**Status (session 05 so far)**: Plan-review COMPLETE (R1+R2). Plan v3 committed (CLEAN).
-- R1: 3 CRITICAL + 13 HIGH + 8 MEDIUM + 5 LOW → plan v2
-- R2: 0 CRITICAL + 0 HIGH + 3 MEDIUM + 3 LOW → plan v3 (CLEAN; all R1 watch-list 16/16 CLOSED)
-`just ci` GREEN (143 tests — no code changes from main).
+**Status (session 05 so far)**: D0-D4 COMPLETE. `just ci` GREEN (183 tests).
+- D0 ✓ (ANL-003, CLIP ViT-B/32 LAION2B int8, TD-020 filed)
+- D1a-D1c ✓ (ImageEmbedding, MobileClip, 3+6 tests); D1d review ✓ (CLEAN)
+- D2a ✓ (schema v3, TD-019 filed); D2b ✓ (catalog API); D2c review ✓ (CLEAN; TD-017+TD-018 filed)
+- D3 ✓ (dedup subcommand, 3 integration tests, photohelper-dedup.sh)
+- D4 ✓ (heartbeat.rs extracted; TD-016+TD-010 CLOSED)
 
 **Plan-review history (session 05 — COMPLETE)**:
 - R1 → 3 CRITICAL + 13 HIGH + 8 MEDIUM + 5 LOW → plan v2
