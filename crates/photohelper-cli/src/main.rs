@@ -24,6 +24,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 mod commands;
+mod heartbeat;
 
 use photohelper_ai::{MODEL_MANIFEST_NAME, VerifiedModelBytes};
 

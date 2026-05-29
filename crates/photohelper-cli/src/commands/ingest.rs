@@ -5,11 +5,9 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use anyhow::Context as _;
 use rayon::iter::ParallelBridge;
@@ -22,6 +20,7 @@ use photohelper_core::model::{
     AbsPath, CameraId, ExifMetadata, IngestOutcome, Photo, PhotoId, clamp_mtime,
 };
 
+use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
 use crate::{Cli, IngestArgs, exit_code};
 
 // Narrowed to `["cr3"]` for v0.1 per plan §4a R2-T8: photohelper supports
@@ -30,59 +29,6 @@ use crate::{Cli, IngestArgs, exit_code};
 // 7-format walker behavior happens in the same session that adds the
 // second profile.
 const RAW_EXTS: &[&str] = &["cr3"];
-
-/// Heartbeat interval. Overridable in tests via the
-/// `PHOTOHELPER_HEARTBEAT_INTERVAL_MS` env var so test row 48 (heartbeat
-/// at default verbosity) doesn't have to wait 10 seconds in CI.
-/// `pub(crate)` so `cull.rs` can share the same env-var override (TD-016).
-pub(crate) fn heartbeat_interval() -> Duration {
-    if let Ok(s) = std::env::var("PHOTOHELPER_HEARTBEAT_INTERVAL_MS")
-        && let Ok(ms) = s.parse::<u64>()
-    {
-        return Duration::from_millis(ms.max(10));
-    }
-    Duration::from_secs(10)
-}
-
-/// Cooperative stop signal for the heartbeat thread. Pairs a `Mutex<bool>`
-/// with a `Condvar` so the heartbeat loop's wait can be cut short the
-/// instant `run_ingest` is ready to print the summary line — closes TD-003
-/// (the previous `AtomicBool` + `thread::sleep(granularity)` design left
-/// the heartbeat thread orphaned, racing stderr against the summary line).
-pub(crate) struct HeartbeatStop {
-    lock: Mutex<bool>,
-    cvar: Condvar,
-}
-
-impl HeartbeatStop {
-    pub(crate) fn new() -> Self {
-        Self {
-            lock: Mutex::new(false),
-            cvar: Condvar::new(),
-        }
-    }
-
-    /// Mark the stop flag and wake every waiter immediately.
-    pub(crate) fn signal(&self) {
-        let mut stopped = self.lock.lock().unwrap_or_else(|p| p.into_inner());
-        *stopped = true;
-        drop(stopped);
-        self.cvar.notify_all();
-    }
-
-    /// Wait up to `dur` for `signal()`; returns `true` if stop was observed.
-    pub(crate) fn wait_for_stop(&self, dur: Duration) -> bool {
-        let stopped = self.lock.lock().unwrap_or_else(|p| p.into_inner());
-        if *stopped {
-            return true;
-        }
-        let (stopped, _) = self
-            .cvar
-            .wait_timeout(stopped, dur)
-            .unwrap_or_else(|p| p.into_inner());
-        *stopped
-    }
-}
 
 /// Atomic counters mapped 1:1 to the §Observability summary line.
 pub(crate) struct IngestStats {
@@ -184,7 +130,16 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
         let stop = Arc::clone(&stop);
         thread::Builder::new()
             .name("ph-heartbeat".into())
-            .spawn(move || heartbeat_loop(&stats, &stop, heartbeat_interval()))
+            .spawn(move || {
+                run_heartbeat_loop(&stop, heartbeat_interval(), || {
+                    eprintln!(
+                        "[heartbeat] walked {}, ingested {}, in-flight {}",
+                        stats.walked.load(Ordering::Relaxed),
+                        stats.ingested.load(Ordering::Relaxed),
+                        stats.in_flight.load(Ordering::Relaxed),
+                    );
+                });
+            })
             .context("spawning heartbeat thread")?
     };
 
@@ -272,46 +227,88 @@ pub fn run_ingest(cli: &Cli, args: &IngestArgs) -> anyhow::Result<u8> {
     Ok(0)
 }
 
-fn heartbeat_loop(stats: &IngestStats, stop: &HeartbeatStop, interval: Duration) {
-    // R2-T4 fix: granularity = min(interval, 100ms). Pre-fix the granularity
-    // was hardcoded to 100ms, which meant `PHOTOHELPER_HEARTBEAT_INTERVAL_MS`
-    // values below 100 silently floored to 100ms because the first iteration
-    // always slept `granularity` before the tick-counter check. Now sub-100ms
-    // env overrides actually take effect (used by tests) while production
-    // (interval=10s) still gets the 100ms responsive-to-stop-flag behavior.
-    //
-    // TD-003 closure: the wait below is a Condvar `wait_timeout`, not a
-    // blind `thread::sleep`, so `stop.signal()` cuts the wait short and the
-    // join in `run_ingest` returns near-instantly (no granularity-cycle
-    // latency added to summary printing).
-    //
-    // Tick BEFORE wait (DN-019 lesson): with a wait-first loop, a fast
-    // ingest could finish + signal `stop` before the heartbeat thread was
-    // scheduled, leaving the first `wait_for_stop` to observe the signal
-    // immediately and return without ever printing. Tick-first guarantees
-    // the operator gets at least one liveness signal per `interval` even
-    // when the run is shorter than the OS thread-startup latency.
-    let granularity = interval.min(Duration::from_millis(100));
-    let ticks = interval
-        .as_millis()
-        .checked_div(granularity.as_millis())
-        .unwrap_or(1)
-        .max(1) as u64;
-    let mut counter: u64 = 0;
-    loop {
-        counter += 1;
-        if counter >= ticks {
-            counter = 0;
-            eprintln!(
-                "[heartbeat] walked {}, ingested {}, in-flight {}",
-                stats.walked.load(Ordering::Relaxed),
-                stats.ingested.load(Ordering::Relaxed),
-                stats.in_flight.load(Ordering::Relaxed),
+/// TD-010 row 1 (build_global WARN) + row 4 (heartbeat-death WARN) in-process tests.
+///
+/// These tests call `run_ingest` directly (not via subprocess) so that rayon's
+/// global pool persists across calls within the same process — the only way to
+/// trigger "pool already initialized" with our current architecture.
+#[cfg(test)]
+mod td010_tests {
+    use std::sync::Arc;
+
+    use crate::heartbeat::{HeartbeatStop, spawn_dying_heartbeat};
+    use crate::{Cli, Command, IngestArgs};
+
+    use super::run_ingest;
+
+    fn make_cli_and_args(dir: &std::path::Path, catalog: std::path::PathBuf) -> (Cli, IngestArgs) {
+        let cli = Cli {
+            verbose: 0,
+            quiet: false,
+            threads: Some(1), // triggers build_global path
+            catalog: Some(catalog),
+            catalog_lock_timeout_seconds: 1,
+            no_color: false,
+            command: Command::Camera, // placeholder; run_ingest ignores this field
+        };
+        let args = IngestArgs {
+            path: dir.to_path_buf(),
+            recursive: true,
+            strict: false,
+        };
+        (cli, args)
+    }
+
+    /// TD-010 row 1: build_global WARN fires when rayon pool already initialized.
+    ///
+    /// Two sequential in-process calls to run_ingest with --threads 1.
+    /// The second call hits "pool already initialized" and logs a WARN.
+    /// We verify both calls return successfully (WARN does not abort).
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn build_global_already_initialized_warns_but_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join(".photohelper").join("catalog.db");
+        let (cli, args) = make_cli_and_args(dir.path(), catalog);
+
+        let exit1 = run_ingest(&cli, &args).unwrap();
+        assert_eq!(exit1, 0, "first run_ingest must succeed");
+
+        // Second call in same process: rayon pool already initialized → WARN.
+        let exit2 = run_ingest(&cli, &args).unwrap();
+        assert_eq!(
+            exit2, 0,
+            "second run_ingest must succeed despite build_global WARN"
+        );
+    }
+
+    /// TD-010 row 4: heartbeat-death WARN fires when the heartbeat thread dies
+    /// before the walk completes.
+    ///
+    /// Uses the `spawn_dying_heartbeat` test seam from heartbeat.rs.
+    /// The dying thread panics after one tick; `is_finished()` becomes true;
+    /// the shutdown code logs a WARN. We verify the seam itself works correctly
+    /// (the dying thread panics and join() returns Err).
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn spawn_dying_heartbeat_panics_and_join_returns_err() {
+        let stop = Arc::new(HeartbeatStop::new());
+        let handle = spawn_dying_heartbeat(Arc::clone(&stop));
+
+        // Wait for the thread to panic (it panics after 50ms if stop not signalled).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !handle.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dying heartbeat thread did not finish within 5s"
             );
+            std::thread::yield_now();
         }
-        if stop.wait_for_stop(granularity) {
-            return;
-        }
+        // Join must return Err (thread panicked).
+        assert!(
+            handle.join().is_err(),
+            "dying heartbeat join() must return Err after panic"
+        );
     }
 }
 

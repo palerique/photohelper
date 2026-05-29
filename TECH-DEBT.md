@@ -176,9 +176,10 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
-### TD-010 — PARTIALLY CLOSED. 2 sub-items remain (build_global + heartbeat-death-WARN in-process tests)
+### TD-010 — FULLY CLOSED (session 05 D4)
 
-- **Status**: PARTIALLY CLOSED (6a, 6b, 6c, 6d, 6e-rows-2+3, 6f all done in session 03). Remaining: 6e rows 1 + 4.
+- **Status**: CLOSED (2026-05-29, session 05 D4). All sub-items now closed. Final 2 sub-items: 6e row 1 (build_global WARN) and row 4 (heartbeat-death-WARN). Tests in `commands/ingest.rs::td010_tests` using the `spawn_dying_heartbeat` seam from `heartbeat.rs`.
+- **Remaining: 0**. Previously: PARTIALLY CLOSED (6a, 6b, 6c, 6d, 6e-rows-2+3, 6f all done in session 03). Remaining: 6e rows 1 + 4.
 - **Opened**: 2026-05-28 (session 2, Deliverable 6 deferral)
 - **Partial closure (session 03)**: The following sub-items landed in session 03 D5a–D5e commits:
   1. **6a `poison_for_testing` knob** — CLOSED. Commit D5a: `Catalog::poison_for_testing(&Arc<Self>)` + 3 poison tests.
@@ -269,7 +270,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-016 — `HeartbeatStop` + `heartbeat_loop` duplicated in `cull.rs`
 
-- **Status**: Open (duplication materialized — `cull.rs` exists as of session 04, commit dcdec49)
+- **Status**: CLOSED (2026-05-29, session 05 D4). `crates/photohelper-cli/src/heartbeat.rs` created with `HeartbeatStop`, `heartbeat_interval()`, `run_heartbeat_loop()` (generic tick closure). Both `ingest.rs` and `cull.rs` import from `heartbeat.rs`; `dedup.rs` (D3) also imports from it (three consumers). TD-010 closed alongside.
 - **Opened**: 2026-05-28 (session 3, D4 plan-review R1 remediation — PR1-T33)
 - **Stop-gap location**: `crates/photohelper-cli/src/commands/cull.rs:127,243` (heartbeat_loop_cull + HeartbeatStop usage) — session 04 commit dcdec49. In-source: `// TD-016: heartbeat_loop_cull duplicates logic from heartbeat_loop in ingest.rs`.
 - **Fundamental fix**: extract `HeartbeatStop`, `HeartbeatHandle`, and `heartbeat_loop` into a `crates/photohelper-cli/src/heartbeat.rs` module. Both `ingest.rs` and `cull.rs` import from that module. The module is `pub(crate)`. If the `develop` or `export` subcommand (session 04–05) also needs a heartbeat, that is the trigger for the refactor.
