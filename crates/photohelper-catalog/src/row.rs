@@ -146,6 +146,46 @@ impl EmbeddingRow {
     }
 }
 
+/// A 3-field projection for the develop pipeline: photo identity, path, and
+/// optional NIMA aesthetic score from the latest cull run.
+///
+/// Produced by [`super::Catalog::all_photos_with_cull_scores`].
+#[derive(Clone, Debug)]
+pub struct DevelopRow {
+    /// `PhotoId` as stored in the catalog (avoids re-deriving from disk).
+    photo_id: PhotoId,
+    /// Source path as canonicalized at ingest time.
+    source_path: PathBuf,
+    /// NIMA aesthetic score from the most recent cull run, if available.
+    nima_score: Option<f32>,
+}
+
+impl DevelopRow {
+    /// Construct from DB-retrieved values.
+    pub(crate) fn new(photo_id: PhotoId, source_path: PathBuf, nima_score: Option<f32>) -> Self {
+        Self {
+            photo_id,
+            source_path,
+            nima_score,
+        }
+    }
+
+    /// `PhotoId` as stored in the catalog.
+    pub fn photo_id(&self) -> PhotoId {
+        self.photo_id
+    }
+
+    /// Source path as canonicalized at ingest time.
+    pub fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+
+    /// NIMA aesthetic score, if the photo has been culled.
+    pub fn nima_score(&self) -> Option<f32> {
+        self.nima_score
+    }
+}
+
 /// Columns selected by `from_row`. Keep in sync with the struct.
 pub(crate) const SELECT_ALL_COLUMNS: &str = "id, source_path, file_size, \
      mtime_unix_seconds, mtime_anomalous, make, model, camera_slug, \

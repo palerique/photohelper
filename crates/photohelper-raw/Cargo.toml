@@ -60,6 +60,8 @@ static_assertions.workspace = true
 [dev-dependencies]
 # Used by integration_clip.rs to test CLIP embedding on real CR3 fixtures.
 photohelper-ai = { path = "../photohelper-ai" }
+# Used by integration_cr3.rs error-path tests (create temp files for invalid-input cases).
+tempfile.workspace = true
 
 [build-dependencies]
 # `sha2` verifies the vendored LibRaw tarball's SHA-256 at build time

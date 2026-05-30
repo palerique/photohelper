@@ -251,8 +251,7 @@ impl Nima {
 /// Bilinear downsample an `RgbImage` to `out_w × out_h` pixels.
 ///
 /// Returns a `Vec<u8>` of length `out_w * out_h * 3` in row-major RGB order.
-/// `pub(crate)` so `mobileclip.rs` can reuse for CLIP preprocessing (TD-020).
-pub(crate) fn bilinear_resize(src: &RgbImage, out_w: u32, out_h: u32) -> Vec<u8> {
+fn bilinear_resize(src: &RgbImage, out_w: u32, out_h: u32) -> Vec<u8> {
     let sw = src.width().get() as f32;
     let sh = src.height().get() as f32;
     let mut dst = vec![0u8; out_w as usize * out_h as usize * 3];

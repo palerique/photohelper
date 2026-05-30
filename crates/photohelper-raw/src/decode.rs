@@ -278,9 +278,12 @@ impl SensorBitDepth {
     ///
     /// Returns [`Error::RawInvalidBitDepth`] if `bits` is outside
     /// `8..=16`.
-    pub(crate) fn new(bits: u8) -> Result<Self, Error> {
+    pub(crate) fn new(path: &std::path::Path, bits: u8) -> Result<Self, Error> {
         if !(8..=16).contains(&bits) {
-            return Err(Error::RawInvalidBitDepth { value: bits });
+            return Err(Error::RawInvalidBitDepth {
+                path: path.to_path_buf(),
+                value: bits,
+            });
         }
         Ok(Self(bits))
     }
@@ -400,10 +403,11 @@ impl WhiteBalance {
     /// # Errors
     ///
     /// Returns [`Error::RawDecodeFailed`] with cause
-    /// [`RawDecodeCause::WhiteBalanceUnloaded`] when `cam_mul` is
-    /// all-zero (LibRaw's "unloaded" signal), or with cause
-    /// [`RawDecodeCause::WhiteBalanceInvalid`] when any element is
-    /// NaN, infinite, or negative.
+    /// [`RawDecodeCause::WhiteBalanceUnloaded`] when `cam_mul` is all-zero
+    /// (LibRaw's "unloaded" signal), or with cause
+    /// [`RawDecodeCause::WhiteBalanceInvalid`] when any element is NaN,
+    /// infinite, negative, or when R/G1/B channels are zero (G2 may be zero
+    /// for 3-channel Canon sensors that don't report a second green multiplier).
     pub(crate) fn from_libraw_cam_mul(path: &Path, cam_mul: [f32; 4]) -> Result<Self, Error> {
         let [r, g1, b, g2] = cam_mul;
         if cam_mul.iter().all(|x| *x == 0.0) {
@@ -412,7 +416,9 @@ impl WhiteBalance {
                 cause: RawDecodeCause::WhiteBalanceUnloaded,
             });
         }
-        if cam_mul.iter().any(|x| !x.is_finite() || *x < 0.0) {
+        // Reject NaN/Inf/negative in any channel, and zero in R/G1/B specifically.
+        // G2 (index 3) may legitimately be 0.0 on 3-channel RGGB sensors.
+        if cam_mul.iter().any(|x| !x.is_finite() || *x < 0.0) || r == 0.0 || g1 == 0.0 || b == 0.0 {
             return Err(Error::RawDecodeFailed {
                 path: path.to_path_buf(),
                 cause: RawDecodeCause::WhiteBalanceInvalid { values: cam_mul },
@@ -463,11 +469,12 @@ impl CamRgbToXyzD65Matrix {
     /// # Errors
     ///
     /// Returns [`Error::RawDecodeFailed`] with cause
-    /// [`RawDecodeCause::ColorMatrixUnloaded`] when LibRaw returned
-    /// the identity matrix (its "unloaded" signal — without a real
-    /// matrix, color management downstream is undefined), or with cause
-    /// [`RawDecodeCause::ColorMatrixInvalid`] when any entry is NaN or
-    /// infinite.
+    /// [`RawDecodeCause::ColorMatrixUnloaded`] when LibRaw returned the
+    /// identity matrix (its "unloaded" signal — without a real matrix,
+    /// color management downstream is undefined), or with cause
+    /// [`RawDecodeCause::ColorMatrixInvalid`] when any entry is NaN,
+    /// infinite, or when any row is all-zero (all-zero matrix produces a
+    /// completely black channel after color management).
     pub(crate) fn from_libraw_rgb_cam(path: &Path, rgb_cam: [[f32; 3]; 3]) -> Result<Self, Error> {
         let is_identity = rgb_cam.iter().enumerate().all(|(i, row)| {
             row.iter().enumerate().all(|(j, &val)| {
@@ -482,6 +489,16 @@ impl CamRgbToXyzD65Matrix {
             });
         }
         if rgb_cam.iter().flatten().any(|x| !x.is_finite()) {
+            return Err(Error::RawDecodeFailed {
+                path: path.to_path_buf(),
+                cause: RawDecodeCause::ColorMatrixInvalid,
+            });
+        }
+        // Reject all-zero rows: a row of all zeros produces a black output channel.
+        if rgb_cam
+            .iter()
+            .any(|row| row.iter().all(|&v| v.abs() < 1e-6))
+        {
             return Err(Error::RawDecodeFailed {
                 path: path.to_path_buf(),
                 cause: RawDecodeCause::ColorMatrixInvalid,
@@ -591,7 +608,7 @@ mod tests {
     fn sensor_bit_depth_accepts_canonical_values() {
         for v in [8u8, 10, 12, 14, 16] {
             assert!(
-                SensorBitDepth::new(v).is_ok(),
+                SensorBitDepth::new(&p(), v).is_ok(),
                 "bit depth {v} must be valid"
             );
         }
@@ -600,9 +617,9 @@ mod tests {
     #[test]
     fn sensor_bit_depth_rejects_below_8() {
         for v in [0u8, 1, 7] {
-            let err = SensorBitDepth::new(v).unwrap_err();
+            let err = SensorBitDepth::new(&p(), v).unwrap_err();
             match err {
-                Error::RawInvalidBitDepth { value } => assert_eq!(value, v),
+                Error::RawInvalidBitDepth { path: _, value } => assert_eq!(value, v),
                 other => panic!("unexpected variant for {v}: {other:?}"),
             }
         }
@@ -611,9 +628,9 @@ mod tests {
     #[test]
     fn sensor_bit_depth_rejects_above_16() {
         for v in [17u8, 32, u8::MAX] {
-            let err = SensorBitDepth::new(v).unwrap_err();
+            let err = SensorBitDepth::new(&p(), v).unwrap_err();
             match err {
-                Error::RawInvalidBitDepth { value } => assert_eq!(value, v),
+                Error::RawInvalidBitDepth { path: _, value } => assert_eq!(value, v),
                 other => panic!("unexpected variant for {v}: {other:?}"),
             }
         }
@@ -623,13 +640,13 @@ mod tests {
 
     #[test]
     fn sensor_levels_accepts_valid_pair() {
-        let depth = SensorBitDepth::new(14).unwrap();
+        let depth = SensorBitDepth::new(&p(), 14).unwrap();
         SensorLevels::new(&p(), 1024, 16383, depth).expect("valid R8-like levels");
     }
 
     #[test]
     fn sensor_levels_rejects_inverted_pair() {
-        let depth = SensorBitDepth::new(14).unwrap();
+        let depth = SensorBitDepth::new(&p(), 14).unwrap();
         let err = SensorLevels::new(&p(), 5000, 5000, depth).unwrap_err();
         match err {
             Error::RawInvalidLevels { path, black, white } => {
@@ -643,7 +660,7 @@ mod tests {
 
     #[test]
     fn sensor_levels_rejects_too_narrow_range() {
-        let depth = SensorBitDepth::new(14).unwrap();
+        let depth = SensorBitDepth::new(&p(), 14).unwrap();
         let err = SensorLevels::new(&p(), 1000, 1100, depth).unwrap_err();
         assert!(matches!(err, Error::RawInvalidLevels { .. }));
     }
@@ -651,7 +668,7 @@ mod tests {
     #[test]
     fn sensor_levels_rejects_white_exceeding_bit_depth() {
         // 8-bit max representable = 255; white = 1000 fails.
-        let depth = SensorBitDepth::new(8).unwrap();
+        let depth = SensorBitDepth::new(&p(), 8).unwrap();
         let err = SensorLevels::new(&p(), 0, 1000, depth).unwrap_err();
         assert!(matches!(err, Error::RawInvalidLevels { .. }));
     }
@@ -765,6 +782,61 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn color_matrix_rejects_infinite_entry() {
+        let m = [
+            [0.4124, 0.3576, 0.1805],
+            [0.2126, f32::INFINITY, 0.0722],
+            [0.0193, 0.1192, 0.9505],
+        ];
+        let err = CamRgbToXyzD65Matrix::from_libraw_rgb_cam(&p(), m).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::RawDecodeFailed {
+                cause: RawDecodeCause::ColorMatrixInvalid,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn color_matrix_rejects_all_zero_row() {
+        let m = [
+            [0.4124, 0.3576, 0.1805],
+            [0.0, 0.0, 0.0], // all-zero row produces a black channel
+            [0.0193, 0.1192, 0.9505],
+        ];
+        let err = CamRgbToXyzD65Matrix::from_libraw_rgb_cam(&p(), m).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::RawDecodeFailed {
+                cause: RawDecodeCause::ColorMatrixInvalid,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn white_balance_rejects_zero_red_channel() {
+        // R=0 is physically impossible; G2=0 is OK for 3-channel sensors.
+        let err = WhiteBalance::from_libraw_cam_mul(&p(), [0.0, 1.0, 1.4, 0.0]).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::RawDecodeFailed {
+                cause: RawDecodeCause::WhiteBalanceInvalid { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn white_balance_accepts_zero_g2_for_3channel_sensor() {
+        // G2=0 is normal for Canon bodies that only report 3 multipliers.
+        let wb = WhiteBalance::from_libraw_cam_mul(&p(), [2.1, 1.0, 1.4, 0.0])
+            .expect("3-channel WB (G2=0) must be valid");
+        assert!((wb.g2() - 0.0).abs() < f32::EPSILON);
+    }
+
     // --- CfaPattern ---
 
     #[test]
@@ -789,7 +861,7 @@ mod tests {
     // --- RawImage (accessors via private-field literal) ---
 
     fn r8_image() -> RawImage {
-        let depth = SensorBitDepth::new(14).expect("14-bit");
+        let depth = SensorBitDepth::new(&p(), 14).expect("14-bit");
         RawImage {
             pixels: BayerPlane::new(&p(), vec![0u16; 4], nz(2), nz(2)).expect("2x2"),
             cfa_pattern: CfaPattern::Rggb,

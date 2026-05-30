@@ -465,7 +465,7 @@ fn extract_raw_image(guard: &LibrawGuard, path: &Path) -> Result<RawImage, Error
         black: black_u16,
         white: 0,
     })?;
-    let bit_depth = SensorBitDepth::new(bit_depth_from_white(white_u16))?;
+    let bit_depth = SensorBitDepth::new(path, bit_depth_from_white(white_u16))?;
     let levels = SensorLevels::new(path, black_u16, white_u16, bit_depth)?;
 
     // SAFETY: handle is valid; libraw_get_cam_mul returns one float per call.

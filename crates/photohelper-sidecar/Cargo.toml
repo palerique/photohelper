@@ -12,6 +12,11 @@ description = "XMP sidecar I/O (Lightroom-compatible crs: + photohelper ph: name
 workspace = true
 
 [dependencies]
-# `photohelper-core` re-added when the sidecar reads/writes XMP for
-# `Photo` types in session 04+; dropped in D4 to satisfy the new
-# `unused_crate_dependencies` workspace lint.
+quick-xml.workspace = true
+time.workspace = true
+thiserror.workspace = true
+static_assertions.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

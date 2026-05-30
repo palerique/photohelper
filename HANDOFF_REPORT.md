@@ -1122,3 +1122,48 @@ git switch -c session-06/<slug>
 just session-start
 cat SESSION-STATE.md
 ```
+
+---
+
+## Checkpoint 16 — session 06 SHIPPED (2026-05-30; TD cleanup + develop pipeline + session-end review)
+
+**Status**: SHIPPED. PR #9 opened; CI pending merge.
+**Author**: Antigravity session 06, session-end window
+
+### What landed since Checkpoint 15 (D0-D5 + session-end review)
+
+**D0-D2 (TD Cleanup)**: Formally closed 7 Technical Debts:
+- TD-001: Pinned all GitHub Actions to commit SHAs.
+- TD-004: Configured OSV-Scanner for LibRaw CVE vulnerability monitoring.
+- TD-005: Formally closed env-var panic (removed in session 05).
+- TD-009: Ported `sanitize-check.sh` stage-2 to use portable macOS/BSD `mktemp`.
+- TD-011: Fixed all session-02 post-hoc review findings (+7 tests, Round 1 & Round 2 CLEAN).
+- TD-014: Set up `ort` stable cargo monitoring.
+- TD-020: Optimized and center-cropped MobileCLIP preprocessing.
+
+**D3-D4 (Develop Pipeline)**:
+- Designed and implemented the complete `photohelper-sidecar` crate for robust, atomic XMP sidecar reading/writing with Camera Raw (`crs:`) and photohelper (`ph:`) custom namespaces.
+- Developed the `DevelopRow` catalog projection and the `develop` subcommand to process raw files and write corresponding `.xmp` sidecar files natively in Lightroom Classic-compliant locations.
+
+**Session-end R1** (`docs/code-reviews/session-06-round1.md`): 14 findings; 14 retained (discard_rate=0.00). 3C+7H+2M+2L.
+- Key findings: Theme A (Lightroom overwrite clobber / rigid namespaces), Theme B (Temp file leak), Theme C (SQL iteration error swallowing), Theme D (macOS `mktemp` template suffix), Theme J (Thread-local Session reuse vulnerability).
+- Remediation: Fully resolved all 14 findings, verified inline, and added 2 new tests to ensure total correctness of conflict preservation.
+
+**Session-end R2** (`docs/code-reviews/session-06-round2.md`): 0 findings; all 9/9 watch-list items CLOSED. CLEAN.
+
+**Final test count**: 223 tests.
+`just ci` GREEN: fmt, lint, tests, audit, unsafe-isolation, sanitize-check, model SHA-256.
+
+### What is not yet in place
+
+- TD-012 AHD demosaic, TD-017 O(n²) clustering, TD-018 f32 BLOB quantization, export/watermark subcommands, release engineering.
+- DN-029: Lightroom custom namespace incompatibility (mapped out for session 07).
+
+### How to resume (session 07)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-07/lightroom-namespace-compatibility
+just session-start
+cat SESSION-STATE.md
+```

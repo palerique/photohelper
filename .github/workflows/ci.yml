@@ -4,10 +4,12 @@
 # gate jobs (fmt, lint, test, audit, sanitize-check) use the Rust step blocks
 # from stacks/rust.md. Green locally (`just ci`) == green here.
 #
-# Security note: action versions below use the `@vN` floating tags for
-# bootstrap readability; replace each with a commit SHA per your
-# supply-chain policy before relying on this for releases.
-# (search for `<<pin to SHA>>` in stacks/rust.md for the policy reminder.)
+# Action versions pinned to commit SHAs (TD-001, session 06):
+#   actions/checkout       v4.3.1  34e114876b0b11c390a56381ad16ebd13914f8d5
+#   dtolnay/rust-toolchain HEAD    3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+#   Swatinem/rust-cache    v2.9.1  c19371144df3bb44fab255c43d04cbc2ab54d1c4
+# Upgrade cadence: annually or when a CVE forces an earlier upgrade.
+# See docs/decisions/0004-action-version-pinning.md.
 #
 # System prerequisites for the LibRaw build:
 #   * pkg-config + autoconf + libtool + make + g++ (apt build-essential)
@@ -28,7 +30,7 @@ jobs:
     name: verify-state (scaffolding intact)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4   # <<pin to SHA>>
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - name: Verify repo state
         run: ./scripts/verify-state.sh
 
@@ -37,23 +39,27 @@ jobs:
     name: format check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4   # <<pin to SHA>>
-      - uses: dtolnay/rust-toolchain@stable   # <<pin to SHA>>
-        with: { components: rustfmt }
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
+        with:
+          toolchain: stable
+          components: rustfmt
       - run: cargo fmt --all -- --check
 
   lint:
     name: lint (zero warnings)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4   # <<pin to SHA>>
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           lfs: true
       - name: Install LibRaw build prerequisites
         run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config autoconf libtool ripgrep
-      - uses: dtolnay/rust-toolchain@stable   # <<pin to SHA>>
-        with: { components: clippy }
-      - uses: Swatinem/rust-cache@v2   # <<pin to SHA>>
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
       - run: cargo clippy --all-targets --all-features --workspace -- -D warnings
       - name: unsafe-isolation gate
         run: ./scripts/check-unsafe-isolation.sh
@@ -62,13 +68,15 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4   # <<pin to SHA>>
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           lfs: true
       - name: Install LibRaw build prerequisites
         run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config autoconf libtool libimage-exiftool-perl
-      - uses: dtolnay/rust-toolchain@stable   # <<pin to SHA>>
-      - uses: Swatinem/rust-cache@v2   # <<pin to SHA>>
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
       - run: cargo test --all-features --workspace --no-fail-fast
       - name: sanitize-check (CR3 fixtures)
         run: ./scripts/sanitize-check.sh
@@ -77,8 +85,10 @@ jobs:
     name: dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4   # <<pin to SHA>>
-      - uses: dtolnay/rust-toolchain@stable   # <<pin to SHA>>
-      - uses: Swatinem/rust-cache@v2   # <<pin to SHA>>
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
       - run: cargo install cargo-audit --locked
       - run: cargo audit --deny warnings

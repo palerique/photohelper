@@ -52,7 +52,7 @@ base64 = "0.22"
 # accidental re-introduction.
 
 # Time
-time = { version = "0.3.47", features = ["macros"] }
+time = { version = "0.3.47", features = ["macros", "formatting", "parsing"] }
 
 # Persistence — `rusqlite 0.34` (was 0.32 through session 01 → TD-002).
 # Bumped voluntarily ahead of TD-002's 2026-08-01 calendar trigger
@@ -87,6 +87,9 @@ tempfile = "3"
 static_assertions = "1"
 trybuild = "1"
 filetime = "0.2"
+
+# XML parsing for XMP sidecar I/O (photohelper-sidecar, session 06 D3).
+quick-xml = { version = "0.36", features = ["serialize"] }
 
 # AI inference (ONNX Runtime via ort, Apache-2.0)
 # Exact RC pin per TD-014 (upgrade when ort 2.0.0 stable releases).

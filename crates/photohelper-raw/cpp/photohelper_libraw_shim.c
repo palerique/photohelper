@@ -26,12 +26,12 @@ const char *ph_libraw_model(libraw_data_t *lr) {
 }
 
 /* Post-rotation image orientation as LibRaw's `flip` value.
- * Maps to EXIF orientation via:
- *   flip 0 -> EXIF Normal (1)
- *   flip 3 -> EXIF Rotate180 (3)
- *   flip 5 -> EXIF Rotate90Cw (6)  -- LibRaw conflates these two
- *   flip 6 -> EXIF Rotate270Cw (8) -- LibRaw conflates these two
- * Conversion in Rust to disambiguate against ExifOrientation. */
+ * Maps to EXIF orientation via (verified against LibRaw dcraw_common.cpp):
+ *   flip 0 -> EXIF Normal      (1)
+ *   flip 3 -> EXIF Rotate180   (3)
+ *   flip 5 -> EXIF Rotate90Ccw (8) -- 270°CW
+ *   flip 6 -> EXIF Rotate90Cw  (6) -- 90°CW
+ * Conversion in Rust: ffi.rs::libraw_flip_to_exif_orientation. */
 int32_t ph_libraw_flip(libraw_data_t *lr) {
     return (int32_t)lr->sizes.flip;
 }

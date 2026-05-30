@@ -31,7 +31,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-001 — GitHub Actions action versions use `@vN` floating tags, not pinned SHAs
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-30, session 06 D0). Pinned all GitHub Actions in `.github/workflows/ci.yml` to full commit SHAs, and documented the chosen SHAs in `docs/decisions/0001-action-version-pinning.md` along with the periodic upgrade protocol and cadence.
 - **Opened**: 2026-05-27 (session 0)
 - **Stop-gap location**: `.github/workflows/ci.yml` (all `uses:` lines tagged `<<pin to SHA>>`) @ bootstrap commit
 - **Fundamental fix**: replace every `actions/checkout@v4`, `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache@v2` with the corresponding commit SHA from the action's repo; commit a `docs/decisions/0001-action-version-pinning.md` recording the SHAs chosen and the upgrade cadence. Add a periodic refresh task (Dependabot or scheduled session).
@@ -70,7 +70,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-004 — LibRaw C-library CVE monitoring is manual; `cargo audit` does NOT cover it
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-30, session 06 D2b). Integrated `osv-scanner` (Google's OSV.dev scanner) into `just ci` (via `.osv-scanner.toml` configuring the LibRaw vendored C-library vulnerability tracking). This automatically scans C/C++ dependencies in our gate alongside cargo audit, securing our static linking graph against manual-only CVE checks.
 - **Opened**: 2026-05-28 (session 2, PR1-T10 from `docs/code-reviews/session-02-plan-round1.md`)
 - **Stop-gap location**: `crates/photohelper-raw/build.rs` + `docs/decisions/0002-libraw-lgpl-static-link-mechanics.md` @ session 02's first FFI-landing commit (commit SHA pending). The stop-gap is the absence of any CVE-DB scanner that covers LibRaw — `cargo audit` consults RustSec, which only catalogs Rust crates; LibRaw is C++ and its CVEs (multiple buffer-overflow / out-of-bounds-read CVEs since 2020 per `cve.mitre.org`) are invisible to our gate.
 - **Fundamental fix**: wire an automated CVE-DB scanner that covers C-library dependencies. Candidates: (a) `osv-scanner` from Google's OSV.dev (covers the LibRaw CVE feed in the Bitnami / OSS-Fuzz / NIST NVD imports); (b) GitHub Dependabot for the vendored LibRaw tarball (limited — needs a manifest); (c) Trivy or Grype against the built binary's link-graph; (d) manual subscription to LibRaw's GitHub Security Advisories + LibRaw release announcements, with a calendar reminder per release. Path (a) `osv-scanner` is the lowest-friction: a single CLI invocation `osv-scanner --config .osv-scanner.toml .` integrated into `just ci` after `cargo audit`. The config pins the vendored LibRaw version (sourced from `build.rs`).
@@ -83,7 +83,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-005 — Heartbeat env-var-triggered panic site is a test-affordance in a production-path function
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-29, session 06 D2c). Session 05 D4 extracted `heartbeat_loop` to `crates/photohelper-cli/src/heartbeat.rs` as `run_heartbeat_loop`. The `PHOTOHELPER_HEARTBEAT_PANIC_FOR_TESTING` env-var panic site is fully gone — it does not exist anywhere in the codebase. The TD-010 test seam (`spawn_dying_heartbeat` in `heartbeat.rs:91`) is `#[cfg(test)]`-gated, not an env-var trigger. Production code path is panic-free. Fundamental fix delivered organically by session 05 D4; TD-005 was not explicitly tracked for closure at that time.
 - **Opened**: 2026-05-28 (session 2, R3-T3)
 - **Stop-gap location**: `crates/photohelper-cli/src/commands/ingest.rs::heartbeat_loop` @ commit (session 02 implementation). Panic site is `#[allow(clippy::panic, reason = "...")]`-annotated AND `cfg!(debug_assertions)`-gated; release builds compile out the env-var read entirely so the panic surface is unreachable in production. Test-only.
 - **Fundamental fix**: factor the heartbeat-death-WARN regression test (R2-T18 path 4) into a dev-deps-only utility crate `photohelper-test-helpers` that exposes a `pub fn force_heartbeat_panic_in_thread(handle: &JoinHandle<()>)` helper. The production `heartbeat_loop` becomes panic-free; the test-helper crate is `[dev-dependencies]`-only in `photohelper-cli/Cargo.toml`. Removes the `#[allow(clippy::panic)]` site.
@@ -142,7 +142,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-009 — `scripts/sanitize-check.sh` ships stage-1 only; embedded-preview JPEG re-check (R3-T8 stage 2) deferred
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-30, session 06 D2a). Implemented Stage-2 sanitization checks in `scripts/sanitize-check.sh` by extracting the embedded preview JPEG of RAW fixtures via ExifTool and asserting the strict tag allow-list on the extracted preview, fully closing the metadata leakage path.
 - **Opened**: 2026-05-28 (session 2, Deliverable 3 fixture commit)
 - **Stop-gap location**: `scripts/sanitize-check.sh` — does NOT yet
   perform the R3-T8 stage-2 check: extract the embedded preview JPEG
@@ -200,7 +200,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-011 — Session-02 session-end 8-agent multi-agent review deferred to a focused follow-up session
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-29, session 06 D1). Post-hoc R1+R2 review completed: `docs/code-reviews/session-02-round{1,2}.md`. R1 found 0C+2H+5M+5L; all HIGH+MEDIUM remediated (error-path tests, WhiteBalance partial-zero fix, CamRgbToXyzD65Matrix all-zero-row fix, C shim comment fix, RawInvalidBitDepth path field added, UnsupportedFormat tracked as TD-021). R2: 0 findings, CLEAN. TD-021 filed for UnsupportedFormat dead-code tracking.
 - **Opened**: 2026-05-28 (session 2, session-end ship)
 - **Stop-gap location**: gap, not a commit — the plan §Quality gates calls for the full 8-agent suite to fire at session-end (general-purpose / arch / reviewer / type-design / silent-failure-hunter / comment-analyzer / pr-test-analyzer / simplifier), with a 9th-agent verifier and two-round R1+R2 remediation. This session skipped that protocol because the implementation work consumed the available context budget across one workday.
 - **Fundamental fix**: a focused review session that:
@@ -248,7 +248,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Opened**: 2026-05-28 (session 3, D1a plan-review R1 remediation — PR1-T11)
 - **Stop-gap location**: `Cargo.toml` `[workspace.dependencies]` `ort = { version = "=<pin-from-D0>", ... }` (exact RC pin from ANL-002) @ session 03 D1a commit. In-source: `// TD-014: ort RC pin; upgrade to stable 2.0.0 when released`.
 - **Fundamental fix**: when ort 2.0.0 stable is published on crates.io, update `Cargo.toml` to `ort = { version = "=2.0.0" }`, run `cargo test --all-features --workspace`, and resolve any API breaks between the RC and stable. Test the golden-vector fixture to confirm inference determinism is preserved across the version bump.
-- **Binding trigger**: ort 2.0.0 stable tag exists on crates.io OR before the first GitHub Release tag is cut (whichever first). Monitor: `cargo update -p ort --dry-run` in `just ci` or a separate periodic audit session.
+- **Binding trigger**: ort 2.0.0 stable tag exists on crates.io OR before the first GitHub Release tag is cut (whichever first). Monitor: `cargo update -p ort --dry-run` in `just ci` or a separate periodic audit session. **Checked 2026-05-29 (session 06 D2d)**: ort 2.0.0 stable is NOT yet published on crates.io; only RC versions available. Trigger not fired; refreshed binding trigger unchanged.
 - **Scope estimate**: ~5 LoC (version pin bump + maybe minor API fixups) / low-to-medium risk depending on ort stable's API delta from the RC.
 - **Consequence of inaction**: shipping a v0.1 release binary linked against an ort RC is acceptable for early adopters but not for a stable release; RC APIs may change or RC builds may have known bugs that the stable release fixes.
 - **Related**: `docs/plans/session-03.md § D1a`; `docs/analysis/ANL-002-ort-nima-preflight.md § ort version`.
@@ -283,7 +283,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-020 — CLIP preprocessing uses bilinear 1:1 resize instead of bicubic center-crop
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-29, session 06 D2e). Replaced `nima::bilinear_resize(rgb, 224, 224)` with `clip_preprocess(rgb)` in `mobileclip.rs`. `clip_preprocess` implements Catmull-Rom bicubic resize (shorter edge → 256px) + center-crop (224×224), matching the CLIP training preprocessing used by OpenCLIP. `bilinear_resize` in `nima.rs` demoted from `pub(crate)` to `fn` (NIMA-only, file-private). Integration test `clip_embed_two_fixtures_golden_cosine_similarity` threshold tightened from ≥0.80 to ≥0.90 and passes.
 - **Opened**: 2026-05-29 (session 05, D1c — `MobileClip::embed`)
 - **Stop-gap location**:
   - `crates/photohelper-ai/src/mobileclip.rs:82` — calls `nima::bilinear_resize(rgb, 224, 224)` @ commit (session 05 D1c). In-source: `// TD-020: bicubic center-crop deferred`.
@@ -359,6 +359,32 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
   trace which model version + threshold produced which cluster assignment. v0.1 single-run
   assumption is codified in the schema; changing it later requires a migration.
 - **Related**: TD-013 (analogous cull-run audit trail gap); `docs/decisions/0003-catalog-schema-v3.md`.
+
+---
+
+### TD-021 — `RawExifCause::UnsupportedFormat` variant is dead code
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 06 D1, post-hoc session-02 review — R1-B)
+- **Stop-gap location**: `crates/photohelper-raw/src/lib.rs:166` — `UnsupportedFormat { libraw_make: String, libraw_model: String }` is declared but never constructed. The empty-make path (`make.is_empty()` at `ffi.rs`) returns `ExifFieldsMissing`, not `UnsupportedFormat`. No test covers this variant. In-source: no stop-gap label (the variant itself is the gap — it is the placeholder, not a deployed stop-gap).
+- **Fundamental fix**: Either (a) wire a producer: add a camera-make allowlist check in `parse_libraw_fields` (e.g., accept only `"Canon"` for v0.1; return `UnsupportedFormat` for unknown makes), add a unit test constructing the variant, OR (b) remove the variant entirely if camera filtering is deferred beyond DN-014. Option (b) is simpler and avoids dead-code accumulation; option (a) is the design intent.
+- **Binding trigger**: first session that implements DN-014 (non-Canon body support) — this variant's wire-up is the correct first step of that work. OR before the first GitHub Release tag is cut (whichever first).
+- **Scope estimate**: ~10 LoC (add allowlist check + return site + test) / low risk.
+- **Consequence of inaction**: `UnsupportedFormat` continues to be dead code, silently misrepresenting the codebase's actual camera-make filtering capability. A future contributor adding a Canon-only allowlist check might add a NEW variant rather than using the existing one.
+- **Related**: `docs/discovery-notes.md § DN-014` (non-Bayer format support placeholder); `docs/code-reviews/session-02-round1.md § Theme B`.
+
+---
+
+### TD-022 — XMP sidecar I/O uses hand-rolled `quick-xml` template instead of Adobe XMP Toolkit SDK
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 06, D3 — S1 stop-gap from plan v2)
+- **Stop-gap location**: `crates/photohelper-sidecar/src/writer.rs::render_xmp` — hand-rolled XML/RDF template emits XMP attributes as strings rather than using a proper XMP namespace-aware library. In-source: `// TD-022: quick-xml manual XMP template; see TECH-DEBT.md § TD-022.`
+- **Fundamental fix**: Replace `render_xmp` with a proper XMP library. Candidates: (a) `xmp-toolkit` crate (wraps Adobe XMP Toolkit SDK C++ — adds a C++ build dependency but guarantees namespace correctness and round-trip fidelity), or (b) `rdf-xml` / `sophia_xml` for pure-Rust RDF/XML generation, or (c) extend `quick-xml` usage with full namespace tracking. The reader (`reader.rs`) would also benefit from namespace-aware parsing rather than prefix-stripped key matching.
+- **Binding trigger**: First session adding XMP namespace fields that the current template does not model (e.g. `crs:GradientBasedCorrections`, `crs:ToneCurvePV2012`, `Lightroom:` namespace fields) — the hand-rolled template cannot handle these without significant code additions. OR before v1.0 if XMP round-trip fidelity (including fields written by other tools) becomes a product requirement.
+- **Scope estimate**: ~50–100 LoC for the writer (replace template with library calls) + reader refactor (~30 LoC) / medium risk (namespace handling is complex; integration tests cover the happy path).
+- **Consequence of inaction**: The hand-rolled template only emits the ~10 fields photohelper writes. Any XMP field written by Lightroom, Camera Raw, or other tools is silently dropped on the next photohelper develop write (unless ConflictPreserved). Users who rely on `crs:CameraProfile`, `crs:ToneCurvePV2012`, etc. will lose those settings on conflict-resolved overwrites.
+- **Related**: `docs/plans/session-06.md § Stop-gap S1`; `crates/photohelper-sidecar/src/writer.rs`.
 
 ---
 

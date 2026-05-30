@@ -30,6 +30,7 @@ use photohelper_ai::{CLIP_MODEL_MANIFEST_NAME, MODEL_MANIFEST_NAME, VerifiedMode
 
 use commands::cull::{CullArgs, run_cull};
 use commands::dedup::{DedupeArgs, run_dedup};
+use commands::develop::{DevelopArgs, run_develop};
 use commands::ingest::run_ingest;
 
 /// Cross-platform CLI for AI-powered Canon RAW processing.
@@ -72,8 +73,8 @@ enum Command {
     Cull(CullArgs),
     /// Duplicate detection via CLIP ViT-B/32 embeddings + cosine-similarity clustering.
     Dedup(DedupeArgs),
-    /// Apply develop settings via XMP sidecars (planned for v0.1).
-    Develop,
+    /// Apply develop settings via XMP sidecars (Lightroom-compatible).
+    Develop(DevelopArgs),
     /// Export to JPEG with resize + watermark (planned for v0.1).
     Export,
     /// Run ingest → cull → develop → export (planned for v0.1).
@@ -194,7 +195,13 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Develop => stub("develop"),
+        Command::Develop(args) => match run_develop(&cli, args) {
+            Ok(code) => ExitCode::from(code),
+            Err(err) => {
+                tracing::error!("{err:#}");
+                ExitCode::from(exit_code_for_error(&err))
+            }
+        },
         Command::Export => stub("export"),
         Command::Run => stub("run"),
         Command::Models => stub("models"),

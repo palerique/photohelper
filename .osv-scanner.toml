@@ -1,0 +1,9 @@
+# osv-scanner configuration for LibRaw CVE monitoring (TD-004, session 06).
+# Run: `just audit-libraw` or `osv-scanner --config .osv-scanner.toml .`
+#
+# osv-scanner checks the vendored LibRaw tarball against OSV.dev which
+# aggregates NIST NVD, GitHub Advisory Database, and other CVE feeds.
+# cargo audit does NOT cover C library dependencies; this fills that gap.
+
+[scanning]
+lockfiles = ["vendor/libraw-0.22.1.tar.gz"]

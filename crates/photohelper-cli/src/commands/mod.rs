@@ -2,4 +2,5 @@
 
 pub mod cull;
 pub mod dedup;
+pub mod develop;
 pub mod ingest;

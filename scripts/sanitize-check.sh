@@ -6,11 +6,12 @@
 # Any other tag — most importantly anything PII (GPS, owner serial,
 # IPTC creators) — fails CI and forces the contributor to re-sanitize.
 #
-# Plan §Deliverable 3 references a "two-stage embedded-preview check"
-# per R3-T8. v0.1 implements only stage 1 (top-level EXIF allow-list);
-# stage 2 (`exiftool -b -PreviewImage` extract + re-check) is filed as
-# TD-009 in TECH-DEBT.md so the next D3 contributor closes it before
-# any fixture with a non-trivial embedded preview lands.
+# Two-stage check (TD-009 closed, session 06 D2a):
+#   Stage 1: top-level EXIF allow-list via `exiftool -G -a`
+#   Stage 2: extract embedded preview JPEG and run the same allow-list
+#            check on it. CR3 files embed a preview JPEG that exiftool's
+#            top-level pass does NOT recurse into; a GPS-tagged preview
+#            would silently pass stage 1 only.
 set -euo pipefail
 
 FIXTURE_DIR="tests/fixtures/cr3"
@@ -83,6 +84,23 @@ for fixture in "$FIXTURE_DIR"/*.CR3; do
             failures=$((failures + 1))
         fi
     done
+
+    # Stage 2: extract embedded preview JPEG and run the same allow-list.
+    # Use mktemp to avoid parallel-CI clobber of a shared /tmp/preview.jpg.
+    # Note: macOS mktemp does not support suffixes after XXXXXX in full-path form;
+    # use -t flag (creates in $TMPDIR) or strip the .jpg suffix.
+    preview_tmp=$(mktemp "${TMPDIR:-/tmp}/ph-sanitize-XXXXXX")
+    exiftool -b -PreviewImage "$fixture" > "$preview_tmp" 2>/dev/null || true
+    if [ -s "$preview_tmp" ]; then
+        preview_tags=$(exiftool -G -a "$preview_tmp" 2>/dev/null)
+        for forbidden in "${FORBIDDEN_TAG_PATTERNS[@]}"; do
+            if echo "$preview_tags" | grep -qE "[[:space:]]${forbidden}[A-Za-z_]*[[:space:]]+:"; then
+                echo "  ERR $base (embedded preview): forbidden tag matching '$forbidden' present" >&2
+                failures=$((failures + 1))
+            fi
+        done
+    fi
+    rm -f "$preview_tmp"
 done
 
 if [ "$fixture_count" -eq 0 ]; then
