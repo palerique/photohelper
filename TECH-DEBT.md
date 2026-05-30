@@ -200,7 +200,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-011 — Session-02 session-end 8-agent multi-agent review deferred to a focused follow-up session
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-29, session 06 D1). Post-hoc R1+R2 review completed: `docs/code-reviews/session-02-round{1,2}.md`. R1 found 0C+2H+5M+5L; all HIGH+MEDIUM remediated (error-path tests, WhiteBalance partial-zero fix, CamRgbToXyzD65Matrix all-zero-row fix, C shim comment fix, RawInvalidBitDepth path field added, UnsupportedFormat tracked as TD-021). R2: 0 findings, CLEAN. TD-021 filed for UnsupportedFormat dead-code tracking.
 - **Opened**: 2026-05-28 (session 2, session-end ship)
 - **Stop-gap location**: gap, not a commit — the plan §Quality gates calls for the full 8-agent suite to fire at session-end (general-purpose / arch / reviewer / type-design / silent-failure-hunter / comment-analyzer / pr-test-analyzer / simplifier), with a 9th-agent verifier and two-round R1+R2 remediation. This session skipped that protocol because the implementation work consumed the available context budget across one workday.
 - **Fundamental fix**: a focused review session that:
