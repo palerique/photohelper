@@ -52,7 +52,7 @@ base64 = "0.22"
 # accidental re-introduction.
 
 # Time
-time = { version = "0.3.47", features = ["macros", "formatting", "parsing"] }
+time = { version = "=0.3.47", features = ["macros", "formatting", "parsing"] }
 
 # Persistence — `rusqlite 0.34` (was 0.32 through session 01 → TD-002).
 # Bumped voluntarily ahead of TD-002's 2026-08-01 calendar trigger

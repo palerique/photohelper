@@ -1387,3 +1387,339 @@ fn develop_conflict_preserved_appears_in_summary() {
         .code(0)
         .stderr(contains("conflict-preserved: 1"));
 }
+
+#[test]
+fn develop_lightroom_compatibility_flags_written_to_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    // Manually insert mock cull score, embedding and cluster assignment
+    {
+        let conn = rusqlite::Connection::open(&cat_path).unwrap();
+        let photo_id: Vec<u8> = conn
+            .query_row("SELECT id FROM photos LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        // 1. Insert cull score (e.g. 7.8 -> Rating::Four, Label::"Green", flat nima:good, hierarchical nima:good)
+        conn.execute(
+            "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![photo_id, "nima-aesthetic-v1", 7.8, 1_700_000_000],
+        )
+        .unwrap();
+
+        // 2. Insert embedding (required for dup_clusters foreign key)
+        let dummy_embedding = vec![0.0f32; 512];
+        let embedding_bytes: Vec<u8> = dummy_embedding
+            .iter()
+            .flat_map(|&f| f.to_ne_bytes())
+            .collect();
+        conn.execute(
+            "INSERT INTO embeddings (photo_id, model_slug, dim, quantization, embedding, embedded_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![photo_id, "clip-vit-b32-laion2b-v1", 512, "f32", embedding_bytes, 1_700_000_000],
+        )
+        .unwrap();
+
+        // 3. Insert cluster assignment
+        conn.execute(
+            "INSERT INTO dup_clusters (photo_id, model_slug, cluster_id, similarity_threshold, clustered_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![photo_id, "clip-vit-b32-laion2b-v1", 15, 0.85, 1_700_000_000],
+        )
+        .unwrap();
+    }
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_str,
+            "develop",
+            "--lr-rating",
+            "--lr-label",
+            "--lr-keywords",
+        ])
+        .assert()
+        .code(0);
+
+    let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
+
+    // Star rating
+    // A score of 7.8 is < 8.5 but >= 7.0, which maps to Rating::Four (4 stars)
+    assert!(
+        xml.contains("xmp:Rating=\"4\""),
+        "Rating 4 must be written when score is 7.8"
+    );
+
+    // Label
+    // A score of 7.8 is >= 7.0, which maps to "Green"
+    assert!(
+        xml.contains("xmp:Label=\"Green\""),
+        "Label Green must be written when score is 7.8"
+    );
+
+    // Flat keywords (dc:subject Bag structure)
+    assert!(
+        xml.contains("<rdf:li>photohelper</rdf:li>"),
+        "photohelper keyword must be present"
+    );
+    assert!(
+        xml.contains("<rdf:li>nima:good</rdf:li>"),
+        "nima:good keyword must be present"
+    );
+    assert!(
+        xml.contains("<rdf:li>cluster:15</rdf:li>"),
+        "cluster:15 keyword must be present"
+    );
+
+    // Hierarchical keywords (lr:hierarchicalSubject Bag structure)
+    assert!(
+        xml.contains("<rdf:li>photohelper|nima:good</rdf:li>"),
+        "hierarchical nima:good must be present"
+    );
+    assert!(
+        xml.contains("<rdf:li>photohelper|cluster:15</rdf:li>"),
+        "hierarchical cluster:15 must be present"
+    );
+}
+
+#[test]
+fn develop_clean_isolation_by_default() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    // Default develop without LR flags should write sidecar but omit Lightroom tags if they weren't in existing
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop"])
+        .assert()
+        .code(0);
+
+    let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
+    assert!(
+        !xml.contains("xmp:Rating="),
+        "Rating should be absent by default"
+    );
+    assert!(
+        !xml.contains("xmp:Label="),
+        "Label should be absent by default"
+    );
+    assert!(
+        !xml.contains("dc:subject"),
+        "dc:subject keywords should be absent by default"
+    );
+}
+
+#[test]
+fn develop_individual_lr_flags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    {
+        let conn = rusqlite::Connection::open(&cat_path).unwrap();
+        let photo_id: Vec<u8> = conn
+            .query_row("SELECT id FROM photos LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![photo_id, "nima-aesthetic-v1", 9.2, 1_700_000_000],
+        )
+        .unwrap();
+    }
+
+    // Develop with only --lr-rating flag
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--lr-rating"])
+        .assert()
+        .code(0);
+
+    let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
+    assert!(xml.contains("xmp:Rating=\"5\""), "Rating should be 5");
+    assert!(!xml.contains("xmp:Label="), "Label should not be present");
+    assert!(
+        !xml.contains("dc:subject"),
+        "dc:subject keywords should not be present"
+    );
+}
+
+#[test]
+fn develop_handles_nan_and_infinite_scores() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    // Test non-finite (Infinity) score via SQL literal 9e999
+    {
+        let conn = rusqlite::Connection::open(&cat_path).unwrap();
+        let photo_id: Vec<u8> = conn
+            .query_row("SELECT id FROM photos LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        conn.execute(
+            "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) VALUES (?1, ?2, 9e999, ?3)",
+            rusqlite::params![photo_id, "nima-aesthetic-v1", 1_700_000_000],
+        )
+        .unwrap();
+    }
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--lr-rating", "--lr-label"])
+        .assert()
+        .code(0);
+
+    let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
+    // Since infinity is non-finite, it is ignored early, so rating and labels should be completely omitted.
+    assert!(
+        !xml.contains("xmp:Rating"),
+        "Infinity rating should be omitted"
+    );
+    assert!(
+        !xml.contains("xmp:Label"),
+        "Infinity label should be omitted"
+    );
+}
+
+#[test]
+fn develop_handles_out_of_bounds_scores() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    {
+        let conn = rusqlite::Connection::open(&cat_path).unwrap();
+        let photo_id: Vec<u8> = conn
+            .query_row("SELECT id FROM photos LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        // 99.9 is out of bounds, so it clamps to the maximum rating (5)
+        conn.execute(
+            "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![photo_id, "nima-aesthetic-v1", 99.9, 1_700_000_000],
+        )
+        .unwrap();
+    }
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--lr-rating", "--lr-label"])
+        .assert()
+        .code(0);
+
+    let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
+    assert!(
+        xml.contains("xmp:Rating=\"5\""),
+        "Out of bounds high score clamps safely to max rating"
+    );
+}
+
+#[test]
+fn develop_missing_scores_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let _cr3 = ingest_fake_cr3(cat_str, tmp.path());
+
+    // Develop a photo that has no cull scores or clusters inserted
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--lr-rating", "--lr-label", "--lr-keywords"])
+        .assert()
+        .code(0)
+        .stderr(predicates::str::contains("WARNING: Lightroom rating/label flags were requested, but no culled scores exist in the catalog."))
+        .stderr(predicates::str::contains("WARNING: Lightroom keywords flag was requested, but neither culled scores nor duplicate clusters exist in the catalog."));
+}
+
+#[test]
+fn test_nima_score_mapping_boundaries() {
+    let scores = [3.0, 5.0, 6.5, 8.0, 9.0];
+    let expected_ratings = ["1", "2", "3", "4", "5"];
+    let expected_labels = ["Red", "", "", "Green", "Green"];
+    let expected_tiers = ["discard", "poor", "fair", "good", "excellent"];
+
+    for (i, &score) in scores.iter().enumerate() {
+        let run_tmp = tempfile::tempdir().unwrap();
+        let run_cat_path = run_tmp.path().join("catalog.db");
+        let run_cat_str = run_cat_path.to_str().unwrap();
+        let cr3 = ingest_fake_cr3(run_cat_str, run_tmp.path());
+        let xmp = cr3.with_extension("xmp");
+
+        {
+            let conn = rusqlite::Connection::open(&run_cat_path).unwrap();
+            let photo_id: Vec<u8> = conn
+                .query_row("SELECT id FROM photos LIMIT 1", [], |r| r.get(0))
+                .unwrap();
+
+            conn.execute(
+                "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![photo_id, "nima-aesthetic-v1", score, 1_700_000_000],
+            )
+            .unwrap();
+        }
+
+        Command::cargo_bin("photohelper")
+            .unwrap()
+            .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+            .args([
+                "--catalog",
+                run_cat_str,
+                "develop",
+                "--lr-rating",
+                "--lr-label",
+                "--lr-keywords",
+            ])
+            .assert()
+            .code(0);
+
+        let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
+
+        let expected_rating = expected_ratings.get(i).copied().unwrap();
+        let expected_label = expected_labels.get(i).copied().unwrap();
+        let expected_tier = expected_tiers.get(i).copied().unwrap();
+
+        let expected_rating_attr = format!("xmp:Rating=\"{expected_rating}\"");
+        assert!(
+            xml.contains(&expected_rating_attr),
+            "Rating incorrect for score {score}"
+        );
+
+        if expected_label.is_empty() {
+            assert!(!xml.contains("xmp:Label=\"Red\"") && !xml.contains("xmp:Label=\"Green\""));
+        } else {
+            let expected_label_attr = format!("xmp:Label=\"{expected_label}\"");
+            assert!(
+                xml.contains(&expected_label_attr),
+                "Label incorrect for score {score}"
+            );
+        }
+
+        let expected_keyword = format!("nima:{expected_tier}");
+        let expected_hierarchical = format!("photohelper|nima:{expected_tier}");
+        assert!(
+            xml.contains(&expected_keyword),
+            "Flat keyword incorrect for score {score}"
+        );
+        assert!(
+            xml.contains(&expected_hierarchical),
+            "Hierarchical keyword incorrect for score {score}"
+        );
+    }
+}

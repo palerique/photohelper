@@ -2,8 +2,9 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 //!
 //! Produces Lightroom-compatible `.xmp` sidecars (extension-replaced, not
-//! appended: `photo.CR3` → `photo.xmp`). Supports `crs:` (Camera Raw) and
-//! `ph:` (photohelper) namespaces.
+//! appended: `photo.CR3` → `photo.xmp`). Supports standard namespaces `dc:`
+//! (Dublin Core), `lr:` (Lightroom), and `xmp:`, in addition to `crs:`
+//! (Camera Raw) and `ph:` (photohelper) namespaces.
 //!
 //! ## Usage
 //!
@@ -43,7 +44,7 @@ mod writer;
 pub use conflict::{WriteOutcome, merge_and_write};
 pub use error::Error;
 pub use reader::read_xmp;
-pub use settings::{SidecarSettings, SidecarSettingsBuilder};
+pub use settings::{Rating, SidecarSettings, SidecarSettingsBuilder};
 pub use writer::write_xmp;
 
 use static_assertions::assert_impl_all;
@@ -275,6 +276,94 @@ mod tests {
         assert!(s.is_empty());
     }
 
+    #[test]
+    fn test_parse_nested_elements_for_standard_fields() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="">
+      <xmp:Rating>3</xmp:Rating>
+      <xmp:Label>Green</xmp:Label>
+      <crs:Temperature>5500</crs:Temperature>
+      <crs:Tint>10</crs:Tint>
+      <crs:Exposure2012>-0.5</crs:Exposure2012>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s =
+            reader::parse_xmp_str(xml, Path::new("test.xmp")).expect("must parse nested elements");
+        assert_eq!(s.rating(), Some(Rating::Three));
+        assert_eq!(s.label(), Some("Green"));
+        assert_eq!(s.temperature(), Some(5500));
+        assert_eq!(s.tint(), Some(10));
+        assert_eq!(s.exposure(), Some(-0.5));
+    }
+
+    #[test]
+    fn test_parse_nested_elements_metadata_and_last_processed() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="">
+      <xmp:MetadataDate>2026-05-30T12:00:00Z</xmp:MetadataDate>
+      <ph:LastProcessedAt>2026-05-30T15:00:00Z</ph:LastProcessedAt>
+      <ph:NimaScore>8.5</ph:NimaScore>
+      <ph:DedupClusterId>42</ph:DedupClusterId>
+      <ph:PhotohelperId>test-id-999</ph:PhotohelperId>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s = reader::parse_xmp_str(xml, Path::new("test.xmp"))
+            .expect("must parse nested photohelper elements");
+        assert!(s.metadata_date().is_some());
+        assert!(s.last_processed_at().is_some());
+        assert_eq!(s.nima_score(), Some(8.5));
+        assert_eq!(s.dedup_cluster_id(), Some(42));
+        assert_eq!(s.photohelper_id(), Some("test-id-999"));
+    }
+
+    #[test]
+    fn test_parse_nested_elements_lenient_malformed() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="">
+      <crs:Temperature>not-an-int</crs:Temperature>
+      <crs:Exposure2012>not-a-float</crs:Exposure2012>
+      <ph:NimaScore>not-a-finite-score</ph:NimaScore>
+      <ph:DedupClusterId>-123</ph:DedupClusterId>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s = reader::parse_xmp_str(xml, Path::new("test.xmp"))
+            .expect("must tolerate malformed nested elements");
+        assert_eq!(s.temperature(), None);
+        assert_eq!(s.exposure(), None);
+        assert_eq!(s.nima_score(), None);
+        assert_eq!(s.dedup_cluster_id(), None);
+    }
+
+    #[test]
+    fn test_parse_nested_elements_case_insensitive_namespaces() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:XMPMETA xmlns:x="adobe:ns:meta/">
+  <RDF:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <RDF:DESCRIPTION rdf:about="">
+      <XMP:Rating>4</XMP:Rating>
+      <XMP:Label>Blue</XMP:Label>
+      <CRS:Temperature>6000</CRS:Temperature>
+      <PH:NimaScore>9.1</PH:NimaScore>
+    </RDF:DESCRIPTION>
+  </RDF:RDF>
+</x:XMPMETA>"#;
+        let s = reader::parse_xmp_str(xml, Path::new("test.xmp"))
+            .expect("must parse case-insensitive namespaces");
+        assert_eq!(s.rating(), Some(Rating::Four));
+        assert_eq!(s.label(), Some("Blue"));
+        assert_eq!(s.temperature(), Some(6000));
+        assert_eq!(s.nima_score(), Some(9.1));
+    }
+
     // ── Conflict resolution ───────────────────────────────────────────────
 
     #[test]
@@ -393,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn conflict_missing_last_processed_preserves() {
+    fn conflict_missing_last_processed_merges() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("photo.xmp");
         // Existing has a MetadataDate (simulating Lightroom-written sidecar).
@@ -410,10 +499,15 @@ mod tests {
 </x:xmpmeta>"#;
         std::fs::write(&p, xml).unwrap();
 
-        // Incoming has no ph:LastProcessedAt → ConflictPreserved.
+        // Incoming has no ph:LastProcessedAt → Overwritten (merged on first run).
         let incoming = SidecarSettings::builder().exposure(0.0).build().unwrap();
         let outcome = merge_and_write(&p, &incoming, false).unwrap();
-        assert_eq!(outcome, WriteOutcome::ConflictPreserved);
+        assert_eq!(outcome, WriteOutcome::Overwritten);
+
+        // Verify that existing and incoming settings are successfully merged
+        let read_back = read_xmp(&p).unwrap();
+        assert_eq!(read_back.exposure(), Some(0.0));
+        assert_eq!(read_back.temperature(), Some(6000));
     }
 
     // ── Atomic write ──────────────────────────────────────────────────────
@@ -442,5 +536,225 @@ mod tests {
         let s = SidecarSettings::builder().exposure(1.0).build().unwrap();
         let result = write_xmp(p, &s);
         assert!(result.is_err(), "write to nonexistent dir must fail");
+    }
+
+    #[test]
+    fn test_slider_clamping_on_parse() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+      crs:Temperature="1500"
+      crs:Tint="200"
+    />
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s = reader::parse_xmp_str(xml, Path::new("test.xmp")).expect("must parse");
+        assert_eq!(
+            s.temperature(),
+            Some(2000),
+            "temperature 1500 must clamp to 2000"
+        );
+        assert_eq!(s.tint(), Some(150), "tint 200 must clamp to 150");
+
+        let xml_high = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+      crs:Temperature="60000"
+      crs:Tint="-180"
+    />
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s_high = reader::parse_xmp_str(xml_high, Path::new("test.xmp")).expect("must parse");
+        assert_eq!(
+            s_high.temperature(),
+            Some(50000),
+            "temperature 60000 must clamp to 50000"
+        );
+        assert_eq!(s_high.tint(), Some(-150), "tint -180 must clamp to -150");
+    }
+
+    #[test]
+    fn test_merge_and_write_empty_color_label_retention() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("photo.xmp");
+
+        // Existing sidecar has a label "Red"
+        let existing = SidecarSettings::builder().label("Red").build().unwrap();
+        write_xmp(&p, &existing).unwrap();
+
+        // Incoming is empty color label
+        let incoming = SidecarSettings::builder().label("").build().unwrap();
+
+        let outcome = merge_and_write(&p, &incoming, false).unwrap();
+        assert_eq!(outcome, WriteOutcome::Overwritten);
+
+        let read_back = read_xmp(&p).unwrap();
+        assert_eq!(
+            read_back.label(),
+            Some(""),
+            "Empty color label must be retained as Some(\"\")"
+        );
+
+        // The XML should contain xmp:Label=""
+        let xml = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            xml.contains("xmp:Label=\"\""),
+            "XML should explicitly write empty label attribute"
+        );
+    }
+
+    #[test]
+    fn test_precise_keyword_stripping_on_merge() {
+        let mut existing_kws = std::collections::BTreeSet::new();
+        existing_kws.insert("photohelper".to_string());
+        existing_kws.insert("photohelper:old".to_string());
+        existing_kws.insert("photohelper|old".to_string());
+        existing_kws.insert("cluster:42".to_string());
+        existing_kws.insert("nima:good".to_string());
+        existing_kws.insert("cluster:notanint".to_string()); // user-defined keyword mimicking pattern but invalid int
+        existing_kws.insert("nima:awesome".to_string()); // user-defined keyword mimicking pattern but invalid tier
+        existing_kws.insert("my-own-keyword".to_string());
+
+        let existing = SidecarSettings::builder()
+            .keywords(existing_kws)
+            .build()
+            .unwrap();
+
+        let mut incoming_kws = std::collections::BTreeSet::new();
+        incoming_kws.insert("photohelper".to_string());
+        incoming_kws.insert("cluster:100".to_string());
+        incoming_kws.insert("nima:excellent".to_string());
+
+        let incoming = SidecarSettings::builder()
+            .keywords(incoming_kws)
+            .build()
+            .unwrap();
+
+        let merged = existing.merge(&incoming);
+        let merged_kws = merged.keywords().unwrap();
+
+        // Valid photohelper ones from existing must be stripped, user ones must be kept
+        assert!(merged_kws.contains("my-own-keyword"));
+        assert!(merged_kws.contains("cluster:notanint"));
+        assert!(merged_kws.contains("nima:awesome"));
+        assert!(merged_kws.contains("photohelper"));
+        assert!(merged_kws.contains("cluster:100"));
+        assert!(merged_kws.contains("nima:excellent"));
+
+        assert!(!merged_kws.contains("photohelper:old"));
+        assert!(!merged_kws.contains("photohelper|old"));
+        assert!(!merged_kws.contains("cluster:42"));
+        assert!(!merged_kws.contains("nima:good"));
+    }
+
+    #[test]
+    fn test_rating_try_from() {
+        use std::convert::TryFrom;
+        assert_eq!(Rating::try_from(-1).unwrap(), Rating::Rejected);
+        assert_eq!(Rating::try_from(0).unwrap(), Rating::Unrated);
+        assert_eq!(Rating::try_from(1).unwrap(), Rating::One);
+        assert_eq!(Rating::try_from(2).unwrap(), Rating::Two);
+        assert_eq!(Rating::try_from(3).unwrap(), Rating::Three);
+        assert_eq!(Rating::try_from(4).unwrap(), Rating::Four);
+        assert_eq!(Rating::try_from(5).unwrap(), Rating::Five);
+        assert!(Rating::try_from(-2).is_err());
+        assert!(Rating::try_from(6).is_err());
+    }
+
+    #[test]
+    fn test_lenient_parsing_via_xmp() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+      xmp:Rating="99.0"
+      crs:Exposure2012="not-a-float"
+      crs:Temperature="5500"
+    />
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s = reader::parse_xmp_str(xml, Path::new("test.xmp")).expect("must parse leniently");
+        assert_eq!(s.rating(), None);
+        assert_eq!(s.exposure(), None);
+        assert_eq!(s.temperature(), Some(5500));
+    }
+
+    #[test]
+    fn test_xml_illegal_control_character_sanitization() {
+        let raw = "Hello\x00World\x1F!\tGood\nMorning";
+        let s = SidecarSettings::builder().label(raw).build().unwrap();
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("photo.xmp");
+        write_xmp(&p, &s).unwrap();
+
+        let read_back = read_xmp(&p).unwrap();
+        assert_eq!(read_back.label().unwrap(), "HelloWorld!\tGood\nMorning");
+    }
+
+    #[test]
+    fn test_write_no_keywords_omits_elements() {
+        let s = SidecarSettings::builder().exposure(1.0).build().unwrap();
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("photo.xmp");
+        write_xmp(&p, &s).unwrap();
+        let xml = std::fs::read_to_string(&p).unwrap();
+        assert!(!xml.contains("subject"));
+        assert!(!xml.contains("hierarchicalSubject"));
+    }
+
+    #[test]
+    fn test_parse_prefix_agnostic_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      Temperature="5200"
+      Rating="4"
+    />
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s = reader::parse_xmp_str(xml, Path::new("test.xmp")).expect("must parse");
+        assert_eq!(s.temperature(), Some(5200));
+        assert_eq!(s.rating(), Some(Rating::Four));
+    }
+
+    #[test]
+    fn test_read_non_bag_rdf_containers() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <dc:subject>
+        <rdf:Seq>
+          <rdf:li>seq-keyword</rdf:li>
+        </rdf:Seq>
+      </dc:subject>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s = reader::parse_xmp_str(xml, Path::new("test.xmp")).expect("must parse Seq");
+        assert!(s.keywords().unwrap().contains("seq-keyword"));
+    }
+
+    #[test]
+    fn test_parse_crs_elements_detects_crs_attr() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">
+      <crs:Temperature>4800</crs:Temperature>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s = reader::parse_xmp_str(xml, Path::new("test.xmp")).expect("must parse nested crs");
+        assert_eq!(s.temperature(), Some(4800));
     }
 }

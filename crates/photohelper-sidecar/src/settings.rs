@@ -4,9 +4,111 @@
 //! construct validated instances. This mirrors the `ImageEmbedding` and
 //! `Photo` pattern in the codebase.
 
+use std::collections::BTreeSet;
 use time::OffsetDateTime;
 
 use crate::error::Error;
+
+/// Case-insensitive, char-boundary-safe prefix checking helper.
+fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let len = prefix.len();
+    if s.len() >= len && s.is_char_boundary(len) {
+        if let (Some(head), Some(tail)) = (s.get(..len), s.get(len..)) {
+            if head.eq_ignore_ascii_case(prefix) {
+                return Some(tail);
+            }
+        }
+    }
+    None
+}
+
+/// Helper function to precisely identify photohelper-managed keywords so they
+/// can be stripped during sidecar merging.
+fn is_photohelper_keyword(kw: &str) -> bool {
+    if kw.eq_ignore_ascii_case("photohelper") {
+        return true;
+    }
+
+    // Check for "photohelper|" or "photohelper:" prefixes
+    if let Some(rest) = strip_prefix_ignore_ascii_case(kw, "photohelper") {
+        let mut chars = rest.chars();
+        if let Some(sep) = chars.next() {
+            if sep == '|' || sep == ':' {
+                return true;
+            }
+        }
+    }
+
+    is_ph_suffix(kw)
+}
+
+fn is_ph_suffix(suffix: &str) -> bool {
+    if let Some(rest) = strip_prefix_ignore_ascii_case(suffix, "cluster:") {
+        if let Ok(id) = rest.parse::<i64>() {
+            if id >= 0 {
+                return true;
+            }
+        }
+    }
+    if let Some(rest) = strip_prefix_ignore_ascii_case(suffix, "nima:") {
+        if rest.eq_ignore_ascii_case("discard")
+            || rest.eq_ignore_ascii_case("poor")
+            || rest.eq_ignore_ascii_case("fair")
+            || rest.eq_ignore_ascii_case("good")
+            || rest.eq_ignore_ascii_case("excellent")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strongly-typed star rating state inside sidecar metadata.
+/// Supported range is `[-1, 5]`, where `-1` represents Rejected,
+/// `0` represents Unrated/None, and `[1, 5]` are standard stars.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(i32)]
+pub enum Rating {
+    /// Rejected flag (-1).
+    Rejected = -1,
+    /// Unrated (0 stars).
+    Unrated = 0,
+    /// 1 star.
+    One = 1,
+    /// 2 stars.
+    Two = 2,
+    /// 3 stars.
+    Three = 3,
+    /// 4 stars.
+    Four = 4,
+    /// 5 stars.
+    Five = 5,
+}
+
+impl Rating {
+    /// Convert Rating to raw i32.
+    #[must_use]
+    pub fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+impl TryFrom<i32> for Rating {
+    type Error = String;
+
+    fn try_from(v: i32) -> Result<Self, Self::Error> {
+        match v {
+            -1 => Ok(Rating::Rejected),
+            0 => Ok(Rating::Unrated),
+            1 => Ok(Rating::One),
+            2 => Ok(Rating::Two),
+            3 => Ok(Rating::Three),
+            4 => Ok(Rating::Four),
+            5 => Ok(Rating::Five),
+            _ => Err(format!("invalid rating value: {v}")),
+        }
+    }
+}
 
 /// Intermediate struct used by the XMP reader to pass parsed fields to
 /// [`SidecarSettings::from_parsed`] without exceeding the 7-argument limit.
@@ -32,19 +134,19 @@ pub(crate) struct ParsedFields {
     /// the conflict resolver from overwriting sidecars that contain only
     /// untracked `crs:` attributes (e.g. `crs:WhiteBalance`, `crs:CameraProfile`).
     pub has_any_crs_attr: bool,
+    /// Standard metadata fields.
+    pub rating: Option<Rating>,
+    pub label: Option<String>,
+    pub keywords: BTreeSet<String>,
+    pub hierarchical_keywords: BTreeSet<String>,
 }
 
-/// Develop settings mapping to `crs:` (Camera Raw) and `ph:` (photohelper)
-/// XMP namespaces.
+/// Develop settings mapping to `crs:` (Camera Raw), `ph:` (photohelper),
+/// and standard XMP namespaces.
 ///
 /// Private fields; use [`SidecarSettings::builder()`] to construct.
 /// Validation runs at construction time — callers cannot construct invalid
 /// settings.
-///
-/// **Fields removed from v0.1** (no CLI exposure; reserved for future sessions):
-/// `clarity`, `vibrance`, `saturation`, `white_balance`. The XMP reader
-/// silently ignores these fields in existing sidecars (forward-compat).
-/// `process_version` is hardcoded as `"11.0"` in the writer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SidecarSettings {
     // crs: namespace
@@ -68,6 +170,11 @@ pub struct SidecarSettings {
     /// numerically parsed. Guards the (None,None) conflict path against overwriting
     /// sidecars with untracked `crs:` settings (e.g. `crs:WhiteBalance`).
     has_any_crs_attr: bool,
+    // Standard namespaces (dc:, lr:, xmp:)
+    rating: Option<Rating>,
+    label: Option<String>,
+    keywords: Option<BTreeSet<String>>,
+    hierarchical_keywords: Option<BTreeSet<String>>,
 }
 
 impl SidecarSettings {
@@ -137,21 +244,40 @@ impl SidecarSettings {
         self.last_processed_at
     }
 
-    /// Raw `xmp:MetadataDate` from the parsed sidecar (reader-only; not set by
-    /// builder). Used by the conflict resolver to detect external edits: a value
-    /// newer than `last_processed_at()` means a third-party tool (e.g. Lightroom)
-    /// wrote to the sidecar after our last develop pass.
+    /// Raw `xmp:MetadataDate` from the parsed sidecar.
     #[must_use]
     pub fn metadata_date(&self) -> Option<OffsetDateTime> {
         self.metadata_date
     }
 
-    /// True if ANY `crs:` attribute was present in the parsed XMP, including
-    /// untracked attributes like `crs:WhiteBalance` or `crs:CameraProfile`.
-    /// Guards the conflict resolver's (None,None) branch.
+    /// True if ANY `crs:` attribute was present in the parsed XMP.
     #[must_use]
     pub fn has_any_crs_attribute(&self) -> bool {
         self.has_any_crs_attr
+    }
+
+    /// Star rating, if set.
+    #[must_use]
+    pub fn rating(&self) -> Option<Rating> {
+        self.rating
+    }
+
+    /// Lightroom color label, if set.
+    #[must_use]
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    /// Flat keywords.
+    #[must_use]
+    pub fn keywords(&self) -> Option<&BTreeSet<String>> {
+        self.keywords.as_ref()
+    }
+
+    /// Hierarchical keywords.
+    #[must_use]
+    pub fn hierarchical_keywords(&self) -> Option<&BTreeSet<String>> {
+        self.hierarchical_keywords.as_ref()
     }
 
     /// Returns `true` if any of the 6 numeric `crs:` develop fields is set.
@@ -165,7 +291,7 @@ impl SidecarSettings {
             || self.shadows.is_some()
     }
 
-    /// Returns `true` if no fields (crs: or ph:) are set.
+    /// Returns `true` if no fields (crs:, ph:, or standard) are set.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         !self.has_crs_fields()
@@ -173,27 +299,118 @@ impl SidecarSettings {
             && self.dedup_cluster_id.is_none()
             && self.photohelper_id.is_none()
             && self.last_processed_at.is_none()
+            && self.rating.is_none_or(|r| r == Rating::Unrated)
+            && self.label.as_ref().is_none_or(|l| l.is_empty())
+            && self.keywords.as_ref().is_none_or(|k| k.is_empty())
+            && self
+                .hierarchical_keywords
+                .as_ref()
+                .is_none_or(|k| k.is_empty())
     }
 
-    /// Lenient constructor used by the XMP reader. Out-of-range numeric values
-    /// are clamped to `None` with a `tracing::warn!` rather than hard-rejected,
-    /// consistent with the reader's "lenient read" contract.
+    /// Merges this existing settings with incoming updates, preserving standard
+    /// tags and user-defined keywords when individual update flags are absent.
+    #[must_use]
+    pub fn merge(&self, incoming: &SidecarSettings) -> Self {
+        let temperature = incoming.temperature.or(self.temperature);
+        let tint = incoming.tint.or(self.tint);
+        let exposure = incoming.exposure.or(self.exposure);
+        let contrast = incoming.contrast.or(self.contrast);
+        let highlights = incoming.highlights.or(self.highlights);
+        let shadows = incoming.shadows.or(self.shadows);
+
+        let nima_score = incoming.nima_score.or(self.nima_score);
+        let dedup_cluster_id = incoming.dedup_cluster_id.or(self.dedup_cluster_id);
+        let photohelper_id = incoming
+            .photohelper_id
+            .clone()
+            .or_else(|| self.photohelper_id.clone());
+        let last_processed_at = incoming.last_processed_at.or(self.last_processed_at);
+
+        let rating = incoming.rating.or(self.rating);
+
+        let label = incoming.label.clone().or_else(|| self.label.clone());
+
+        let keywords = match &incoming.keywords {
+            None => self.keywords.clone(),
+            Some(incoming_set) => {
+                let mut user_kws = BTreeSet::new();
+                if let Some(existing_set) = &self.keywords {
+                    for kw in existing_set {
+                        if !is_photohelper_keyword(kw) {
+                            user_kws.insert(kw.clone());
+                        }
+                    }
+                }
+                for kw in incoming_set {
+                    user_kws.insert(kw.clone());
+                }
+                Some(user_kws)
+            }
+        };
+
+        let hierarchical_keywords = match &incoming.hierarchical_keywords {
+            None => self.hierarchical_keywords.clone(),
+            Some(incoming_set) => {
+                let mut user_kws = BTreeSet::new();
+                if let Some(existing_set) = &self.hierarchical_keywords {
+                    for kw in existing_set {
+                        if !is_photohelper_keyword(kw) {
+                            user_kws.insert(kw.clone());
+                        }
+                    }
+                }
+                for kw in incoming_set {
+                    user_kws.insert(kw.clone());
+                }
+                Some(user_kws)
+            }
+        };
+
+        Self {
+            temperature,
+            tint,
+            exposure,
+            contrast,
+            highlights,
+            shadows,
+            nima_score,
+            dedup_cluster_id,
+            photohelper_id,
+            last_processed_at,
+            metadata_date: self.metadata_date,
+            has_any_crs_attr: self.has_any_crs_attr || incoming.has_any_crs_attr,
+            rating,
+            label,
+            keywords,
+            hierarchical_keywords,
+        }
+    }
+
+    /// Lenient constructor used by the XMP reader. Out-of-range temperature and tint
+    /// values are clamped to their boundary limits, while other out-of-range numeric
+    /// values are ignored (mapped to `None`) with a `tracing::warn!`.
     pub(crate) fn from_parsed(fields: ParsedFields) -> Self {
-        // Apply lenient range clamping — warn and drop out-of-range values.
-        let temperature = fields.temperature.and_then(|v| {
-            if (2000..=50_000).contains(&v) {
-                Some(v)
+        let temperature = fields.temperature.map(|v| {
+            if v < 2000 {
+                tracing::warn!(value = v, "crs:Temperature below 2000; clamping to 2000");
+                2000
+            } else if v > 50_000 {
+                tracing::warn!(value = v, "crs:Temperature above 50000; clamping to 50000");
+                50_000
             } else {
-                tracing::warn!(value = v, "crs:Temperature out of [2000, 50000]; ignoring");
-                None
+                v
             }
         });
-        let tint = fields.tint.and_then(|v| {
-            if (-150..=150).contains(&v) {
-                Some(v)
+        let tint = fields.tint.map(|v| {
+            if v < -150 {
+                tracing::warn!(value = v, "crs:Tint below -150; clamping to -150");
+                -150
+            } else if v > 150 {
+                tracing::warn!(value = v, "crs:Tint above 150; clamping to 150");
+                150
             } else {
-                tracing::warn!(value = v, "crs:Tint out of [-150, 150]; ignoring");
-                None
+                v
             }
         });
         let exposure = fields.exposure.and_then(|v| {
@@ -207,7 +424,7 @@ impl SidecarSettings {
                 None
             }
         });
-        let clamp_100 = |name: &str, v: i32| -> Option<i32> {
+        let validate_100 = |name: &str, v: i32| -> Option<i32> {
             if (-100..=100).contains(&v) {
                 Some(v)
             } else {
@@ -221,37 +438,50 @@ impl SidecarSettings {
         };
         let nima_score = fields.nima_score.and_then(|v| {
             if v.is_finite() {
-                Some(v)
+                Some(v.clamp(1.0, 10.0))
             } else {
                 tracing::warn!(value = v, "ph:NimaScore is non-finite; ignoring");
                 None
             }
         });
+        let dedup_cluster_id = fields.dedup_cluster_id.and_then(|v| {
+            if v >= 0 {
+                Some(v)
+            } else {
+                tracing::warn!(value = v, "ph:DedupClusterId is negative; ignoring");
+                None
+            }
+        });
+        let label = fields.label.map(|v| v.trim().to_string());
+
         Self {
             temperature,
             tint,
             exposure,
             contrast: fields
                 .contrast
-                .and_then(|v| clamp_100("crs:Contrast2012", v)),
+                .and_then(|v| validate_100("crs:Contrast2012", v)),
             highlights: fields
                 .highlights
-                .and_then(|v| clamp_100("crs:Highlights2012", v)),
-            shadows: fields.shadows.and_then(|v| clamp_100("crs:Shadows2012", v)),
+                .and_then(|v| validate_100("crs:Highlights2012", v)),
+            shadows: fields
+                .shadows
+                .and_then(|v| validate_100("crs:Shadows2012", v)),
             nima_score,
-            dedup_cluster_id: fields.dedup_cluster_id,
+            dedup_cluster_id,
             photohelper_id: fields.photohelper_id,
             last_processed_at: fields.last_processed_at,
             metadata_date: fields.metadata_date,
             has_any_crs_attr: fields.has_any_crs_attr,
+            rating: fields.rating,
+            label,
+            keywords: Some(fields.keywords),
+            hierarchical_keywords: Some(fields.hierarchical_keywords),
         }
     }
 }
 
 /// Builder for [`SidecarSettings`].
-///
-/// Obtain via [`SidecarSettings::builder()`]. Call [`build()`][SidecarSettingsBuilder::build]
-/// to validate and produce a `SidecarSettings`.
 #[derive(Debug, Default)]
 pub struct SidecarSettingsBuilder {
     temperature: Option<i32>,
@@ -264,6 +494,10 @@ pub struct SidecarSettingsBuilder {
     dedup_cluster_id: Option<i64>,
     photohelper_id: Option<String>,
     last_processed_at: Option<OffsetDateTime>,
+    rating: Option<Rating>,
+    label: Option<String>,
+    keywords: Option<BTreeSet<String>>,
+    hierarchical_keywords: Option<BTreeSet<String>>,
 }
 
 impl SidecarSettingsBuilder {
@@ -316,7 +550,7 @@ impl SidecarSettingsBuilder {
         self
     }
 
-    /// Duplicate cluster ID.
+    /// Duplicate cluster ID (must be non-negative).
     #[must_use]
     pub fn dedup_cluster_id(mut self, v: i64) -> Self {
         self.dedup_cluster_id = Some(v);
@@ -337,12 +571,40 @@ impl SidecarSettingsBuilder {
         self
     }
 
+    /// Star rating.
+    #[must_use]
+    pub fn rating(mut self, v: Rating) -> Self {
+        self.rating = Some(v);
+        self
+    }
+
+    /// Color label.
+    #[must_use]
+    pub fn label(mut self, v: impl Into<String>) -> Self {
+        self.label = Some(v.into());
+        self
+    }
+
+    /// Flat keywords.
+    #[must_use]
+    pub fn keywords(mut self, v: BTreeSet<String>) -> Self {
+        self.keywords = Some(v);
+        self
+    }
+
+    /// Hierarchical keywords.
+    #[must_use]
+    pub fn hierarchical_keywords(mut self, v: BTreeSet<String>) -> Self {
+        self.hierarchical_keywords = Some(v);
+        self
+    }
+
     /// Build and validate.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Validation`] if any field is out of its valid range.
-    pub fn build(self) -> Result<SidecarSettings, Error> {
+    pub fn build(mut self) -> Result<SidecarSettings, Error> {
         if let Some(t) = self.temperature {
             if !(2000..=50_000).contains(&t) {
                 return Err(Error::Validation {
@@ -380,10 +642,52 @@ impl SidecarSettingsBuilder {
         if let Some(s) = self.nima_score {
             if !s.is_finite() {
                 return Err(Error::Validation {
-                    message: format!("nima_score {s} is not finite (NaN or Inf not allowed)"),
+                    message: format!("nima_score {s} is not finite"),
+                });
+            }
+            self.nima_score = Some(s.clamp(1.0, 10.0));
+        }
+        if let Some(c) = self.dedup_cluster_id {
+            if c < 0 {
+                return Err(Error::Validation {
+                    message: format!("dedup_cluster_id {c} is negative (must be >= 0)"),
                 });
             }
         }
+
+        // Normalize color label: trim and convert to String::new() if whitespace/empty
+        let label = self.label.map(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                String::new()
+            } else {
+                trimmed
+            }
+        });
+
+        // Trim/clean hierarchical keywords
+        let hierarchical_keywords = self.hierarchical_keywords.map(|kws| {
+            let mut set = BTreeSet::new();
+            for kw in kws {
+                let trimmed = kw.trim().to_string();
+                if !trimmed.is_empty() {
+                    set.insert(trimmed);
+                }
+            }
+            set
+        });
+
+        let keywords = self.keywords.map(|kws| {
+            let mut set = BTreeSet::new();
+            for kw in kws {
+                let trimmed = kw.trim().to_string();
+                if !trimmed.is_empty() {
+                    set.insert(trimmed);
+                }
+            }
+            set
+        });
+
         Ok(SidecarSettings {
             temperature: self.temperature,
             tint: self.tint,
@@ -395,10 +699,12 @@ impl SidecarSettingsBuilder {
             dedup_cluster_id: self.dedup_cluster_id,
             photohelper_id: self.photohelper_id,
             last_processed_at: self.last_processed_at,
-            // Builder-constructed settings are not read from file; these fields
-            // are reader-only and always None/false when constructed via the builder.
             metadata_date: None,
             has_any_crs_attr: false,
+            rating: self.rating,
+            label,
+            keywords,
+            hierarchical_keywords,
         })
     }
 }

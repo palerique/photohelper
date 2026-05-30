@@ -149,8 +149,11 @@ impl Catalog {
             source: e,
         })?;
         let start = Instant::now();
-        let max_attempts =
-            ((u64::from(lock_timeout_seconds)) / retry_delay.as_secs().max(1)).max(1) as u32;
+        let max_attempts = u32::try_from(
+            ((u64::from(lock_timeout_seconds) * 1000) / (retry_delay.as_millis().max(1) as u64))
+                .max(1),
+        )
+        .unwrap_or(u32::MAX);
         let mut attempts: u32 = 0;
         loop {
             attempts = attempts.saturating_add(1);
@@ -831,22 +834,28 @@ impl Catalog {
         &self.canonical_path
     }
 
-    /// Load all non-superseded photos with their NIMA aesthetic score (if culled).
+    /// Load all non-superseded photos with their NIMA aesthetic score (if culled)
+    /// and duplicate cluster ID (if clustered).
     ///
     /// Used by the `develop` subcommand to build XMP sidecars for every
-    /// ingested photo. Pass `photohelper_ai::MODEL_SLUG` as `model_slug`.
+    /// ingested photo.
     ///
     /// # Errors
     /// - `Error::CatalogPoisoned`, `Error::CatalogOpen` for query failures.
-    pub fn all_photos_with_cull_scores(&self, model_slug: &str) -> Result<Vec<DevelopRow>, Error> {
+    pub fn all_photos_with_cull_scores(
+        &self,
+        aesthetic_model_slug: &str,
+        dedup_model_slug: &str,
+    ) -> Result<Vec<DevelopRow>, Error> {
         let guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
             path: self.canonical_path.clone(),
         })?;
         let mut stmt = guard
             .prepare(
-                "SELECT p.id, p.source_path, cs.aesthetic_score \
+                "SELECT p.id, p.source_path, cs.aesthetic_score, dc.cluster_id \
                  FROM photos p \
                  LEFT JOIN cull_scores cs ON cs.photo_id = p.id AND cs.model_slug = ?1 \
+                 LEFT JOIN dup_clusters dc ON dc.photo_id = p.id AND dc.model_slug = ?2 \
                  WHERE p.superseded_at_unix_seconds IS NULL \
                  ORDER BY p.ingested_at_unix_seconds",
             )
@@ -855,11 +864,12 @@ impl Catalog {
                 source: Box::new(e),
             })?;
         let rows = stmt
-            .query_map([model_slug], |row| {
+            .query_map([aesthetic_model_slug, dedup_model_slug], |row| {
                 let id_bytes: Vec<u8> = row.get(0)?;
                 let source_path: String = row.get(1)?;
                 let nima_score: Option<f64> = row.get(2)?;
-                Ok((id_bytes, source_path, nima_score))
+                let cluster_id: Option<i64> = row.get(3)?;
+                Ok((id_bytes, source_path, nima_score, cluster_id))
             })
             .map_err(|e| Error::CatalogOpen {
                 path: self.canonical_path.clone(),
@@ -869,7 +879,7 @@ impl Catalog {
         // rusqlite::Error from individual row reads).
         let mut result = Vec::new();
         for r in rows {
-            let (id_bytes, src, score) = r.map_err(|e| Error::CatalogOpen {
+            let (id_bytes, src, score, cluster_id) = r.map_err(|e| Error::CatalogOpen {
                 path: self.canonical_path.clone(),
                 source: Box::new(e),
             })?;
@@ -881,7 +891,18 @@ impl Catalog {
                     reason = "NIMA scores in [1.0,10.0]; f64->f32 precision loss negligible"
                 )]
                 let nima_score = score.map(|v| v as f32);
-                result.push(DevelopRow::new(photo_id, source_path, nima_score));
+                result.push(DevelopRow::new(
+                    photo_id,
+                    source_path,
+                    nima_score,
+                    cluster_id,
+                ));
+            } else {
+                tracing::warn!(
+                    path = %src,
+                    len = id_bytes.len(),
+                    "all_photos_with_cull_scores: malformed or corrupt photo ID BLOB; skipping row"
+                );
             }
         }
         Ok(result)
@@ -1819,7 +1840,9 @@ mod tests {
         let cat = Catalog::open(dir.path().join("d.db"), 1).unwrap();
         let p1 = upsert_photo(&cat, dir.path(), 1);
         let p2 = upsert_photo(&cat, dir.path(), 2);
-        let rows = cat.all_photos_with_cull_scores("nima-v1").unwrap();
+        let rows = cat
+            .all_photos_with_cull_scores("nima-v1", "clip-vit-b32")
+            .unwrap();
         assert_eq!(rows.len(), 2, "both photos must appear");
         let paths: Vec<_> = rows.iter().map(|r| r.source_path().to_path_buf()).collect();
         assert!(paths.contains(&p1.source_path().to_path_buf()));
@@ -1834,7 +1857,9 @@ mod tests {
         // Insert a cull score.
         cat.insert_cull_score(p.photo_id(), "nima-v1", 7.5, 1000)
             .unwrap();
-        let rows = cat.all_photos_with_cull_scores("nima-v1").unwrap();
+        let rows = cat
+            .all_photos_with_cull_scores("nima-v1", "clip-vit-b32")
+            .unwrap();
         assert_eq!(rows.len(), 1);
         let score = rows[0].nima_score();
         assert!(score.is_some(), "nima_score must be present");
@@ -1854,7 +1879,9 @@ mod tests {
         // This triggers supersession of p1.
         let p2 = make_test_photo_at_path(dir.path(), 2, p1.source_path());
         cat.upsert(&p2, 0).unwrap();
-        let rows = cat.all_photos_with_cull_scores("nima-v1").unwrap();
+        let rows = cat
+            .all_photos_with_cull_scores("nima-v1", "clip-vit-b32")
+            .unwrap();
         // Only the non-superseded row (p2) should be returned.
         assert_eq!(rows.len(), 1, "superseded photo must be excluded");
         assert_eq!(
@@ -1863,7 +1890,6 @@ mod tests {
             "only the active row must be returned"
         );
     }
-
     #[test]
     fn all_photos_wrong_model_slug_returns_none_score() {
         let dir = tempfile::tempdir().unwrap();
@@ -1872,11 +1898,36 @@ mod tests {
         cat.insert_cull_score(p.photo_id(), "nima-v1", 7.5, 1000)
             .unwrap();
         // Query with a different model slug — should return None for nima_score.
-        let rows = cat.all_photos_with_cull_scores("other-model").unwrap();
+        let rows = cat
+            .all_photos_with_cull_scores("other-model", "clip-vit-b32")
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert!(
             rows[0].nima_score().is_none(),
             "wrong model slug must return None score"
         );
+    }
+
+    #[test]
+    fn test_develop_row_retrieves_cluster_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("d.db"), 1).unwrap();
+        let p = upsert_photo(&cat, dir.path(), 1);
+
+        let dummy_embedding = vec![0.0f32; 512];
+        let bytes: Vec<u8> = dummy_embedding
+            .iter()
+            .flat_map(|&f| f.to_ne_bytes())
+            .collect();
+        cat.insert_embedding(p.photo_id(), "clip-vit-b32", &bytes, 512, 1000)
+            .unwrap();
+        cat.insert_dup_cluster(p.photo_id(), "clip-vit-b32", 42, 0.95, 1000)
+            .unwrap();
+
+        let rows = cat
+            .all_photos_with_cull_scores("nima-v1", "clip-vit-b32")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].dedup_cluster_id(), Some(42));
     }
 }
