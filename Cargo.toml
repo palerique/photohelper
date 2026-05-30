@@ -99,6 +99,11 @@ quick-xml = { version = "0.36", features = ["serialize"] }
 # TD-014: ort RC pin =2.0.0-rc.12; upgrade to stable 2.0.0 when released.
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native"] }
 
+# Image resizing, watermarking, and JPEG encoding
+tiny-skia = "0.12.0"
+cosmic-text = "0.12.1"
+mozjpeg = "0.10.13"
+
 # Release profile tuned for batch image processing: thin LTO keeps build times
 # manageable while giving most of the speedup of fat LTO; codegen-units = 1
 # unlocks further cross-crate inlining.

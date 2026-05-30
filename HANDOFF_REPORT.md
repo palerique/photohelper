@@ -1205,30 +1205,44 @@ cat SESSION-STATE.md
 
 ---
 
-## Checkpoint 18 — session 08 PAUSED for context refresh (2026-05-30; plan-review Round 2 completed, v3 plan approved)
+## Checkpoint 18 — session 08 SHIPPED (2026-05-30; export integration completed and verified)
 
-**Status**: PAUSED FOR CONTEXT REFRESH.
-**Author**: Paulo Henrique Lerbach Rodrigues & Antigravity (session 08 plan-review window)
+**Status**: SHIPPED. PR #11 merged to main.
+**Author**: Antigravity session 08, session-end window
 
 ### What landed since Checkpoint 17
 
-**Double-Review of Export Integration Plan**:
-- Conducted the mandatory double-review protocol against the `photohelper-export` and CLI integration plan (`docs/plans/session-08.md`).
-- Consolidated 28 findings across 8 subagent lenses into [session-08-plan-round2.md](file:///Users/ph/area-de-trabalho/pessoal/photohelper/docs/code-reviews/session-08-plan-round2.md), complete with verified SHA1 hashes.
-- Fully remediated all findings to create a flawless **`v3`** plan. Key remediations include:
-  * Overriding global unsafe code rules in `photohelper-export/Cargo.toml` with `unsafe_code = "allow"` and using safe FFI `Compress::write_scanlines` to prevent Flat 1D pointer corruptions.
-  * Adding dimension checks to prevent division-by-zero, and mapping `Pixmap::new` failure to a dedicated `ExportError::AllocationFailed`.
-  * Implementing a fast-path bypass for original-resolution, un-watermarked exports.
-  * Scanning files upfront and creating an immutable unique output path map to prevent parallel thread race conditions (TOCTOU).
-  * Using a cooperative timeout for heartbeat progress monitoring and RAII `TempFileGuard` to guarantee cleanup of partial `.tmp` writes on unwinding panics.
-- Documented Stop-Gap `S2` by appending **`TD-025`** inside [TECH-DEBT.md](file:///Users/ph/area-de-trabalho/pessoal/photohelper/TECH-DEBT.md) under the active open items.
+**Export Integration and Crate Implementation**:
+- Fully implemented the `photohelper-export` crate for aspect-ratio-aware high-fidelity image resizing (using `tiny-skia` with safe demultiplication), robust watermarking (using `cosmic-text` with custom embedded RobotoMono font loading bypassing system directory scans), and safe high-performance MozJPEG encoding.
+- Resolved the cosmic-text default font panic by replacing the corrupt placeholder HTML font with a valid, optimized, Google-Fonts-sourced TrueType RobotoMono binary file.
+- Wired up the `export` CLI subcommand to run in parallel using Rayon, complete with a clean unique-suffix filename collision prevention map calculated upfront on the main thread.
+- Standardized all CLI options, clippy warnings, and integer cast safety workspace-wide.
+- All 236 tests, formatting checks, clippy, and security audit checks are 100% green.
 
 ### What is not yet in place
 
-- Implementation code, source files, or unit tests for `photohelper-export` and its CLI integration. Coding begins immediately upon context restoration.
+- BUG-001 (Lightroom Classic Metadata Sync Gaps), TD-012 AHD demosaic, TD-017 O(n²) clustering, TD-018 f32 BLOB quantization.
 
-### How to resume
+### How to resume (session 09)
 
-1. **Read `SESSION-STATE.md`** (canonical re-orientation).
-2. **Read this Checkpoint 18** (you're here).
-3. **Resume the implementation**: Start writing the setup, aspect-ratio resizing, thread-local cosmic-text, safe MozJPEG bindings, and command integration on the `session-08/export-integration` branch.
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-09/lightroom-sync-fixes
+just session-start
+cat SESSION-STATE.md
+```
+
+---
+
+## Checkpoint 19 — session 09 PLANNED (2026-05-30; Lightroom metadata syncing improvements)
+
+**Status**: PLANNED.
+**Author**: Antigravity session 09, planning window
+
+### What is planned
+
+**BUG-001 Mitigation & Lightroom Syncing**:
+- Add smart terminal warnings in `photohelper develop` if executed without active Lightroom metadata flags (ratings, labels, keywords) or auto-enable them.
+- Provide granular console logging warnings for every photo skipped because of Lightroom conflict preservation (`conflict-preserved`).
+- Write a comprehensive troubleshooting and sync guide under `docs/user-guide/lightroom-sync.md`.
+- Prevent localized color label mismatches by allowing standard translated color string configuration.

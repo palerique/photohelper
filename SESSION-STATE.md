@@ -7,21 +7,21 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 7 (`lightroom-namespace-compatibility` — 2026-05-30) — **SHIPPED** via PR #10. Resolving DN-029 by mapping computed duplicate cluster IDs and NIMA aesthetic culling scores to standard Lightroom-supported fields (keywords, labels, ratings). Session-end R1 (0C+0H+2L; 2 retained) → remediated → R2 CLEAN (0 findings; 4/4 closed).
+**Last session**: 8 (`export-integration` — 2026-05-30) — **SHIPPED** via PR #11. Implemented the `photohelper-export` crate for image resizing, watermarking, and MozJPEG encoding, and integrated it into the `export` CLI subcommand. Session-end R1 (0C+0H+2L; 2 resolved) → R2 CLEAN (0 findings).
 
-**Current session**: 8 (`export-integration` — 2026-05-30) — branch `session-08/export-integration`. **PAUSED FOR CONTEXT REFRESH** (Plan-review Round 2 completed & remediated to clean v3 plan).
+**Current session**: 9 (`lightroom-sync-fixes` — 2026-05-30) — branch `session-09/lightroom-sync-fixes`. **PLANNED** (Addressing BUG-001 with CLI smart warnings, granular conflict feedback, and Lightroom sync guide).
 
-**Goal**: Implement the `photohelper-export` crate for image resizing, watermarking, and MozJPEG encoding, and integrate it into the `export` CLI subcommand.
+**Goal**: Address Lightroom Classic metadata sync gaps identified in BUG-001 by implementing smart CLI warnings, granular conflict feedback, and authoring a comprehensive Lightroom syncing guide.
 
-**Action**: Begin implementation phase (Setup dependency & unsafe Cargo exceptions, build aspect-ratio resize engine with tiny-skia, configure thread-local cosmic-text, integrate safe MozJPEG compression wrappers, and wire up the CLI export command).
+**Action**: Author the session plan `docs/plans/session-09.md` and run the multi-agent double-review on it.
 
-**Session-end review (session 07 — COMPLETE)**:
-- R1 → 0C+0H+2L (2 total; XML comment splitting and non-finite warning diagnostics) → triaged & verified.
-- R2 → 0 findings; all watch-list items closed; CLEAN.
+**Session-end review (session 08 — COMPLETE)**:
+- R1 → 0C+0H+2L (2 total; clippy formatting/cast warnings) → resolved.
+- R2 → 0 findings; CLEAN.
 
-**Final test count**: 226 (223 from session 06 baseline + 3 new from session 07 coverage)
+**Final test count**: 236 (226 from session 07 baseline + 10 new integration tests)
 
-**Plan-review history (session 08 — PAUSED)**:
+**Plan-review history (session 08 — COMPLETE)**:
 - R1 → 6 CRITICAL + 9 HIGH + 3 MEDIUM + 2 LOW (20 total) → plan v2 (bounds safeguards, embedded Roboto fallback, upfront query, 3-channel demultiplication, atomic writes, strict cancellation).
 - R2 → 4 CRITICAL + 16 HIGH + 8 MEDIUM + 0 LOW (28 total) → plan v3 (Cargo unsafe permission override, take_demultiplied pixel extract, safe MozJPEG FFI wrappers, empty FontSystem db scan bypass, standardizing DevelopRow rayon iterator to retain photo_id, unique suffix TOCTOU directory race prevention map, RAII TempFileGuard, exit cooperative heartbeat timeouts, and recording S2 stop-gap in TECH-DEBT.md) → CLEAN.
 
@@ -97,7 +97,7 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 | `photohelper-raw`     | **implemented (session 02+04)**         | LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw_rgb. 4 integration tests + 3 CLIP D1c tests. |
 | `photohelper-ai`      | **implemented (session 04+05)**         | NIMA + CLIP ViT-B/32 int8 (MIT, 85.3 MB). ImageEmbedding, MobileClip, EmbeddingZeroVector+EmbeddingCorruptBytes errors. CLIP_MODEL_SLUG+CLIP_MODEL_MANIFEST_NAME. |
 | `photohelper-sidecar` | **implemented (session 06+07)**         | XMP sidecar I/O (crs:+ph: namespaces), atomic write, conflict resolution (DN-004), Lightroom namespace compatibility (DN-029). 35+ unit tests. |
-| `photohelper-export`  | **plan v3 approved**                    | Resize + watermark + MozJPEG encoding design fully reviewed and vetted in clean v3 plan. Ready for coding.   |
+| `photohelper-export`  | **implemented (session 08)**            | Resize + watermark + MozJPEG encoding design fully implemented, integrated, and verified with 100% green tests. |
 | `photohelper-cameras` | **implemented (session 01)**            | CameraProfile trait + CanonR8 stub + CameraRegistry::for_exif with normalization.                             |
 | `photohelper-catalog` | **implemented (sessions 01+04+05)**     | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores + FK + SCHEMA_VERSION=2), CullRow, InsertScoreOutcome, unsuperseded_unscored_rows, insert_cull_score. Decision docs 0001+0002. Session 05 D2a+D2b: schema v3 (embeddings + dup_clusters + apply_v2_to_v3 + SCHEMA_VERSION=3), EmbeddingRow, InsertEmbeddingOutcome, unembedded_rows, insert_embedding (dim*4==bytes guard), all_embeddings_for_model (superseded excluded), insert_dup_cluster. Decision doc 0003. |
 

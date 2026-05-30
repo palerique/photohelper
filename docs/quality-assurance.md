@@ -266,6 +266,37 @@ is the signal that it's worth prioritizing.
 
 ---
 
+## State & Context Synchronization Discipline
+
+To support seamless parallel development, multi-agent execution, and flawless handover between different LLM brains or automated harnesses, all agents MUST maintain perfect synchronization across our shared context files and workspace ledgers.
+
+### 1. Unified Reference Identity (URI)
+Any technical debt, decision, bug report, or architectural change must carry a unique and globally consistent reference identifier across all files:
+- **Technical Debt**: Must use the identifier format `TD-NNN` (where `NNN` is a sequential index from `TECH-DEBT.md`).
+- **Architectural Decisions**: Must use the identifier format `ADR-NNNN` (where `NNNN` is a sequential index from `docs/adr/`).
+- **Bug Investigations**: Must use the identifier format `BUG-NNN` (where `NNN` is a sequential index from `docs/bugs/`).
+Any update to one ledger referencing these IDs must immediately update all corresponding referencing ledgers (`SESSION-STATE.md`, `HANDOFF_REPORT.md`, `TECH-DEBT.md`) in the *same* session commit, eliminating stale pointers.
+
+### 2. High-Density, Non-Summarized Documentation
+When documenting session plans, goal accomplishments, design gaps, or remediation blueprints, agents MUST avoid vague, high-level summaries (e.g., "Updated decoders to fix errors").
+Instead, write **high-density, physically precise context**:
+- Cite the **exact** file names, line ranges, and fully-qualified types or functions changed (e.g., `src/raw.rs:L145-180`, `struct RawDecoder`, `fn decode_cr3`).
+- Detail the **exact** failure modes, returned error types, and concrete safety invariants enforced.
+- Document the *rationale* and technical trade-offs behind each decision so that downstream agents can ingest the state with zero ambiguity.
+
+### 3. Machine-Parsable Schema Formats
+Ledgers and reports are parsed both by humans and automated script chains. Agents must strictly adhere to the defined metadata formats:
+- Keep the `yaml` frontmatter and structured tables in all session plans, reviews, and handoff reports syntactically valid and physically precise.
+- Maintain the column headers, labels, and status flags of the progress tables inside `SESSION-STATE.md` and `HANDOFF_REPORT.md` verbatim.
+
+### 4. Zero-Friction Handover State
+At the end of every session, the final handoff documentation must represent a complete, runnable state transition. It must explicitly specify:
+- The exact `bash` bootstrap command to start the next session.
+- Any open Round-2 items, pending linting issues, or known blocked states.
+- The precise list of context files and directories the next agent or LLM must read first to immediately gain 100% domain context.
+
+---
+
 ## Enforcement
 
 This protocol is enforced, not merely documented:

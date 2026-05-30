@@ -31,6 +31,7 @@ use photohelper_ai::{CLIP_MODEL_MANIFEST_NAME, MODEL_MANIFEST_NAME, VerifiedMode
 use commands::cull::{CullArgs, run_cull};
 use commands::dedup::{DedupeArgs, run_dedup};
 use commands::develop::{DevelopArgs, run_develop};
+use commands::export::{ExportArgs, run_export};
 use commands::ingest::run_ingest;
 
 /// Cross-platform CLI for AI-powered Canon RAW processing.
@@ -76,7 +77,7 @@ enum Command {
     /// Apply develop settings via XMP sidecars (Lightroom-compatible).
     Develop(DevelopArgs),
     /// Export to JPEG with resize + watermark (planned for v0.1).
-    Export,
+    Export(ExportArgs),
     /// Run ingest → cull → develop → export (planned for v0.1).
     Run,
     /// Manage AI model bundles (planned for v0.1).
@@ -202,7 +203,13 @@ fn main() -> ExitCode {
                 ExitCode::from(exit_code_for_error(&err))
             }
         },
-        Command::Export => stub("export"),
+        Command::Export(args) => match run_export(&cli, args) {
+            Ok(code) => ExitCode::from(code),
+            Err(err) => {
+                tracing::error!("{err:#}");
+                ExitCode::from(exit_code_for_error(&err))
+            }
+        },
         Command::Run => stub("run"),
         Command::Models => stub("models"),
         Command::Camera => stub("camera"),

@@ -40,6 +40,10 @@ Construct a clear mapping of the planned modifications:
 - Present the Deep Remediation Blueprint to the user in a highly readable, structured format.
 - **Explicit Halt**: Pause and request the user's explicit review and green-light. Do not touch any source or test files until the user gives consent.
 
+### Phase F: State & Ledger Synchronization
+- Ensure all proposed changes, deferred technical debts, and architectural decisions resolved during this remediation phase adhere strictly to `docs/quality-assurance.md § State & Context Synchronization Discipline`.
+- Record and sync these changes across all referencing ledgers (`TECH-DEBT.md`, `SESSION-STATE.md`, `HANDOFF_REPORT.md`) in a single commit, using precise identifiers and high-density, non-summarized context.
+
 ---
 
 ## 3. Review Round 2 & Regression Check

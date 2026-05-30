@@ -71,6 +71,7 @@ Only after resolving clarifying questions (or documenting assumptions) can you d
 - How each deliverable is tested (unit vs. integration, test vectors).
 - Which quality checkpoints and review gates will fire.
 - A summary of discoveries and assumptions resolved during the discovery phase.
+- **Synchronization Compliance**: Explicitly declare that all references, planned types, and deferred technical debt adhere to `docs/quality-assurance.md § State & Context Synchronization Discipline`. Use high-density, precise names, paths, and identifiers.
 
 ## 10. Handoff to Plan Review
 Commit the plan's top block and tell the user the plan is ready for the `plan-review` skill.
