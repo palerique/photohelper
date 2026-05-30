@@ -7,16 +7,13 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 5 (`dedup-mobileclip` — 2026-05-29) — **SHIPPED** via PR #8
-(pending merge). Full dedup pipeline: CLIP ViT-B/32 LAION2B int8 embeddings, catalog v3
-(embeddings + dup_clusters), `dedup` subcommand, heartbeat.rs extraction, 182 tests.
-Session-end R1 (2C+3H+9M; 15 retained) → remediated → R2 CLEAN (0 findings; 8/8 closed).
+**Last session**: 6 (`td-cleanup-develop-pipeline` — 2026-05-30) — **SHIPPED** via PR #9. Delivering fully runnable `develop` subcommand + `photohelper-sidecar` crate. Session-end R1 (3C+7H+2M; 14 retained) → remediated → R2 CLEAN (0 findings; 9/9 closed).
 
-**Current session**: 6 (`td-cleanup-develop-pipeline` — 2026-05-29) — branch `session-06/td-cleanup-develop-pipeline`. **IN FLIGHT** — plan v1 committed; awaiting plan-review.
+**Current session**: 7 (`lightroom-namespace-compatibility` — 2026-05-30) — branch `session-07/lightroom-namespace-compatibility`. **IN FLIGHT** — plan v1 pending.
 
-**Goal**: Session 06 — Close TDs with fired binding triggers (TD-001, TD-004, TD-005, TD-009, TD-011, TD-014, TD-020) + deliver fully runnable `develop` subcommand + `photohelper-sidecar` crate (XMP I/O, crs: + ph: namespaces, Lightroom-compatible).
+**Goal**: Address DN-029 (Lightroom Classic custom namespace incompatibility) by mapping duplicate cluster IDs and NIMA aesthetic culling scores to standard Lightroom-supported fields (such as keywords/tags, color labels, ratings, or collection-ready XMP groups).
 
-**Action**: PAUSED for context refresh. Resume: run `/session-end` skill to ship PR to main (session-end R1+R2 CLEAN; just ci GREEN; 223 tests). Then address DN-029 (Lightroom ph: namespace) in session 07.
+**Action**: Implement the metadata mapping layer to enable seamless, plugin-free culling and duplicate visualization directly in Adobe Lightroom Classic.
 
 **Session-end review (session 06 — COMPLETE)**:
 - R1 → 3C+7H+2M (14 total; discard_rate=0.077) → remediated (conflict detection fix, has_any_crs_attr, TD-022, .flatten() fix, superseded test, 2 missing CLI tests, from_parsed validation, writer empty timestamp, clock warning, docs)
@@ -28,7 +25,7 @@ Session-end R1 (2C+3H+9M; 15 retained) → remediated → R2 CLEAN (0 findings; 
 - R1 → 3 CRITICAL + 9 HIGH + 6 MEDIUM → plan v2 (XMP path fix, atomic write, conflict table, MODEL_SLUG, DevelopRow photo_id, SidecarSettings private, WriteOutcome 4-variant, error handling, mktemp, lenient reader, test gaps, ordering)
 - R2 → 0 CRITICAL + 0 HIGH + 1 MEDIUM (remediated inline) → CLEAN
 
-**Status (session 06 — D0-D5 COMPLETE; session-end review pending)**: `just ci` GREEN (221 tests).
+**Status (session 06 — COMPLETE; SHIPPED)**: `just ci` GREEN (223 tests).
 - D0 ✓ TD-001 GitHub Actions SHA pinning
 - D2a ✓ TD-009 sanitize-check.sh stage 2 (mktemp)
 - D2b ✓ TD-004 osv-scanner LibRaw CVE monitoring

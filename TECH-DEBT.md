@@ -31,7 +31,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-001 — GitHub Actions action versions use `@vN` floating tags, not pinned SHAs
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-30, session 06 D0). Pinned all GitHub Actions in `.github/workflows/ci.yml` to full commit SHAs, and documented the chosen SHAs in `docs/decisions/0001-action-version-pinning.md` along with the periodic upgrade protocol and cadence.
 - **Opened**: 2026-05-27 (session 0)
 - **Stop-gap location**: `.github/workflows/ci.yml` (all `uses:` lines tagged `<<pin to SHA>>`) @ bootstrap commit
 - **Fundamental fix**: replace every `actions/checkout@v4`, `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache@v2` with the corresponding commit SHA from the action's repo; commit a `docs/decisions/0001-action-version-pinning.md` recording the SHAs chosen and the upgrade cadence. Add a periodic refresh task (Dependabot or scheduled session).
@@ -70,7 +70,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-004 — LibRaw C-library CVE monitoring is manual; `cargo audit` does NOT cover it
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-30, session 06 D2b). Integrated `osv-scanner` (Google's OSV.dev scanner) into `just ci` (via `.osv-scanner.toml` configuring the LibRaw vendored C-library vulnerability tracking). This automatically scans C/C++ dependencies in our gate alongside cargo audit, securing our static linking graph against manual-only CVE checks.
 - **Opened**: 2026-05-28 (session 2, PR1-T10 from `docs/code-reviews/session-02-plan-round1.md`)
 - **Stop-gap location**: `crates/photohelper-raw/build.rs` + `docs/decisions/0002-libraw-lgpl-static-link-mechanics.md` @ session 02's first FFI-landing commit (commit SHA pending). The stop-gap is the absence of any CVE-DB scanner that covers LibRaw — `cargo audit` consults RustSec, which only catalogs Rust crates; LibRaw is C++ and its CVEs (multiple buffer-overflow / out-of-bounds-read CVEs since 2020 per `cve.mitre.org`) are invisible to our gate.
 - **Fundamental fix**: wire an automated CVE-DB scanner that covers C-library dependencies. Candidates: (a) `osv-scanner` from Google's OSV.dev (covers the LibRaw CVE feed in the Bitnami / OSS-Fuzz / NIST NVD imports); (b) GitHub Dependabot for the vendored LibRaw tarball (limited — needs a manifest); (c) Trivy or Grype against the built binary's link-graph; (d) manual subscription to LibRaw's GitHub Security Advisories + LibRaw release announcements, with a calendar reminder per release. Path (a) `osv-scanner` is the lowest-friction: a single CLI invocation `osv-scanner --config .osv-scanner.toml .` integrated into `just ci` after `cargo audit`. The config pins the vendored LibRaw version (sourced from `build.rs`).
@@ -142,7 +142,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-009 — `scripts/sanitize-check.sh` ships stage-1 only; embedded-preview JPEG re-check (R3-T8 stage 2) deferred
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-30, session 06 D2a). Implemented Stage-2 sanitization checks in `scripts/sanitize-check.sh` by extracting the embedded preview JPEG of RAW fixtures via ExifTool and asserting the strict tag allow-list on the extracted preview, fully closing the metadata leakage path.
 - **Opened**: 2026-05-28 (session 2, Deliverable 3 fixture commit)
 - **Stop-gap location**: `scripts/sanitize-check.sh` — does NOT yet
   perform the R3-T8 stage-2 check: extract the embedded preview JPEG
