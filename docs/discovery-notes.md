@@ -237,3 +237,22 @@
 - **Owner**: future session that evaluates embedding model options, or when Apple releases a permissively-licensed MobileCLIP variant.
 - **Binding trigger**: Apple publishes MobileCLIP weights under MIT/Apache-2.0/CC-BY-4.0, or a community export from MIT-licensed source becomes available with clear provenance.
 - **Status**: open (informational; session 05 proceeded with LAION CLIP ViT-B/32 MIT as the selected model).
+
+### DN-029 — Lightroom does not recognize `ph:` namespace metadata (2026-05-30, session 06)
+
+- **Observed**: Adobe Lightroom Classic does not surface metadata written under the custom `ph:` namespace (`http://ns.photohelper.dev/1.0/`). Fields like `ph:NimaScore`, `ph:PhotohelperId`, and `ph:DedupClusterId` are preserved by Lightroom in XMP round-trips (it doesn't delete unknown namespaces) but are completely invisible in the Library panel, metadata inspector, smart collections, and filters. Lightroom's XMP extensibility model only exposes built-in namespaces (`crs:`, `xmp:`, `exif:`, `dc:`, `lr:`, `Iptc4xmpCore:`, etc.) in the UI.
+
+- **Why it matters**: The core user value proposition — using photohelper's AI-computed metadata (NIMA score, dedup cluster) inside Lightroom — is currently zero. Users cannot filter, sort, or create smart collections based on NIMA scores. The `ph:` namespace is functionally invisible.
+
+- **Resolution options** (ordered by Lightroom compatibility):
+  1. **Map NIMA → `xmp:Rating`** (stars 1-5): `rating = round((nima-1.0)/9.0 * 4 + 1)`. Native Lightroom star rating; visible everywhere. Lossy (5 values, not 1.0-10.0).
+  2. **Map NIMA ranges → `lr:hierarchicalSubject`** (keywords): Write `photohelper/nima/7.0-8.0`. Lightroom keywords are searchable and support smart collections. More granular than stars but requires keyword management.
+  3. **Map NIMA → `Iptc4xmpCore:Keywords`**: Similar to option 2; appears in IPTC metadata panel.
+  4. **Hybrid**: Write NIMA → `xmp:Rating` (for quick sorting) AND NIMA range → `lr:hierarchicalSubject` (for precise filtering). Best for users who want both.
+  5. **Publish plugin**: A Lightroom Classic SDK plugin that reads `ph:NimaScore` and maps it to Lightroom library fields at import time. Most powerful but requires separate LrC plugin distribution.
+
+- **Recommended approach for v0.1**: Option 4 (hybrid). Add `--lr-rating` flag to `photohelper develop` that writes `xmp:Rating` from NIMA score. Write NIMA range as `lr:hierarchicalSubject` keyword. Both are readable by Lightroom without any plugin.
+
+- **Owner**: session 07+ that revisits the develop subcommand output schema. The `photohelper-sidecar` crate already supports writing `crs:` fields; adding `lr:` and `Iptc4xmpCore:` namespace support requires extending the writer.
+
+- **Status**: open (informational; the `ph:` namespace data is stored correctly but not surfaced by Lightroom).

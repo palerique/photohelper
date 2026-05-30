@@ -16,7 +16,13 @@ Session-end R1 (2C+3H+9M; 15 retained) → remediated → R2 CLEAN (0 findings; 
 
 **Goal**: Session 06 — Close TDs with fired binding triggers (TD-001, TD-004, TD-005, TD-009, TD-011, TD-014, TD-020) + deliver fully runnable `develop` subcommand + `photohelper-sidecar` crate (XMP I/O, crs: + ph: namespaces, Lightroom-compatible).
 
-**Action**: Fire `/session-end` — double review (R1+R2) on all session-06 code, then ship the PR.
+**Action**: PAUSED for context refresh. Resume: run `/session-end` skill to ship PR to main (session-end R1+R2 CLEAN; just ci GREEN; 223 tests). Then address DN-029 (Lightroom ph: namespace) in session 07.
+
+**Session-end review (session 06 — COMPLETE)**:
+- R1 → 3C+7H+2M (14 total; discard_rate=0.077) → remediated (conflict detection fix, has_any_crs_attr, TD-022, .flatten() fix, superseded test, 2 missing CLI tests, from_parsed validation, writer empty timestamp, clock warning, docs)
+- R2 → 0C+0H+1L (stale comment, fixed inline); all 9/9 watch-list items CLOSED; CLEAN
+
+**Final test count**: 223 (221 from D0-D5 baseline + 2 new from R1 remediation)
 
 **Plan-review history (session 06 — COMPLETE)**:
 - R1 → 3 CRITICAL + 9 HIGH + 6 MEDIUM → plan v2 (XMP path fix, atomic write, conflict table, MODEL_SLUG, DevelopRow photo_id, SidecarSettings private, WriteOutcome 4-variant, error handling, mktemp, lenient reader, test gaps, ordering)
