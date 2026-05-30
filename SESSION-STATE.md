@@ -16,11 +16,20 @@ Session-end R1 (2C+3H+9M; 15 retained) → remediated → R2 CLEAN (0 findings; 
 
 **Goal**: Session 06 — Close TDs with fired binding triggers (TD-001, TD-004, TD-005, TD-009, TD-011, TD-014, TD-020) + deliver fully runnable `develop` subcommand + `photohelper-sidecar` crate (XMP I/O, crs: + ph: namespaces, Lightroom-compatible).
 
-**Action**: Begin implementation — D0 first, then D2, then D1, then D3, D4, D5 (per ordering in plan v2).
+**Action**: Resume in fresh context — implement D3 (`photohelper-sidecar` crate), then D4 (`develop` subcommand), then D5 (scripts + ledger), then fire session-end review.
 
 **Plan-review history (session 06 — COMPLETE)**:
 - R1 → 3 CRITICAL + 9 HIGH + 6 MEDIUM → plan v2 (XMP path fix, atomic write, conflict table, MODEL_SLUG, DevelopRow photo_id, SidecarSettings private, WriteOutcome 4-variant, error handling, mktemp, lenient reader, test gaps, ordering)
 - R2 → 0 CRITICAL + 0 HIGH + 1 MEDIUM (remediated inline) → CLEAN
+
+**Status (session 06 — D0+D2+D1 COMPLETE; D3+D4+D5 pending)**: `just ci` GREEN (189 tests).
+- D0 ✓ TD-001 GitHub Actions SHA pinning
+- D2a ✓ TD-009 sanitize-check.sh stage 2 (mktemp)
+- D2b ✓ TD-004 osv-scanner LibRaw CVE monitoring
+- D2c ✓ TD-005 formal closure (env-var panic removed in session 05)
+- D2d ✓ TD-014 ort stable check (not yet released 2026-05-29)
+- D2e ✓ TD-020 CLIP bicubic center-crop (189 tests; cosine_sim ≥ 0.90)
+- D1 ✓ TD-011 session-02 post-hoc review R1+R2 CLEAN (6/6 watch-list CLOSED; +7 tests)
 
 **Status (session 05 — COMPLETE; SHIPPED)**: `just ci` GREEN (182 tests).
 - D0 ✓ CLIP ViT-B/32 LAION2B int8 (85.3MB, MIT, ANL-003, TD-020 filed)
