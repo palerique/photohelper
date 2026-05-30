@@ -846,6 +846,7 @@ dependencies = [
  "photohelper-catalog",
  "photohelper-core",
  "photohelper-raw",
+ "photohelper-sidecar",
  "predicates",
  "rayon",
  "rusqlite",

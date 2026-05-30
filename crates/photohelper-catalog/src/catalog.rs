@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use photohelper_core::Error;
 use photohelper_core::model::{AbsPath, Photo, PhotoId};
 
-use crate::row::{CullRow, EmbeddingRow, PhotoRow, SELECT_ALL_COLUMNS, insert_error};
+use crate::row::{CullRow, DevelopRow, EmbeddingRow, PhotoRow, SELECT_ALL_COLUMNS, insert_error};
 use crate::schema::{INIT_SQL, MIGRATE_V1_TO_V2_SQL, MIGRATE_V2_TO_V3_SQL, SCHEMA_VERSION};
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
@@ -832,6 +832,53 @@ impl Catalog {
     }
 
     /// Total rows in `photos` (visible to driver for summary tally).
+    /// Load all non-superseded photos with their NIMA aesthetic score (if culled).
+    ///
+    /// Used by the `develop` subcommand to build XMP sidecars for every
+    /// ingested photo. Pass `photohelper_ai::MODEL_SLUG` as `model_slug`.
+    ///
+    /// # Errors
+    /// - `Error::CatalogPoisoned`, `Error::CatalogOpen` for query failures.
+    pub fn all_photos_with_cull_scores(&self, model_slug: &str) -> Result<Vec<DevelopRow>, Error> {
+        let guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
+            path: self.canonical_path.clone(),
+        })?;
+        let mut stmt = guard
+            .prepare(
+                "SELECT p.id, p.source_path, cs.aesthetic_score \
+                 FROM photos p \
+                 LEFT JOIN cull_scores cs ON cs.photo_id = p.id AND cs.model_slug = ?1 \
+                 WHERE p.superseded_at_unix_seconds IS NULL \
+                 ORDER BY p.ingested_at_unix_seconds",
+            )
+            .map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+        let rows = stmt
+            .query_map([model_slug], |row| {
+                let id_bytes: Vec<u8> = row.get(0)?;
+                let source_path: String = row.get(1)?;
+                let nima_score: Option<f64> = row.get(2)?;
+                Ok((id_bytes, source_path, nima_score))
+            })
+            .map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+        let result = rows
+            .flatten()
+            .filter_map(|(id_bytes, src, score)| {
+                let arr = <[u8; 32]>::try_from(id_bytes.as_slice()).ok()?;
+                let photo_id = photohelper_core::catalog_glue::photo_id_from_row_bytes(arr);
+                let source_path = std::path::PathBuf::from(src);
+                let nima_score = score.map(|v| v as f32);
+                Some(DevelopRow::new(photo_id, source_path, nima_score))
+            })
+            .collect();
+        Ok(result)
+    }
+
     ///
     /// # Errors
     /// - `Error::CatalogPoisoned`, `Error::CatalogOpen` for query failures.
@@ -1722,5 +1769,70 @@ mod tests {
         }
         let result = trigger.join();
         assert!(result.is_err(), "join must return Err after a panic");
+    }
+
+    // --- all_photos_with_cull_scores ---
+
+    fn upsert_photo(cat: &Catalog, dir: &std::path::Path, seed: u8) -> Photo {
+        let p = make_test_photo(dir, seed);
+        cat.upsert(&p, 0).unwrap();
+        p
+    }
+
+    #[test]
+    fn all_photos_with_cull_scores_returns_all_non_superseded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("d.db"), 1).unwrap();
+        let p1 = upsert_photo(&cat, dir.path(), 1);
+        let p2 = upsert_photo(&cat, dir.path(), 2);
+        let rows = cat.all_photos_with_cull_scores("nima-v1").unwrap();
+        assert_eq!(rows.len(), 2, "both photos must appear");
+        let paths: Vec<_> = rows.iter().map(|r| r.source_path().to_path_buf()).collect();
+        assert!(paths.contains(&p1.source_path().to_path_buf()));
+        assert!(paths.contains(&p2.source_path().to_path_buf()));
+    }
+
+    #[test]
+    fn all_photos_with_cull_scores_nima_score_attached() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("d.db"), 1).unwrap();
+        let p = upsert_photo(&cat, dir.path(), 1);
+        // Insert a cull score.
+        cat.insert_cull_score(p.photo_id(), "nima-v1", 7.5, 1000)
+            .unwrap();
+        let rows = cat.all_photos_with_cull_scores("nima-v1").unwrap();
+        assert_eq!(rows.len(), 1);
+        let score = rows[0].nima_score();
+        assert!(score.is_some(), "nima_score must be present");
+        assert!((score.unwrap() - 7.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn all_photos_with_cull_scores_superseded_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("d.db"), 1).unwrap();
+        let p1 = upsert_photo(&cat, dir.path(), 1);
+        // Supersede p1 by upserting again with a newer mtime.
+        cat.upsert(&p1, 1).unwrap();
+        let rows = cat.all_photos_with_cull_scores("nima-v1").unwrap();
+        // After superseding, the original row still exists but the new one is the active one.
+        // There should be exactly 1 non-superseded row.
+        assert_eq!(rows.len(), 1, "superseded photo must be excluded");
+    }
+
+    #[test]
+    fn all_photos_wrong_model_slug_returns_none_score() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = Catalog::open(dir.path().join("d.db"), 1).unwrap();
+        let p = upsert_photo(&cat, dir.path(), 1);
+        cat.insert_cull_score(p.photo_id(), "nima-v1", 7.5, 1000)
+            .unwrap();
+        // Query with a different model slug — should return None for nima_score.
+        let rows = cat.all_photos_with_cull_scores("other-model").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].nima_score().is_none(),
+            "wrong model slug must return None score"
+        );
     }
 }

@@ -322,8 +322,9 @@ fn ingest_lock_timeout_above_max_exits_2_clap_default() {
 
 #[test]
 fn stub_subcommands_exit_69_with_not_yet_implemented_message() {
-    // "cull" removed after D3 wired the real handler (plan PR1-T2).
-    for name in ["develop", "export", "run", "models", "camera"] {
+    // "cull" removed after session 04 wired the real handler.
+    // "develop" removed after session 06 D4 wired the real handler.
+    for name in ["export", "run", "models", "camera"] {
         Command::cargo_bin("photohelper")
             .unwrap()
             .arg(name)
@@ -1093,4 +1094,188 @@ fn dedup_strict_exits_nonzero_on_file_missing() {
         .assert()
         .code(1) // EX_STRICT_FAIL = 1
         .stderr(contains("file-missing: 1"));
+}
+
+// =====================================================================
+// Develop subcommand integration tests (D4b, session 06).
+// =====================================================================
+
+/// Helper: ingest a synthetic (fake) CR3 so develop can find it in the catalog.
+/// The fake file is 1MB of 0xFF bytes — enough to get a PhotoId hash without
+/// needing LibRaw (develop does not decode RAW pixels).
+fn ingest_fake_cr3(catalog_path: &str, dir: &std::path::Path) -> std::path::PathBuf {
+    let fake_cr3 = dir.join("photo.CR3");
+    std::fs::write(&fake_cr3, vec![0xFFu8; 1024 * 1024]).unwrap();
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", catalog_path, "ingest", dir.to_str().unwrap()])
+        .assert()
+        .code(0);
+    fake_cr3
+}
+
+#[test]
+fn develop_creates_xmp_sidecar_for_ingested_photo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let expected_xmp = cr3.with_extension("xmp"); // photo.xmp NOT photo.CR3.xmp
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop"])
+        .assert()
+        .code(0)
+        .stderr(contains("written: 1"));
+
+    assert!(
+        expected_xmp.exists(),
+        "photo.xmp must exist (not photo.CR3.xmp)"
+    );
+    assert!(
+        !tmp.path().join("photo.CR3.xmp").exists(),
+        "photo.CR3.xmp must NOT exist"
+    );
+}
+
+#[test]
+fn develop_empty_catalog_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    // Create an empty subdirectory for ingest (no RAW files → catalog is initialized but empty).
+    let empty_dir = tmp.path().join("empty");
+    std::fs::create_dir(&empty_dir).unwrap();
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "ingest",
+            empty_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0); // walked 0 RAW files → exit 0 (empty dir is not an EX_USAGE error)
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_path.to_str().unwrap(), "develop"])
+        .assert()
+        .code(0)
+        .stderr(contains("walked: 0"));
+}
+
+#[test]
+fn develop_idempotency_second_run_updates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    ingest_fake_cr3(cat_str, tmp.path());
+
+    // First run: written=1
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop"])
+        .assert()
+        .code(0)
+        .stderr(contains("written: 1"));
+
+    // Second run without --force: the existing sidecar was written by us (no MetadataDate
+    // from a third party), so merge_and_write will Overwrite or ConflictPreserve depending
+    // on timestamps. Either way, written should be 0 on the second run.
+    let out = Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&out);
+    assert!(
+        !stderr.contains("written: 1"),
+        "second run must not report written: 1; got: {stderr}"
+    );
+}
+
+#[test]
+fn develop_strict_exits_nonzero_on_file_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+
+    // Delete the source file after ingest.
+    std::fs::remove_file(&cr3).unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--strict"])
+        .assert()
+        .code(1) // EX_STRICT_FAIL = 1
+        .stderr(contains("file-missing: 1"));
+}
+
+#[test]
+fn develop_cli_flags_written_to_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_str,
+            "develop",
+            "--temp",
+            "5500",
+            "--exposure",
+            "1.50",
+        ])
+        .assert()
+        .code(0);
+
+    let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
+    assert!(
+        xml.contains("crs:Temperature=\"5500\""),
+        "Temperature must be in sidecar"
+    );
+    assert!(
+        xml.contains("crs:Exposure2012=\"1.50\""),
+        "Exposure must be in sidecar"
+    );
+}
+
+#[test]
+fn develop_summary_line_contains_expected_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    ingest_fake_cr3(cat_str, tmp.path());
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop"])
+        .assert()
+        .code(0)
+        .stderr(contains("walked:"))
+        .stderr(contains("written:"))
+        .stderr(contains("updated:"))
+        .stderr(contains("conflict-preserved:"))
+        .stderr(contains("force-overwritten:"))
+        .stderr(contains("file-missing:"))
+        .stderr(contains("errored:"));
 }
