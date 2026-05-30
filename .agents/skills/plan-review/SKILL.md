@@ -15,6 +15,6 @@ Run the **plan-review** checkpoint per `docs/quality-assurance.md § Plan-review
 4. Remediate Round 1 findings in batched edits to the plan.
 5. **Round 2:** re-run `eight-agent-review` against the remediated plan. Expect regressions introduced by Round 1 edits — that is the point. Write `docs/code-reviews/session-NN-plan-round2.md`.
 6. Remediate Round 2 findings. If Round 2 surfaced CRITICAL-class regressions needing another cycle, add Round 3.
-7. Only after Round 2 + remediation are clean, tell the user implementation may begin. **Never skip Round 2.**
+7. Only after Round 2 + remediation are clean, tell the user the plan is fully ready and ask for explicit authorization to start the implementation. **Never skip Round 2, and NEVER write or modify any application/library/test code until the user has explicitly given the green light to start implementing.**
 
 Triage every finding (CRITICAL/HIGH/MEDIUM/LOW) and route deferrals to `TECH-DEBT.md` with a binding trigger.
