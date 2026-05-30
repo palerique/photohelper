@@ -1202,3 +1202,33 @@ git switch -c session-08/export-integration
 just session-start
 cat SESSION-STATE.md
 ```
+
+---
+
+## Checkpoint 18 — session 08 PAUSED for context refresh (2026-05-30; plan-review Round 2 completed, v3 plan approved)
+
+**Status**: PAUSED FOR CONTEXT REFRESH.
+**Author**: Paulo Henrique Lerbach Rodrigues & Antigravity (session 08 plan-review window)
+
+### What landed since Checkpoint 17
+
+**Double-Review of Export Integration Plan**:
+- Conducted the mandatory double-review protocol against the `photohelper-export` and CLI integration plan (`docs/plans/session-08.md`).
+- Consolidated 28 findings across 8 subagent lenses into [session-08-plan-round2.md](file:///Users/ph/area-de-trabalho/pessoal/photohelper/docs/code-reviews/session-08-plan-round2.md), complete with verified SHA1 hashes.
+- Fully remediated all findings to create a flawless **`v3`** plan. Key remediations include:
+  * Overriding global unsafe code rules in `photohelper-export/Cargo.toml` with `unsafe_code = "allow"` and using safe FFI `Compress::write_scanlines` to prevent Flat 1D pointer corruptions.
+  * Adding dimension checks to prevent division-by-zero, and mapping `Pixmap::new` failure to a dedicated `ExportError::AllocationFailed`.
+  * Implementing a fast-path bypass for original-resolution, un-watermarked exports.
+  * Scanning files upfront and creating an immutable unique output path map to prevent parallel thread race conditions (TOCTOU).
+  * Using a cooperative timeout for heartbeat progress monitoring and RAII `TempFileGuard` to guarantee cleanup of partial `.tmp` writes on unwinding panics.
+- Documented Stop-Gap `S2` by appending **`TD-025`** inside [TECH-DEBT.md](file:///Users/ph/area-de-trabalho/pessoal/photohelper/TECH-DEBT.md) under the active open items.
+
+### What is not yet in place
+
+- Implementation code, source files, or unit tests for `photohelper-export` and its CLI integration. Coding begins immediately upon context restoration.
+
+### How to resume
+
+1. **Read `SESSION-STATE.md`** (canonical re-orientation).
+2. **Read this Checkpoint 18** (you're here).
+3. **Resume the implementation**: Start writing the setup, aspect-ratio resizing, thread-local cosmic-text, safe MozJPEG bindings, and command integration on the `session-08/export-integration` branch.

@@ -151,35 +151,39 @@ code "works."
    git switch -c session-NN/<kebab-slug>
    ```
    Working directly on `main` is never allowed.
-2. `just session-start` — runs `scripts/verify-state.sh`; prints the
-   required-reading list.
-3. Read, in order: `SESSION-STATE.md`, the latest
-   `docs/code-reviews/session-*-round2.md` (unresolved Round-2 items),
-   `HANDOFF_REPORT.md`, `docs/discovery-notes.md`.
-4. Resolve any blocking item before declaring a goal. Do **not** plan on top of
-   unresolved Round-2 regressions.
-5. Declare the session goal by writing the top block of
-   `docs/plans/session-NN.md` (the session contract).
-6. Submit the plan to the **plan-review** checkpoint.
+2. `just session-start` — runs `scripts/verify-state.sh`; prints the required-reading list.
+3. Read, in order: `SESSION-STATE.md`, the latest `docs/code-reviews/session-*-round2.md` (unresolved Round-2 items), `HANDOFF_REPORT.md`, and `docs/discovery-notes.md`. Resolve any blocking item. Do **not** plan on top of unresolved Round-2 regressions.
+4. **Codebase Exploration & Discovery (Code-Explorer Emulation)**:
+   - Methodically audit directories, public APIs, type invariants, Rust safe/unsafe boundaries, control/data flow, error-handling/silent-failure baselines, and existing test coverage before authoring the plan.
+5. **Architectural Blueprinting (Code-Architect Emulation)**:
+   - Formulate a clean architectural blueprint covering new types, compile-time safety checks, error-handling propagation, and cognitive simplification targets before drafting the plan.
+6. **Clarifying Questions Milestone**:
+   - Formulate and present deep, structured questions to the user across three key categories (Architectural Trade-offs, Requirements & Edge Cases, Integration & Regression Risks). Pause for user alignment.
+7. **Declare the Session Goal**: Write the top block of `docs/plans/session-NN.md` (the session contract) incorporating discoveries and assumptions.
+8. Submit the plan to the **plan-review** checkpoint.
 
 ---
 
 ## Plan-review protocol (mandatory before any code)
 
-Run the suite against the plan document. The plan must answer:
-
+Run the parallel 8-agent suite against the plan document. The plan must answer:
 - **What will exist by end-of-session?** (concrete files, types, behaviors)
 - **What is explicitly out of scope?** (deferrals go to `TECH-DEBT.md`)
 - **How is each deliverable tested?** (unit + integration boundaries named)
 - **Which checkpoints fire this session, and when?**
 - **What discovery items are expected?** (unknowns flagged up-front)
 
-Consolidate findings by theme; remediate in batched edits; re-run Round 2 on
-the remediated plan. Only after Round 2 + remediation begin writing code.
+### Deep Remediation Blueprint (Between Review & Fixes)
+Before making any batched edits to address findings (both for plan reviews and session-end/code reviews), the agent MUST draft a structured **Deep Remediation Blueprint** and present it to the user:
+- **Root-Cause Analysis (RCA)**: Categorize and analyze findings by Failure Mode (e.g., *Type Invariant Bypass*, *Silent Failure Path*) and trace why the initial design or code allowed this gap.
+- **Multi-Option Evaluation**: For CRITICAL/HIGH findings, contrast at least two alternative architectural approaches and justify the choice.
+- **Traceability Matrix**: Explicitly link Finding IDs (from the 9th Agent's verification) to the target files, line numbers, and scopes.
+- **Regression Assessment**: Identify side-effects on downstream callers/bindings and define verification checklists.
+- **Interactive Approval Milestone**: Explicitly pause and await user authorization before editing any plan or source files.
 
-**Why so strict at the plan stage?** Code written from a flawed plan needs both
-the plan *and* the code re-reviewed. Plan review is the cheapest defect-removal
-point in the entire pipeline.
+Re-run Round 2 on the remediated plan. Only after Round 2 is complete, clean, and remediated, begin writing code.
+
+**Why so strict at the plan stage?** Code written from a flawed plan needs both the plan *and* the code re-reviewed. Plan review is the cheapest defect-removal point in the entire pipeline.
 
 ---
 
