@@ -47,7 +47,7 @@
 - **Observed**: When both `crs:` (Lightroom-written) and `ph:` (photohelper-written) settings exist and disagree, the planned resolution is timestamp-based: if `ph:LastProcessedAt >= xmp:MetadataDate` trust `ph:`, else trust `crs:`. We never delete `crs:` tags we don't understand. Open question: silent reconciliation vs explicit summary log line per photo, with a `--strict` flag that escalates conflicts to errors.
 - **Why it matters**: Wrong choice silently destroys user intent when both editors touch the same photo. Must be locked before `develop` lands.
 - **Owner**: session that lands the `develop` subcommand (planned for session 03+).
-- **Status**: open
+- **Status**: **CLOSED** (2026-05-29, session 06 D3). Conflict resolution shipped in `photohelper-sidecar::conflict::merge_and_write` (4-case timestamp decision table: see `docs/plans/session-06.md § D3 — Conflict resolution`). Decision: timestamp-based with conservative "preserve on ambiguity" defaults; `--force` flag for unconditional overwrite; INFO/WARN logged per conflict decision. No `--strict` escalation for conflicts (they are not errors; only file_missing + write failures trigger EX_STRICT_FAIL).
 
 ### DN-005 — Catalog storage shape (SQLite confirmed; schema TBD) (2026-05-27, session 0)
 

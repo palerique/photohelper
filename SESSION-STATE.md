@@ -16,20 +16,24 @@ Session-end R1 (2C+3H+9M; 15 retained) → remediated → R2 CLEAN (0 findings; 
 
 **Goal**: Session 06 — Close TDs with fired binding triggers (TD-001, TD-004, TD-005, TD-009, TD-011, TD-014, TD-020) + deliver fully runnable `develop` subcommand + `photohelper-sidecar` crate (XMP I/O, crs: + ph: namespaces, Lightroom-compatible).
 
-**Action**: Resume in fresh context — implement D3 (`photohelper-sidecar` crate), then D4 (`develop` subcommand), then D5 (scripts + ledger), then fire session-end review.
+**Action**: Fire `/session-end` — double review (R1+R2) on all session-06 code, then ship the PR.
 
 **Plan-review history (session 06 — COMPLETE)**:
 - R1 → 3 CRITICAL + 9 HIGH + 6 MEDIUM → plan v2 (XMP path fix, atomic write, conflict table, MODEL_SLUG, DevelopRow photo_id, SidecarSettings private, WriteOutcome 4-variant, error handling, mktemp, lenient reader, test gaps, ordering)
 - R2 → 0 CRITICAL + 0 HIGH + 1 MEDIUM (remediated inline) → CLEAN
 
-**Status (session 06 — D0+D2+D1 COMPLETE; D3+D4+D5 pending)**: `just ci` GREEN (189 tests).
+**Status (session 06 — D0-D5 COMPLETE; session-end review pending)**: `just ci` GREEN (221 tests).
 - D0 ✓ TD-001 GitHub Actions SHA pinning
 - D2a ✓ TD-009 sanitize-check.sh stage 2 (mktemp)
 - D2b ✓ TD-004 osv-scanner LibRaw CVE monitoring
 - D2c ✓ TD-005 formal closure (env-var panic removed in session 05)
-- D2d ✓ TD-014 ort stable check (not yet released 2026-05-29)
-- D2e ✓ TD-020 CLIP bicubic center-crop (189 tests; cosine_sim ≥ 0.90)
+- D2d ✓ TD-014 ort stable check (not yet released 2026-05-29; trigger refreshed)
+- D2e ✓ TD-020 CLIP bicubic center-crop (cosine_sim ≥ 0.90)
 - D1 ✓ TD-011 session-02 post-hoc review R1+R2 CLEAN (6/6 watch-list CLOSED; +7 tests)
+- D3 ✓ photohelper-sidecar crate (XMP I/O, crs:+ph: namespaces, atomic write, conflict resolution, DN-004 CLOSED; 21 unit tests)
+- D4a ✓ DevelopRow + all_photos_with_cull_scores catalog query (4 tests)
+- D4b ✓ develop subcommand (sidecar pipeline, heartbeat, 6 integration tests)
+- D5 ✓ scripts/photohelper-develop.sh, just develop, ledger updates
 
 **Status (session 05 — COMPLETE; SHIPPED)**: `just ci` GREEN (182 tests).
 - D0 ✓ CLIP ViT-B/32 LAION2B int8 (85.3MB, MIT, ANL-003, TD-020 filed)
@@ -76,11 +80,11 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 
 | Component             | Status                                  | Notes                                                                                                         |
 |-----------------------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------|
-| `photohelper-cli`     | **implemented (session 01+04+05)**      | clap v4 + 8 subcommands; `ingest`+`cull`+`dedup` real; stubs exit 69. heartbeat.rs shared (TD-016 closed). |
+| `photohelper-cli`     | **implemented (session 01+04+05+06)**   | clap v4 + 8 subcommands; `ingest`+`cull`+`dedup`+`develop` real; stubs exit 69. heartbeat.rs shared. |
 | `photohelper-core`    | **implemented (session 01+04)**         | model + RgbImage; error (13 variants); catalog_glue. |
 | `photohelper-raw`     | **implemented (session 02+04)**         | LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw_rgb. 4 integration tests + 3 CLIP D1c tests. |
 | `photohelper-ai`      | **implemented (session 04+05)**         | NIMA + CLIP ViT-B/32 int8 (MIT, 85.3 MB). ImageEmbedding, MobileClip, EmbeddingZeroVector+EmbeddingCorruptBytes errors. CLIP_MODEL_SLUG+CLIP_MODEL_MANIFEST_NAME. |
-| `photohelper-sidecar` | scaffolded                              | XMP read/write (crs:/ph: namespaces) lands when `develop` is wired (~session 04).                             |
+| `photohelper-sidecar` | **implemented (session 06)**            | XMP sidecar I/O (crs:+ph: namespaces), atomic write, conflict resolution (DN-004). 21 unit tests.            |
 | `photohelper-export`  | scaffolded                              | resize + watermark + mozjpeg encode land when `export` is wired (~session 05).                                |
 | `photohelper-cameras` | **implemented (session 01)**            | CameraProfile trait + CanonR8 stub + CameraRegistry::for_exif with normalization.                             |
 | `photohelper-catalog` | **implemented (sessions 01+04+05)**     | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores + FK + SCHEMA_VERSION=2), CullRow, InsertScoreOutcome, unsuperseded_unscored_rows, insert_cull_score. Decision docs 0001+0002. Session 05 D2a+D2b: schema v3 (embeddings + dup_clusters + apply_v2_to_v3 + SCHEMA_VERSION=3), EmbeddingRow, InsertEmbeddingOutcome, unembedded_rows, insert_embedding (dim*4==bytes guard), all_embeddings_for_model (superseded excluded), insert_dup_cluster. Decision doc 0003. |

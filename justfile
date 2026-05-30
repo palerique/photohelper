@@ -180,6 +180,10 @@ list-catalog *ARGS:
 dedup *ARGS:
     @./scripts/photohelper-dedup.sh {{ARGS}}
 
+# Run `photohelper develop` to write Lightroom-compatible XMP sidecars.
+develop *ARGS:
+    @./scripts/photohelper-develop.sh {{ARGS}}
+
 # Defense-in-depth: `crates/photohelper-raw` is the only crate allowed to
 # contain `unsafe` code, and only `ffi.rs` inside it. The crate Cargo.toml
 # allows `unsafe_code` for the FFI module; every other source file carries
