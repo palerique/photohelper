@@ -59,13 +59,28 @@ pub fn write_xmp(path: &Path, settings: &SidecarSettings) -> Result<(), Error> {
 ///
 /// `crs:ProcessVersion="11.0"` is always written when any `crs:` field is set
 /// (required for Camera Raw / Lightroom compatibility).
+///
+/// # Stop-gap
+///
+/// TD-022: hand-rolled `quick-xml` template emits only the ~10 fields photohelper
+/// writes. Fields written by Lightroom or other tools (e.g. `crs:CameraProfile`,
+/// `crs:ToneCurvePV2012`) are not modeled and will be silently absent on any
+/// photohelper overwrite. See TECH-DEBT.md § TD-022.
 pub(crate) fn render_xmp(settings: &SidecarSettings) -> String {
     let mut attrs = String::new();
 
     // xmp:MetadataDate — always written if last_processed_at is set.
+    // Use match instead of unwrap_or_default() to avoid writing an empty attribute
+    // on format failure (which would corrupt conflict resolution on subsequent reads).
     if let Some(dt) = settings.last_processed_at() {
-        let iso = dt.format(&Rfc3339).unwrap_or_default();
-        let _ = write!(attrs, "\n      xmp:MetadataDate=\"{iso}\"");
+        match dt.format(&Rfc3339) {
+            Ok(iso) => {
+                let _ = write!(attrs, "\n      xmp:MetadataDate=\"{iso}\"");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not format timestamp as RFC 3339; omitting xmp:MetadataDate");
+            }
+        }
     }
 
     // crs: fields (only if at least one is set).
@@ -103,8 +118,11 @@ pub(crate) fn render_xmp(settings: &SidecarSettings) -> String {
         let _ = write!(attrs, "\n      ph:PhotohelperId=\"{pid}\"");
     }
     if let Some(dt) = settings.last_processed_at() {
-        let iso = dt.format(&Rfc3339).unwrap_or_default();
-        let _ = write!(attrs, "\n      ph:LastProcessedAt=\"{iso}\"");
+        if let Ok(iso) = dt.format(&Rfc3339) {
+            let _ = write!(attrs, "\n      ph:LastProcessedAt=\"{iso}\"");
+        }
+        // On format failure, xmp:MetadataDate was also omitted above — no need to
+        // duplicate the warning here.
     }
 
     format!(

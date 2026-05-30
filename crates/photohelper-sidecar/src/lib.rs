@@ -279,20 +279,46 @@ mod tests {
 
     #[test]
     fn conflict_preserve_newer_lightroom_edit() {
+        // Simulates: photohelper wrote ph:LastProcessedAt=past, then Lightroom
+        // edited and updated xmp:MetadataDate to future (but left ph:LastProcessedAt).
+        // Correct detection: xmp:MetadataDate(future) > ph:LastProcessedAt(past) → ConflictPreserved.
         let dir = tempdir().unwrap();
         let p = dir.path().join("photo.xmp");
 
-        // Write a sidecar with a future timestamp (simulates Lightroom writing after us).
+        // Write an existing sidecar with our timestamps (past write).
         let existing = SidecarSettings::builder()
             .exposure(1.0)
-            .last_processed_at(future())
+            .last_processed_at(past()) // ph:LastProcessedAt = past (our write time)
             .build()
             .unwrap();
         write_xmp(&p, &existing).unwrap();
 
+        // Simulate Lightroom editing: update xmp:MetadataDate to a future value
+        // while leaving ph:LastProcessedAt at the past value.
+        // Replace the existing xmp:MetadataDate line with a future date.
+        let raw = std::fs::read_to_string(&p).unwrap();
+        // Use a partial string match that doesn't depend on the exact timestamp.
+        let lightroom_edited = {
+            // Find and replace xmp:MetadataDate="..." with the future date.
+            let start = raw
+                .find("xmp:MetadataDate=\"")
+                .expect("xmp:MetadataDate in sidecar");
+            let end = raw[start..]
+                .find('"') // opening "
+                .map(|i| start + i + 1)
+                .and_then(|j| raw[j..].find('"').map(|k| j + k + 1))
+                .expect("closing quote for xmp:MetadataDate");
+            format!(
+                "{}xmp:MetadataDate=\"2099-01-01T00:00:00Z\"{}",
+                &raw[..start],
+                &raw[end..]
+            )
+        };
+        std::fs::write(&p, lightroom_edited).unwrap();
+
         let incoming = SidecarSettings::builder()
             .exposure(0.0)
-            .last_processed_at(past())
+            .last_processed_at(now())
             .build()
             .unwrap();
         let outcome = merge_and_write(&p, &incoming, false).unwrap();

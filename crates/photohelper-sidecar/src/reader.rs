@@ -69,11 +69,22 @@ pub(crate) fn parse_xmp_str(content: &str, path: &Path) -> Result<SidecarSetting
                         .map(|v| v.into_owned())
                         .unwrap_or_default();
 
+                    // Track whether ANY crs: attribute was seen (Themes A+B fix):
+                    // this guards the conflict resolver's (None,None) branch against
+                    // overwriting sidecars with only untracked crs: attrs like
+                    // crs:WhiteBalance or crs:CameraProfile.
+                    if key_str.starts_with("crs:") {
+                        fields.has_any_crs_attr = true;
+                    }
+
                     // Match on the full qualified key (e.g. "xmp:MetadataDate")
                     // to avoid namespace collisions with attributes from other
                     // namespaces that happen to share a local name.
                     match key_str {
                         "xmp:MetadataDate" => {
+                            // Store separately from ph:LastProcessedAt so the conflict
+                            // resolver can compare "external edit time" vs "our last
+                            // write time" independently (Theme A fix).
                             metadata_date = parse_datetime(&val, "xmp:MetadataDate");
                         }
                         "crs:Temperature" => {
@@ -109,7 +120,8 @@ pub(crate) fn parse_xmp_str(content: &str, path: &Path) -> Result<SidecarSetting
                             fields.last_processed_at = parse_datetime(&val, "ph:LastProcessedAt");
                         }
                         // All other attributes (rdf:about, xmlns:*, crs:ProcessVersion,
-                        // crs:WhiteBalance, etc.) are silently ignored.
+                        // crs:WhiteBalance, etc.) are silently ignored but has_any_crs_attr
+                        // is set above for crs: prefixed ones.
                         _ => {}
                     }
                 }
@@ -128,10 +140,15 @@ pub(crate) fn parse_xmp_str(content: &str, path: &Path) -> Result<SidecarSetting
         }
     }
 
-    // Prefer ph:LastProcessedAt; fall back to xmp:MetadataDate.
-    if fields.last_processed_at.is_none() {
-        fields.last_processed_at = metadata_date;
-    }
+    // Store xmp:MetadataDate separately for conflict resolution (Theme A fix).
+    // The conflict resolver compares:
+    //   existing.metadata_date()    = xmp:MetadataDate (Lightroom's write time)
+    //   existing.last_processed_at() = ph:LastProcessedAt (our write time — NO fallback)
+    // This correctly detects "Lightroom edited after our last develop pass."
+    fields.metadata_date = metadata_date;
+    // NOTE: fields.last_processed_at is populated only from ph:LastProcessedAt;
+    // we do NOT fall back to xmp:MetadataDate here. The (Some(_), None) conflict
+    // case maps to "existing sidecar has a date but photohelper never wrote to it."
 
     Ok(SidecarSettings::from_parsed(fields))
 }

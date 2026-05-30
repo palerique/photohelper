@@ -22,6 +22,16 @@ pub(crate) struct ParsedFields {
     pub dedup_cluster_id: Option<i64>,
     pub photohelper_id: Option<String>,
     pub last_processed_at: Option<OffsetDateTime>,
+    /// The raw `xmp:MetadataDate` value from the sidecar (NOT collapsed with
+    /// `ph:LastProcessedAt`). Used by the conflict resolver to detect external
+    /// edits: if `metadata_date > last_processed_at`, a third-party tool (e.g.
+    /// Lightroom) wrote to the sidecar after our last develop pass.
+    pub metadata_date: Option<OffsetDateTime>,
+    /// True if ANY `crs:` attribute was encountered in the parsed XML,
+    /// regardless of whether its value was successfully parsed. Prevents
+    /// the conflict resolver from overwriting sidecars that contain only
+    /// untracked `crs:` attributes (e.g. `crs:WhiteBalance`, `crs:CameraProfile`).
+    pub has_any_crs_attr: bool,
 }
 
 /// Develop settings mapping to `crs:` (Camera Raw) and `ph:` (photohelper)
@@ -49,6 +59,15 @@ pub struct SidecarSettings {
     dedup_cluster_id: Option<i64>,
     photohelper_id: Option<String>,
     last_processed_at: Option<OffsetDateTime>,
+    // Conflict-resolution metadata (reader-only, not set by builder).
+    /// The raw `xmp:MetadataDate` from the parsed sidecar; kept separate from
+    /// `ph:LastProcessedAt` so the conflict resolver can compare "external edit
+    /// time" vs "our last write time" independently.
+    metadata_date: Option<OffsetDateTime>,
+    /// True if any `crs:` attribute was present in the parsed XML, even if not
+    /// numerically parsed. Guards the (None,None) conflict path against overwriting
+    /// sidecars with untracked `crs:` settings (e.g. `crs:WhiteBalance`).
+    has_any_crs_attr: bool,
 }
 
 impl SidecarSettings {
@@ -118,7 +137,24 @@ impl SidecarSettings {
         self.last_processed_at
     }
 
-    /// Returns `true` if any `crs:` develop field is set.
+    /// Raw `xmp:MetadataDate` from the parsed sidecar (reader-only; not set by
+    /// builder). Used by the conflict resolver to detect external edits: a value
+    /// newer than `last_processed_at()` means a third-party tool (e.g. Lightroom)
+    /// wrote to the sidecar after our last develop pass.
+    #[must_use]
+    pub fn metadata_date(&self) -> Option<OffsetDateTime> {
+        self.metadata_date
+    }
+
+    /// True if ANY `crs:` attribute was present in the parsed XMP, including
+    /// untracked attributes like `crs:WhiteBalance` or `crs:CameraProfile`.
+    /// Guards the conflict resolver's (None,None) branch.
+    #[must_use]
+    pub fn has_any_crs_attribute(&self) -> bool {
+        self.has_any_crs_attr
+    }
+
+    /// Returns `true` if any of the 6 numeric `crs:` develop fields is set.
     #[must_use]
     pub fn has_crs_fields(&self) -> bool {
         self.temperature.is_some()
@@ -139,20 +175,75 @@ impl SidecarSettings {
             && self.last_processed_at.is_none()
     }
 
-    /// Unchecked constructor used by the XMP reader (values already come
-    /// from a persisted file; we trust them rather than re-validating).
+    /// Lenient constructor used by the XMP reader. Out-of-range numeric values
+    /// are clamped to `None` with a `tracing::warn!` rather than hard-rejected,
+    /// consistent with the reader's "lenient read" contract.
     pub(crate) fn from_parsed(fields: ParsedFields) -> Self {
+        // Apply lenient range clamping — warn and drop out-of-range values.
+        let temperature = fields.temperature.and_then(|v| {
+            if (2000..=50_000).contains(&v) {
+                Some(v)
+            } else {
+                tracing::warn!(value = v, "crs:Temperature out of [2000, 50000]; ignoring");
+                None
+            }
+        });
+        let tint = fields.tint.and_then(|v| {
+            if (-150..=150).contains(&v) {
+                Some(v)
+            } else {
+                tracing::warn!(value = v, "crs:Tint out of [-150, 150]; ignoring");
+                None
+            }
+        });
+        let exposure = fields.exposure.and_then(|v| {
+            if v.is_finite() && (-5.0..=5.0).contains(&v) {
+                Some(v)
+            } else {
+                tracing::warn!(
+                    value = v,
+                    "crs:Exposure2012 out of [-5.0, 5.0] or non-finite; ignoring"
+                );
+                None
+            }
+        });
+        let clamp_100 = |name: &str, v: i32| -> Option<i32> {
+            if (-100..=100).contains(&v) {
+                Some(v)
+            } else {
+                tracing::warn!(
+                    field = name,
+                    value = v,
+                    "crs field out of [-100, 100]; ignoring"
+                );
+                None
+            }
+        };
+        let nima_score = fields.nima_score.and_then(|v| {
+            if v.is_finite() {
+                Some(v)
+            } else {
+                tracing::warn!(value = v, "ph:NimaScore is non-finite; ignoring");
+                None
+            }
+        });
         Self {
-            temperature: fields.temperature,
-            tint: fields.tint,
-            exposure: fields.exposure,
-            contrast: fields.contrast,
-            highlights: fields.highlights,
-            shadows: fields.shadows,
-            nima_score: fields.nima_score,
+            temperature,
+            tint,
+            exposure,
+            contrast: fields
+                .contrast
+                .and_then(|v| clamp_100("crs:Contrast2012", v)),
+            highlights: fields
+                .highlights
+                .and_then(|v| clamp_100("crs:Highlights2012", v)),
+            shadows: fields.shadows.and_then(|v| clamp_100("crs:Shadows2012", v)),
+            nima_score,
             dedup_cluster_id: fields.dedup_cluster_id,
             photohelper_id: fields.photohelper_id,
             last_processed_at: fields.last_processed_at,
+            metadata_date: fields.metadata_date,
+            has_any_crs_attr: fields.has_any_crs_attr,
         }
     }
 }
@@ -304,6 +395,10 @@ impl SidecarSettingsBuilder {
             dedup_cluster_id: self.dedup_cluster_id,
             photohelper_id: self.photohelper_id,
             last_processed_at: self.last_processed_at,
+            // Builder-constructed settings are not read from file; these fields
+            // are reader-only and always None/false when constructed via the builder.
+            metadata_date: None,
+            has_any_crs_attr: false,
         })
     }
 }

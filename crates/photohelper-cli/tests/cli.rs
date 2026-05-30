@@ -1279,3 +1279,111 @@ fn develop_summary_line_contains_expected_fields() {
         .stderr(contains("file-missing:"))
         .stderr(contains("errored:"));
 }
+
+#[test]
+fn develop_force_overwrites_conflict() {
+    // Test that --force CLI flag bypasses conflict resolution and overwrites.
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    // First develop run: creates sidecar.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--temp", "5500"])
+        .assert()
+        .code(0)
+        .stderr(contains("written: 1"));
+
+    // Replace the existing xmp:MetadataDate with a future value to simulate Lightroom
+    // editing after our last develop pass (avoids duplicate-attribute parse errors).
+    let raw = std::fs::read_to_string(&xmp).unwrap();
+    let future_xml = if let Some(start) = raw.find("xmp:MetadataDate=\"") {
+        let after_open = start + "xmp:MetadataDate=\"".len();
+        let close = raw[after_open..].find('"').expect("closing quote");
+        format!(
+            "{}xmp:MetadataDate=\"2099-01-01T00:00:00Z\"{}",
+            &raw[..start],
+            &raw[after_open + close + 1..]
+        )
+    } else {
+        raw.replace(
+            "ph:LastProcessedAt=\"",
+            "xmp:MetadataDate=\"2099-01-01T00:00:00Z\"\n      ph:LastProcessedAt=\"",
+        )
+    };
+    std::fs::write(&xmp, future_xml).unwrap();
+
+    // Without --force, should conflict-preserve.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop"])
+        .assert()
+        .code(0);
+
+    // With --force, must overwrite unconditionally.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--force"])
+        .assert()
+        .code(0)
+        .stderr(contains("force-overwritten: 1"));
+}
+
+#[test]
+fn develop_conflict_preserved_appears_in_summary() {
+    // Test that conflict-preserved counter appears in summary when Lightroom
+    // has edited a sidecar after our last write.
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    // First run: create sidecar.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop"])
+        .assert()
+        .code(0)
+        .stderr(contains("written: 1"));
+
+    // Simulate Lightroom writing a future xmp:MetadataDate (external edit after us).
+    // REPLACE (not prepend) the existing xmp:MetadataDate to avoid duplicate-attribute
+    // XML parse errors. A future xmp:MetadataDate > ph:LastProcessedAt causes ConflictPreserved.
+    let raw = std::fs::read_to_string(&xmp).unwrap();
+    let with_future_date = {
+        // Replace the "xmp:MetadataDate="..." value with a far-future date.
+        if let Some(start) = raw.find("xmp:MetadataDate=\"") {
+            let after_open = start + "xmp:MetadataDate=\"".len();
+            let close = raw[after_open..].find('"').expect("closing quote");
+            format!(
+                "{}xmp:MetadataDate=\"2099-01-01T00:00:00Z\"{}",
+                &raw[..start],
+                &raw[after_open + close + 1..]
+            )
+        } else {
+            // No existing xmp:MetadataDate — inject before ph:LastProcessedAt.
+            raw.replace(
+                "ph:LastProcessedAt=\"",
+                "xmp:MetadataDate=\"2099-01-01T00:00:00Z\"\n      ph:LastProcessedAt=\"",
+            )
+        }
+    };
+    std::fs::write(&xmp, with_future_date).unwrap();
+
+    // Second run: should detect Lightroom's future date and preserve.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop"])
+        .assert()
+        .code(0)
+        .stderr(contains("conflict-preserved: 1"));
+}

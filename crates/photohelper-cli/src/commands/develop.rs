@@ -100,7 +100,7 @@ impl DevelopStats {
 ///
 /// # Errors
 ///
-/// Returns `Err` only for fatal setup failures (catalog open, heartbeat spawn).
+/// Returns `Err` only for fatal setup failures (catalog open, photo query, heartbeat spawn).
 pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     let catalog_path = cli.catalog.clone().unwrap_or_else(|| {
         std::env::current_dir()
@@ -155,6 +155,16 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
             })
             .context("spawning heartbeat thread")?
     };
+
+    // Check the clock once before the loop (not per-photo) to avoid log spam.
+    // A broken clock degrades conflict resolution (sidecars written without timestamps).
+    if unix_now_as_datetime().is_none() {
+        tracing::warn!(
+            "system clock returned a pre-epoch or invalid time; \
+             XMP sidecars will be written without timestamps — \
+             conflict resolution with Lightroom edits is degraded"
+        );
+    }
 
     // Walk sequentially (sidecar I/O is per-photo; heartbeat reads stats cross-thread).
     for row in &rows {

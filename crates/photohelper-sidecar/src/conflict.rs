@@ -64,25 +64,33 @@ pub fn merge_and_write(
 
     // Existing sidecar — read and apply conflict resolution.
     let existing = read_xmp(path)?;
-    let existing_ts = existing.last_processed_at(); // xmp:MetadataDate or ph:LastProcessedAt
-    let incoming_ts = incoming.last_processed_at();
 
-    let outcome = match (existing_ts, incoming_ts) {
-        (Some(md), Some(lp)) => {
-            if md > lp {
+    // Correct conflict detection (Theme A + B fix):
+    // - `existing.metadata_date()` = xmp:MetadataDate (Lightroom's write timestamp)
+    // - `existing.last_processed_at()` = ph:LastProcessedAt (our last write timestamp)
+    // Detect external edit: did a third-party tool write AFTER our last develop pass?
+    let lightroom_ts = existing.metadata_date(); // xmp:MetadataDate
+    let our_ts = existing.last_processed_at(); // ph:LastProcessedAt (preferred), xmp:MetadataDate fallback
+
+    let outcome = match (lightroom_ts, our_ts) {
+        (Some(lr_time), Some(our_time)) => {
+            // Both timestamps present: Lightroom has updated xmp:MetadataDate after our write?
+            if lr_time > our_time {
                 tracing::info!(
                     path = %path.display(),
-                    "develop: existing XMP is newer; preserving crs: settings"
+                    "develop: Lightroom edited after our last write; preserving crs: settings"
                 );
                 WriteOutcome::ConflictPreserved
             } else {
+                // We are newer (or same time) — safe to update.
                 tracing::info!(path = %path.display(), "develop: updating XMP sidecar");
                 write_xmp(path, incoming)?;
                 WriteOutcome::Overwritten
             }
         }
         (Some(_), None) => {
-            // Existing file has a timestamp but this is our first photohelper run.
+            // Existing sidecar has a date (Lightroom-written) but we have never
+            // written ph:LastProcessedAt — this is our first photohelper run.
             tracing::info!(
                 path = %path.display(),
                 "develop: existing XMP has metadata date; preserving (first photohelper run)"
@@ -90,23 +98,27 @@ pub fn merge_and_write(
             WriteOutcome::ConflictPreserved
         }
         (None, Some(_)) => {
-            // Existing file has no timestamp but we do — conservative preserve.
+            // Existing sidecar has ph:LastProcessedAt (photohelper-written) but no
+            // xmp:MetadataDate — conservatively preserve; the absence of a date
+            // is ambiguous.
             tracing::warn!(
                 path = %path.display(),
-                "develop: existing XMP has no metadata date; preserving existing crs: settings"
+                "develop: existing XMP has no xmp:MetadataDate; preserving existing crs: settings"
             );
             WriteOutcome::ConflictPreserved
         }
         (None, None) => {
-            // Neither has a timestamp.
-            if existing.has_crs_fields() {
+            // Neither timestamp present — check for any crs: attribute (not just
+            // the 6 numeric ones) to avoid overwriting Lightroom settings like
+            // crs:WhiteBalance or crs:CameraProfile (Theme B fix).
+            if existing.has_any_crs_attribute() {
                 tracing::warn!(
                     path = %path.display(),
-                    "develop: existing XMP has crs: fields but no timestamps; preserving"
+                    "develop: existing XMP has crs: attributes but no timestamps; preserving"
                 );
                 WriteOutcome::ConflictPreserved
             } else {
-                // No crs: fields and no timestamps — safe to overwrite.
+                // No crs: attributes and no timestamps — safe to overwrite.
                 tracing::info!(path = %path.display(), "develop: creating XMP sidecar (no prior crs:)");
                 write_xmp(path, incoming)?;
                 WriteOutcome::Created

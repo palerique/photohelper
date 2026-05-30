@@ -375,6 +375,19 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-022 — XMP sidecar I/O uses hand-rolled `quick-xml` template instead of Adobe XMP Toolkit SDK
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 06, D3 — S1 stop-gap from plan v2)
+- **Stop-gap location**: `crates/photohelper-sidecar/src/writer.rs::render_xmp` — hand-rolled XML/RDF template emits XMP attributes as strings rather than using a proper XMP namespace-aware library. In-source: `// TD-022: quick-xml manual XMP template; see TECH-DEBT.md § TD-022.`
+- **Fundamental fix**: Replace `render_xmp` with a proper XMP library. Candidates: (a) `xmp-toolkit` crate (wraps Adobe XMP Toolkit SDK C++ — adds a C++ build dependency but guarantees namespace correctness and round-trip fidelity), or (b) `rdf-xml` / `sophia_xml` for pure-Rust RDF/XML generation, or (c) extend `quick-xml` usage with full namespace tracking. The reader (`reader.rs`) would also benefit from namespace-aware parsing rather than prefix-stripped key matching.
+- **Binding trigger**: First session adding XMP namespace fields that the current template does not model (e.g. `crs:GradientBasedCorrections`, `crs:ToneCurvePV2012`, `Lightroom:` namespace fields) — the hand-rolled template cannot handle these without significant code additions. OR before v1.0 if XMP round-trip fidelity (including fields written by other tools) becomes a product requirement.
+- **Scope estimate**: ~50–100 LoC for the writer (replace template with library calls) + reader refactor (~30 LoC) / medium risk (namespace handling is complex; integration tests cover the happy path).
+- **Consequence of inaction**: The hand-rolled template only emits the ~10 fields photohelper writes. Any XMP field written by Lightroom, Camera Raw, or other tools is silently dropped on the next photohelper develop write (unless ConflictPreserved). Users who rely on `crs:CameraProfile`, `crs:ToneCurvePV2012`, etc. will lose those settings on conflict-resolved overwrites.
+- **Related**: `docs/plans/session-06.md § Stop-gap S1`; `crates/photohelper-sidecar/src/writer.rs`.
+
+---
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).

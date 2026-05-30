@@ -831,7 +831,6 @@ impl Catalog {
         &self.canonical_path
     }
 
-    /// Total rows in `photos` (visible to driver for summary tally).
     /// Load all non-superseded photos with their NIMA aesthetic score (if culled).
     ///
     /// Used by the `develop` subcommand to build XMP sidecars for every
@@ -866,19 +865,30 @@ impl Catalog {
                 path: self.canonical_path.clone(),
                 source: Box::new(e),
             })?;
-        let result = rows
-            .flatten()
-            .filter_map(|(id_bytes, src, score)| {
-                let arr = <[u8; 32]>::try_from(id_bytes.as_slice()).ok()?;
+        // Explicit per-row error propagation (not .flatten() which silently drops
+        // rusqlite::Error from individual row reads).
+        let mut result = Vec::new();
+        for r in rows {
+            let (id_bytes, src, score) = r.map_err(|e| Error::CatalogOpen {
+                path: self.canonical_path.clone(),
+                source: Box::new(e),
+            })?;
+            if let Ok(arr) = <[u8; 32]>::try_from(id_bytes.as_slice()) {
                 let photo_id = photohelper_core::catalog_glue::photo_id_from_row_bytes(arr);
                 let source_path = std::path::PathBuf::from(src);
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "NIMA scores in [1.0,10.0]; f64->f32 precision loss negligible"
+                )]
                 let nima_score = score.map(|v| v as f32);
-                Some(DevelopRow::new(photo_id, source_path, nima_score))
-            })
-            .collect();
+                result.push(DevelopRow::new(photo_id, source_path, nima_score));
+            }
+        }
         Ok(result)
     }
 
+    ///
+    /// Total rows in `photos` (visible to driver for summary tally).
     ///
     /// # Errors
     /// - `Error::CatalogPoisoned`, `Error::CatalogOpen` for query failures.
@@ -1000,6 +1010,30 @@ mod tests {
     use super::*;
 
     static_assertions::assert_impl_all!(Arc<Catalog>: Send, Sync);
+
+    /// Create a minimal test photo at a specific source_path with a given id_seed.
+    /// Used to create two Photos with the SAME source_path but DIFFERENT PhotoIds
+    /// for supersession testing.
+    fn make_test_photo_at_path(
+        _dir: &std::path::Path,
+        id_seed: u8,
+        source_path: &std::path::Path,
+    ) -> Photo {
+        // Write different bytes to the file so content-change detection fires.
+        std::fs::write(source_path, vec![id_seed; 2048]).expect("write test fixture");
+        let abs = AbsPath::canonicalize(source_path).expect("canonicalize");
+        let pid = photo_id_from_row_bytes([id_seed; 32]);
+        Photo::from_filesystem(
+            abs,
+            2048,
+            1_577_836_801,
+            false,
+            pid,
+            None,
+            ExifMetadata::default(),
+        )
+        .expect("valid test photo")
+    }
 
     /// Create a minimal, unique test photo whose source_path is `dir/file.cr3`.
     /// `PhotoId` is synthesised from `id_seed` so callers can distinguish rows.
@@ -1809,15 +1843,25 @@ mod tests {
 
     #[test]
     fn all_photos_with_cull_scores_superseded_excluded() {
+        // To test supersession, we need a second Photo with a DIFFERENT PhotoId
+        // but the SAME source_path as p1. upsert() takes the existing_at_path branch
+        // (line ~450) when source_path matches but PhotoId differs, marking the
+        // first row superseded and inserting the second as the active row.
         let dir = tempfile::tempdir().unwrap();
         let cat = Catalog::open(dir.path().join("d.db"), 1).unwrap();
         let p1 = upsert_photo(&cat, dir.path(), 1);
-        // Supersede p1 by upserting again with a newer mtime.
-        cat.upsert(&p1, 1).unwrap();
+        // p2 uses the same source_path as p1 but different content (seed=2 → different PhotoId).
+        // This triggers supersession of p1.
+        let p2 = make_test_photo_at_path(dir.path(), 2, p1.source_path());
+        cat.upsert(&p2, 0).unwrap();
         let rows = cat.all_photos_with_cull_scores("nima-v1").unwrap();
-        // After superseding, the original row still exists but the new one is the active one.
-        // There should be exactly 1 non-superseded row.
+        // Only the non-superseded row (p2) should be returned.
         assert_eq!(rows.len(), 1, "superseded photo must be excluded");
+        assert_eq!(
+            rows[0].photo_id(),
+            p2.photo_id(),
+            "only the active row must be returned"
+        );
     }
 
     #[test]
