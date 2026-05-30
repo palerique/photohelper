@@ -41,7 +41,9 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
-        with: { components: rustfmt }
+        with:
+          toolchain: stable
+          components: rustfmt
       - run: cargo fmt --all -- --check
 
   lint:
@@ -54,7 +56,9 @@ jobs:
       - name: Install LibRaw build prerequisites
         run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config autoconf libtool ripgrep
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
-        with: { components: clippy }
+        with:
+          toolchain: stable
+          components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
       - run: cargo clippy --all-targets --all-features --workspace -- -D warnings
       - name: unsafe-isolation gate
@@ -70,6 +74,8 @@ jobs:
       - name: Install LibRaw build prerequisites
         run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config autoconf libtool libimage-exiftool-perl
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
       - run: cargo test --all-features --workspace --no-fail-fast
       - name: sanitize-check (CR3 fixtures)
@@ -81,6 +87,8 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
       - run: cargo install cargo-audit --locked
       - run: cargo audit --deny warnings
