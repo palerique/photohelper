@@ -401,6 +401,19 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-025 — MozJPEG uses wrapper FFI linking rather than a pure-Rust crate
+
+- **Status**: Open
+- **Opened**: 2026-05-30 (session 08)
+- **Stop-gap location**: `crates/photohelper-export/Cargo.toml` `mozjpeg = ...` @ session 08 implementation.
+- **Fundamental fix**: Replace the MozJPEG C-bindings / FFI wrapper dependency with a pure-Rust JPEG encoder (like `jpeg-encoder` or `zune-jpeg`) that meets our quality and visual optimization criteria, OR migrate to a statically linked, pre-compiled pure-Rust equivalent that does not require an active C-toolchain to compile.
+- **Binding trigger**: First session requiring static musl compilation without C-toolchain dependencies, OR when compile environments without C compiler tooling must be supported.
+- **Scope estimate**: ~150 LoC (migration of MozJPEG compressor setup to Rust native APIs) / medium risk (could affect encoding performance and file size compression ratio).
+- **Consequence of inaction**: Compiling `photohelper` requires an active C toolchain and dynamic/static linking against `libjpeg` / `mozjpeg` C libraries, complicating cross-compilation (especially target-musl or headless ARM targets).
+- **Related**: `docs/plans/session-08.md § Stop-gap S2`; `crates/photohelper-export/Cargo.toml`.
+
+---
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).
