@@ -87,7 +87,9 @@ for fixture in "$FIXTURE_DIR"/*.CR3; do
 
     # Stage 2: extract embedded preview JPEG and run the same allow-list.
     # Use mktemp to avoid parallel-CI clobber of a shared /tmp/preview.jpg.
-    preview_tmp=$(mktemp /tmp/ph-sanitize-XXXXXX.jpg)
+    # Note: macOS mktemp does not support suffixes after XXXXXX in full-path form;
+    # use -t flag (creates in $TMPDIR) or strip the .jpg suffix.
+    preview_tmp=$(mktemp "${TMPDIR:-/tmp}/ph-sanitize-XXXXXX")
     exiftool -b -PreviewImage "$fixture" > "$preview_tmp" 2>/dev/null || true
     if [ -s "$preview_tmp" ]; then
         preview_tags=$(exiftool -G -a "$preview_tmp" 2>/dev/null)
