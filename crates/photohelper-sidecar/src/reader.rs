@@ -61,51 +61,55 @@ pub(crate) fn parse_xmp_str(content: &str, path: &Path) -> Result<SidecarSetting
                         }
                     };
                     let key = attr.key;
-                    let key_str = std::str::from_utf8(key.as_ref()).unwrap_or("");
+                    let Ok(key_str) = std::str::from_utf8(key.as_ref()) else {
+                        continue; // Non-UTF-8 attribute key — skip (malformed XML).
+                    };
                     let val = attr
                         .decode_and_unescape_value(reader.decoder())
                         .map(|v| v.into_owned())
                         .unwrap_or_default();
 
-                    // Strip namespace prefix for matching.
-                    let local_key = key_str.rfind(':').map_or(key_str, |i| &key_str[i + 1..]);
-
-                    match local_key {
-                        "MetadataDate" => {
+                    // Match on the full qualified key (e.g. "xmp:MetadataDate")
+                    // to avoid namespace collisions with attributes from other
+                    // namespaces that happen to share a local name.
+                    match key_str {
+                        "xmp:MetadataDate" => {
                             metadata_date = parse_datetime(&val, "xmp:MetadataDate");
                         }
-                        "Temperature" => {
+                        "crs:Temperature" => {
                             fields.temperature = parse_i32(&val, "crs:Temperature");
                         }
-                        "Tint" => {
+                        "crs:Tint" => {
                             fields.tint = parse_i32(&val, "crs:Tint");
                         }
-                        "Exposure2012" => {
+                        "crs:Exposure2012" => {
                             fields.exposure = parse_f32(&val, "crs:Exposure2012");
                         }
-                        "Contrast2012" => {
+                        "crs:Contrast2012" => {
                             fields.contrast = parse_i32(&val, "crs:Contrast2012");
                         }
-                        "Highlights2012" => {
+                        "crs:Highlights2012" => {
                             fields.highlights = parse_i32(&val, "crs:Highlights2012");
                         }
-                        "Shadows2012" => {
+                        "crs:Shadows2012" => {
                             fields.shadows = parse_i32(&val, "crs:Shadows2012");
                         }
-                        "NimaScore" => {
+                        "ph:NimaScore" => {
                             fields.nima_score = parse_f32(&val, "ph:NimaScore");
                         }
-                        "DedupClusterId" => {
+                        "ph:DedupClusterId" => {
                             fields.dedup_cluster_id = parse_i64(&val, "ph:DedupClusterId");
                         }
-                        "PhotohelperId" => {
-                            fields.photohelper_id = Some(val.to_string());
+                        "ph:PhotohelperId" => {
+                            if !val.is_empty() {
+                                fields.photohelper_id = Some(val.to_string());
+                            }
                         }
-                        "LastProcessedAt" => {
+                        "ph:LastProcessedAt" => {
                             fields.last_processed_at = parse_datetime(&val, "ph:LastProcessedAt");
                         }
-                        // All other attributes (rdf:about, xmlns:*, ProcessVersion,
-                        // WhiteBalance, etc.) are silently ignored.
+                        // All other attributes (rdf:about, xmlns:*, crs:ProcessVersion,
+                        // crs:WhiteBalance, etc.) are silently ignored.
                         _ => {}
                     }
                 }

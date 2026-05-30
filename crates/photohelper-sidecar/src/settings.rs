@@ -286,6 +286,13 @@ impl SidecarSettingsBuilder {
                 }
             }
         }
+        if let Some(s) = self.nima_score {
+            if !s.is_finite() {
+                return Err(Error::Validation {
+                    message: format!("nima_score {s} is not finite (NaN or Inf not allowed)"),
+                });
+            }
+        }
         Ok(SidecarSettings {
             temperature: self.temperature,
             tint: self.tint,

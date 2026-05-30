@@ -258,7 +258,7 @@ mod tests {
     fn read_malformed_xml_returns_parse_error() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("bad.xmp");
-        std::fs::write(&p, b"<this is not valid XML at all><-mismatched-></this>").unwrap();
+        std::fs::write(&p, b"<this></that>").unwrap();
         let result = read_xmp(&p);
         assert!(result.is_err(), "malformed XML must return Err");
     }

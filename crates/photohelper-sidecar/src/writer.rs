@@ -65,7 +65,7 @@ pub(crate) fn render_xmp(settings: &SidecarSettings) -> String {
     // xmp:MetadataDate — always written if last_processed_at is set.
     if let Some(dt) = settings.last_processed_at() {
         let iso = dt.format(&Rfc3339).unwrap_or_default();
-        write!(attrs, "\n      xmp:MetadataDate=\"{iso}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      xmp:MetadataDate=\"{iso}\"");
     }
 
     // crs: fields (only if at least one is set).
@@ -74,37 +74,37 @@ pub(crate) fn render_xmp(settings: &SidecarSettings) -> String {
         attrs.push_str("\n      crs:ProcessVersion=\"11.0\"");
     }
     if let Some(t) = settings.temperature() {
-        write!(attrs, "\n      crs:Temperature=\"{t}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      crs:Temperature=\"{t}\"");
     }
     if let Some(t) = settings.tint() {
-        write!(attrs, "\n      crs:Tint=\"{t}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      crs:Tint=\"{t}\"");
     }
     if let Some(e) = settings.exposure() {
-        write!(attrs, "\n      crs:Exposure2012=\"{e:.2}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      crs:Exposure2012=\"{e:.2}\"");
     }
     if let Some(c) = settings.contrast() {
-        write!(attrs, "\n      crs:Contrast2012=\"{c}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      crs:Contrast2012=\"{c}\"");
     }
     if let Some(h) = settings.highlights() {
-        write!(attrs, "\n      crs:Highlights2012=\"{h}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      crs:Highlights2012=\"{h}\"");
     }
     if let Some(s) = settings.shadows() {
-        write!(attrs, "\n      crs:Shadows2012=\"{s}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      crs:Shadows2012=\"{s}\"");
     }
 
     // ph: fields.
     if let Some(score) = settings.nima_score() {
-        write!(attrs, "\n      ph:NimaScore=\"{score:.4}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      ph:NimaScore=\"{score:.4}\"");
     }
     if let Some(id) = settings.dedup_cluster_id() {
-        write!(attrs, "\n      ph:DedupClusterId=\"{id}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      ph:DedupClusterId=\"{id}\"");
     }
     if let Some(pid) = settings.photohelper_id() {
-        write!(attrs, "\n      ph:PhotohelperId=\"{pid}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      ph:PhotohelperId=\"{pid}\"");
     }
     if let Some(dt) = settings.last_processed_at() {
         let iso = dt.format(&Rfc3339).unwrap_or_default();
-        write!(attrs, "\n      ph:LastProcessedAt=\"{iso}\"").unwrap_or(());
+        let _ = write!(attrs, "\n      ph:LastProcessedAt=\"{iso}\"");
     }
 
     format!(
