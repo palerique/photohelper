@@ -15,6 +15,44 @@ use photohelper_core::model::ExifOrientation;
 use photohelper_raw::decode::{CfaPattern, read_raw, read_raw_rgb};
 use photohelper_raw::exif::read_cr3;
 
+// ── Error-path tests (no LFS fixtures required) ────────────────────────────
+// These verify that the public entry points return Err for invalid inputs
+// rather than panicking or silently succeeding.
+
+#[test]
+fn read_cr3_returns_error_for_nonexistent_file() {
+    let p = std::path::Path::new("/nonexistent/path/that/does/not/exist.cr3");
+    let result = read_cr3(p);
+    assert!(
+        result.is_err(),
+        "read_cr3 on a nonexistent path must return Err, got Ok"
+    );
+}
+
+#[test]
+fn read_cr3_returns_error_for_non_raw_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake = dir.path().join("not_a_cr3.cr3");
+    std::fs::write(&fake, b"This is not a CR3 file. Just text.").expect("write fake");
+    let result = read_cr3(&fake);
+    assert!(
+        result.is_err(),
+        "read_cr3 on a non-RAW file must return Err, got Ok"
+    );
+}
+
+#[test]
+fn read_raw_returns_error_for_non_raw_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake = dir.path().join("not_a_cr3.cr3");
+    std::fs::write(&fake, b"This is not a CR3 RAW file.").expect("write fake");
+    let result = read_raw(&fake);
+    assert!(
+        result.is_err(),
+        "read_raw on a non-RAW file must return Err, got Ok"
+    );
+}
+
 #[test]
 fn read_cr3_extracts_canon_r8_metadata_from_craw_fixture() {
     let p = fixture_is_real_cr3(&fixture_path("CRAW_FULL_FRAME.CR3"));

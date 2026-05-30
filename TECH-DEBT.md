@@ -362,6 +362,19 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-021 — `RawExifCause::UnsupportedFormat` variant is dead code
+
+- **Status**: Open
+- **Opened**: 2026-05-29 (session 06 D1, post-hoc session-02 review — R1-B)
+- **Stop-gap location**: `crates/photohelper-raw/src/lib.rs:166` — `UnsupportedFormat { libraw_make: String, libraw_model: String }` is declared but never constructed. The empty-make path (`make.is_empty()` at `ffi.rs`) returns `ExifFieldsMissing`, not `UnsupportedFormat`. No test covers this variant. In-source: no stop-gap label (the variant itself is the gap — it is the placeholder, not a deployed stop-gap).
+- **Fundamental fix**: Either (a) wire a producer: add a camera-make allowlist check in `parse_libraw_fields` (e.g., accept only `"Canon"` for v0.1; return `UnsupportedFormat` for unknown makes), add a unit test constructing the variant, OR (b) remove the variant entirely if camera filtering is deferred beyond DN-014. Option (b) is simpler and avoids dead-code accumulation; option (a) is the design intent.
+- **Binding trigger**: first session that implements DN-014 (non-Canon body support) — this variant's wire-up is the correct first step of that work. OR before the first GitHub Release tag is cut (whichever first).
+- **Scope estimate**: ~10 LoC (add allowlist check + return site + test) / low risk.
+- **Consequence of inaction**: `UnsupportedFormat` continues to be dead code, silently misrepresenting the codebase's actual camera-make filtering capability. A future contributor adding a Canon-only allowlist check might add a NEW variant rather than using the existing one.
+- **Related**: `docs/discovery-notes.md § DN-014` (non-Bayer format support placeholder); `docs/code-reviews/session-02-round1.md § Theme B`.
+
+---
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).

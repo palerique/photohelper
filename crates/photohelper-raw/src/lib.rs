@@ -125,8 +125,10 @@ pub enum Error {
     /// range. LibRaw returns the camera-reported bit depth; out-of-range
     /// suggests a corrupt CR3 EXIF or a body whose firmware reports
     /// something photohelper does not yet model.
-    #[error("RAW invalid bit depth: value={value} (expected 8..=16)")]
+    #[error("RAW invalid bit depth at {path}: value={value} (expected 8..=16)")]
     RawInvalidBitDepth {
+        /// The RAW file that produced the invalid bit-depth report.
+        path: std::path::PathBuf,
         /// LibRaw-reported bit-depth value that fell outside `8..=16`.
         value: u8,
     },
@@ -284,7 +286,10 @@ mod tests {
 
     #[test]
     fn raw_invalid_bit_depth_display_names_value() {
-        let err = Error::RawInvalidBitDepth { value: 7 };
+        let err = Error::RawInvalidBitDepth {
+            path: std::path::PathBuf::from("/test.cr3"),
+            value: 7,
+        };
         let rendered = err.to_string();
         assert!(
             rendered.contains("value=7"),
