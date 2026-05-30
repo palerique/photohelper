@@ -7,19 +7,24 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 6 (`td-cleanup-develop-pipeline` — 2026-05-30) — **SHIPPED** via PR #9. Delivering fully runnable `develop` subcommand + `photohelper-sidecar` crate. Session-end R1 (3C+7H+2M; 14 retained) → remediated → R2 CLEAN (0 findings; 9/9 closed).
+**Last session**: 7 (`lightroom-namespace-compatibility` — 2026-05-30) — **SHIPPED** via PR #10. Resolving DN-029 by mapping computed duplicate cluster IDs and NIMA aesthetic culling scores to standard Lightroom-supported fields (keywords, labels, ratings). Session-end R1 (0C+0H+2L; 2 retained) → remediated → R2 CLEAN (0 findings; 4/4 closed).
 
-**Current session**: 7 (`lightroom-namespace-compatibility` — 2026-05-30) — branch `session-07/lightroom-namespace-compatibility`. **IN FLIGHT** — plan v1 pending.
+**Current session**: 8 (`export-integration` — 2026-05-30) — branch `session-08/export-integration`. **IN FLIGHT** — plan v1 pending.
 
-**Goal**: Address DN-029 (Lightroom Classic custom namespace incompatibility) by mapping duplicate cluster IDs and NIMA aesthetic culling scores to standard Lightroom-supported fields (such as keywords/tags, color labels, ratings, or collection-ready XMP groups).
+**Goal**: Implement the `photohelper-export` crate for image resizing, watermarking, and MozJPEG encoding, and integrate it into the `export` CLI subcommand.
 
-**Action**: Implement the metadata mapping layer to enable seamless, plugin-free culling and duplicate visualization directly in Adobe Lightroom Classic.
+**Action**: Wire up the export subcommand, configure the pipeline, and verify with unit and integration tests.
 
-**Session-end review (session 06 — COMPLETE)**:
-- R1 → 3C+7H+2M (14 total; discard_rate=0.077) → remediated (conflict detection fix, has_any_crs_attr, TD-022, .flatten() fix, superseded test, 2 missing CLI tests, from_parsed validation, writer empty timestamp, clock warning, docs)
-- R2 → 0C+0H+1L (stale comment, fixed inline); all 9/9 watch-list items CLOSED; CLEAN
+**Session-end review (session 07 — COMPLETE)**:
+- R1 → 0C+0H+2L (2 total; XML comment splitting and non-finite warning diagnostics) → triaged & verified.
+- R2 → 0 findings; all watch-list items closed; CLEAN.
 
-**Final test count**: 223 (221 from D0-D5 baseline + 2 new from R1 remediation)
+**Final test count**: 226 (223 from session 06 baseline + 3 new from session 07 coverage)
+
+**Plan-review history (session 07 — COMPLETE)**:
+- R1 → 1 CRITICAL + 4 HIGH + 4 MEDIUM + 2 LOW (11 total) → plan v2 (A.1, A.2, A.3, B.1, B.2, C.1, C.2, C.3, D.1, D.2, E.1)
+- R2 → 4 HIGH + 3 MEDIUM + 5 LOW (12 total) → plan v3 (A.1, A.2, A.3, B.1, B.2, B.3, C.1, C.2, D.1, D.2, D.3, D.4)
+- R3 → 3 CRITICAL + 9 HIGH + 9 MEDIUM + 5 LOW (26 total) → plan v4 (A.1, A.2, A.3, A.4, B.1, B.2, B.3, C.1, C.2, C.3, C.4, C.5, D.1, D.2, D.3, D.4, D.5, E.1, E.2, E.3, E.4, E.5, E.6, E.7, E.8, E.9) → CLEAN
 
 **Plan-review history (session 06 — COMPLETE)**:
 - R1 → 3 CRITICAL + 9 HIGH + 6 MEDIUM → plan v2 (XMP path fix, atomic write, conflict table, MODEL_SLUG, DevelopRow photo_id, SidecarSettings private, WriteOutcome 4-variant, error handling, mktemp, lenient reader, test gaps, ordering)
@@ -83,11 +88,11 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 
 | Component             | Status                                  | Notes                                                                                                         |
 |-----------------------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------|
-| `photohelper-cli`     | **implemented (session 01+04+05+06)**   | clap v4 + 8 subcommands; `ingest`+`cull`+`dedup`+`develop` real; stubs exit 69. heartbeat.rs shared. |
+| `photohelper-cli`     | **implemented (session 01+04+05+06+07)**| clap v4 + 8 subcommands; `ingest`+`cull`+`dedup`+`develop` real; stubs exit 69. heartbeat.rs shared. |
 | `photohelper-core`    | **implemented (session 01+04)**         | model + RgbImage; error (13 variants); catalog_glue. |
 | `photohelper-raw`     | **implemented (session 02+04)**         | LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw_rgb. 4 integration tests + 3 CLIP D1c tests. |
 | `photohelper-ai`      | **implemented (session 04+05)**         | NIMA + CLIP ViT-B/32 int8 (MIT, 85.3 MB). ImageEmbedding, MobileClip, EmbeddingZeroVector+EmbeddingCorruptBytes errors. CLIP_MODEL_SLUG+CLIP_MODEL_MANIFEST_NAME. |
-| `photohelper-sidecar` | **implemented (session 06)**            | XMP sidecar I/O (crs:+ph: namespaces), atomic write, conflict resolution (DN-004). 21 unit tests.            |
+| `photohelper-sidecar` | **implemented (session 06+07)**         | XMP sidecar I/O (crs:+ph: namespaces), atomic write, conflict resolution (DN-004), Lightroom namespace compatibility (DN-029). 35+ unit tests. |
 | `photohelper-export`  | scaffolded                              | resize + watermark + mozjpeg encode land when `export` is wired (~session 05).                                |
 | `photohelper-cameras` | **implemented (session 01)**            | CameraProfile trait + CanonR8 stub + CameraRegistry::for_exif with normalization.                             |
 | `photohelper-catalog` | **implemented (sessions 01+04+05)**     | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores + FK + SCHEMA_VERSION=2), CullRow, InsertScoreOutcome, unsuperseded_unscored_rows, insert_cull_score. Decision docs 0001+0002. Session 05 D2a+D2b: schema v3 (embeddings + dup_clusters + apply_v2_to_v3 + SCHEMA_VERSION=3), EmbeddingRow, InsertEmbeddingOutcome, unembedded_rows, insert_embedding (dim*4==bytes guard), all_embeddings_for_model (superseded excluded), insert_dup_cluster. Decision doc 0003. |

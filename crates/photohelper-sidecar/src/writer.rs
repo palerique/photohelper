@@ -11,13 +11,14 @@ use crate::settings::SidecarSettings;
 
 /// Write `settings` as an XMP sidecar at `path`.
 ///
-/// **Atomic write**: writes to `<path>.phdev.tmp` first, then renames to
+/// **Atomic write**: writes to `<path>.phdev.{pid}.{thread_id_str}.tmp` first, then renames to
 /// `path`. On POSIX systems the rename is atomic; on Windows it is
 /// best-effort. If any step fails the temp file is removed and the original
 /// (if any) is preserved.
 ///
-/// All namespace declarations are always emitted on `rdf:Description`
-/// regardless of which fields are set, to keep the XML well-formed.
+/// Core namespaces (such as `crs:` and `xmp:`) are always emitted on `rdf:Description`,
+/// while conditional namespaces (such as `dc:` and `lr:`) are declared only when their
+/// respective collections are non-empty.
 ///
 /// # Errors
 ///
@@ -26,22 +27,27 @@ use crate::settings::SidecarSettings;
 pub fn write_xmp(path: &Path, settings: &SidecarSettings) -> Result<(), Error> {
     let xml = render_xmp(settings);
 
-    let tmp_path = path.with_extension("phdev.tmp");
+    let pid = std::process::id();
+    let thread_id = std::thread::current().id();
+    let thread_id_str = format!("{thread_id:?}")
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>();
+    let tmp_path = path.with_extension(format!("phdev.{pid}.{thread_id_str}.tmp"));
 
     // Write to temp file.
     let mut f = std::fs::File::create(&tmp_path).map_err(|e| Error::Io {
         path: path.to_path_buf(),
         source: e,
     })?;
-    f.write_all(xml.as_bytes()).map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    // fsync to ensure durability before rename.
-    f.sync_all().map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+    if let Err(e) = f.write_all(xml.as_bytes()).and_then(|()| f.sync_all()) {
+        drop(f);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(Error::Io {
+            path: path.to_path_buf(),
+            source: e,
+        });
+    }
     drop(f);
 
     // Atomic rename.
@@ -62,7 +68,7 @@ pub fn write_xmp(path: &Path, settings: &SidecarSettings) -> Result<(), Error> {
 ///
 /// # Stop-gap
 ///
-/// TD-022: hand-rolled `quick-xml` template emits only the ~10 fields photohelper
+/// TD-022: hand-rolled `quick-xml` template emits only the 16 fields photohelper
 /// writes. Fields written by Lightroom or other tools (e.g. `crs:CameraProfile`,
 /// `crs:ToneCurvePV2012`) are not modeled and will be silently absent on any
 /// photohelper overwrite. See TECH-DEBT.md § TD-022.
@@ -125,6 +131,49 @@ pub(crate) fn render_xmp(settings: &SidecarSettings) -> String {
         // duplicate the warning here.
     }
 
+    // Standard rating and label
+    if let Some(r) = settings.rating() {
+        if r != crate::settings::Rating::Unrated {
+            let _ = write!(attrs, "\n      xmp:Rating=\"{}\"", r.as_i32());
+        }
+    }
+    if let Some(l) = settings.label() {
+        let sanitized = sanitize_xml_string(l);
+        let escaped = quick_xml::escape::escape(&sanitized);
+        let _ = write!(attrs, "\n      xmp:Label=\"{escaped}\"");
+    }
+
+    let mut ns_decls = String::new();
+    let mut children = String::new();
+
+    if let Some(kws) = settings.keywords().filter(|k| !k.is_empty()) {
+        ns_decls.push_str("\n      xmlns:dc=\"http://purl.org/dc/elements/1.1/\"");
+        children.push_str("      <dc:subject>\n        <rdf:Bag>\n");
+        for kw in kws {
+            let sanitized = sanitize_xml_string(kw);
+            let escaped = quick_xml::escape::escape(&sanitized);
+            let _ = writeln!(children, "          <rdf:li>{escaped}</rdf:li>");
+        }
+        children.push_str("        </rdf:Bag>\n      </dc:subject>\n");
+    }
+
+    if let Some(kws) = settings.hierarchical_keywords().filter(|k| !k.is_empty()) {
+        ns_decls.push_str("\n      xmlns:lr=\"http://ns.adobe.com/lightroom/1.0/\"");
+        children.push_str("      <lr:hierarchicalSubject>\n        <rdf:Bag>\n");
+        for kw in kws {
+            let sanitized = sanitize_xml_string(kw);
+            let escaped = quick_xml::escape::escape(&sanitized);
+            let _ = writeln!(children, "          <rdf:li>{escaped}</rdf:li>");
+        }
+        children.push_str("        </rdf:Bag>\n      </lr:hierarchicalSubject>\n");
+    }
+
+    let end_tag = if children.is_empty() {
+        "\n    />".to_string()
+    } else {
+        format!(">\n{children}    </rdf:Description>")
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="photohelper">
@@ -132,10 +181,25 @@ pub(crate) fn render_xmp(settings: &SidecarSettings) -> String {
     <rdf:Description rdf:about=""
       xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
       xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-      xmlns:ph="http://ns.photohelper.dev/1.0/"{attrs}
-    />
+      xmlns:ph="http://ns.photohelper.dev/1.0/"{ns_decls}{attrs}{end_tag}
   </rdf:RDF>
 </x:xmpmeta>
 "#
     )
+}
+
+fn sanitize_xml_string(s: &str) -> String {
+    s.chars()
+        .filter(|&c| {
+            let val = c as u32;
+            let is_valid_xml_char = (0x20..=0xD7FF).contains(&val)
+                || val == 0x09
+                || val == 0x0A
+                || val == 0x0D
+                || (0xE000..=0xFFFD).contains(&val)
+                || (0x10000..=0x10_FFFF).contains(&val);
+            let is_noncharacter = (0xFDD0..=0xFDEF).contains(&val) || (val & 0xFFFE) == 0xFFFE;
+            is_valid_xml_char && !is_noncharacter
+        })
+        .collect()
 }

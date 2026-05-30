@@ -250,9 +250,54 @@
   3. **Map NIMA → `Iptc4xmpCore:Keywords`**: Similar to option 2; appears in IPTC metadata panel.
   4. **Hybrid**: Write NIMA → `xmp:Rating` (for quick sorting) AND NIMA range → `lr:hierarchicalSubject` (for precise filtering). Best for users who want both.
   5. **Publish plugin**: A Lightroom Classic SDK plugin that reads `ph:NimaScore` and maps it to Lightroom library fields at import time. Most powerful but requires separate LrC plugin distribution.
-
 - **Recommended approach for v0.1**: Option 4 (hybrid). Add `--lr-rating` flag to `photohelper develop` that writes `xmp:Rating` from NIMA score. Write NIMA range as `lr:hierarchicalSubject` keyword. Both are readable by Lightroom without any plugin.
 
 - **Owner**: session 07+ that revisits the develop subcommand output schema. The `photohelper-sidecar` crate already supports writing `crs:` fields; adding `lr:` and `Iptc4xmpCore:` namespace support requires extending the writer.
 
 - **Status**: open (informational; the `ph:` namespace data is stored correctly but not surfaced by Lightroom).
+
+---
+
+### DN-030 — Lightroom Classic rating omission and explicit empty label clearing mechanics (2026-05-30, session 07)
+
+- **Observed**: During testing with Adobe Lightroom Classic, we observed that:
+  1. Setting `xmp:Rating="0"` is treated as a non-standard value and can result in raw metadata clutter. Lightroom Classic natively represents an "unrated" state by omitting the `xmp:Rating` attribute entirely on write.
+  2. Omitting the `xmp:Label` attribute entirely does not clear a pre-existing color label in the Lightroom Catalog. Instead, Lightroom Classic requires an explicit empty string attribute `xmp:Label=""` to successfully clear and sync its catalog-level color label value.
+- **Why it matters**: Incorrect serialization behavior results in either non-standard XML schema violations or a failure to clear stale color labels in Lightroom Classic.
+- **Owner**: session 07 (this session, resolved in the upgraded writer logic).
+- **Status**: reconciled (2026-05-30, implemented `Rating::Unrated` omission and explicit `xmp:Label=""` serialization in `crates/photohelper-sidecar/src/writer.rs`).
+
+### DN-031 — Decimal formatting and numeric parsing compatibility under quick-xml (2026-05-30, session 07)
+
+- **Observed**: Industry culling and metadata tools (such as Aftershoot) and Adobe Lightroom Classic frequently write integer-typed metadata attributes like ratings or camera temperature settings using decimal formats (e.g., `xmp:Rating="3.0"` or `crs:Temperature="5500.0"`). Standard Rust integer parsing methods (e.g., `val.parse::<i32>()`) fail immediately on any float string representations, silently discarding valid values.
+- **Why it matters**: Direct integer parsing causes silent read misses and drops valid user ratings or camera settings written by other industry-standard software.
+- **Owner**: session 07 (this session, resolved in the reader helper functions).
+- **Status**: reconciled (2026-05-30, modified numeric helpers in `crates/photohelper-sidecar/src/reader.rs` to parse strings as `f64` first, check bounds, round, and then cast to integer types).
+
+### DN-032 — Rayon concurrent write file collisions on temporary sidecars (2026-05-30, session 07)
+
+- **Observed**: Running `photohelper develop` with Rayon parallel loops (`par_iter().for_each(...)`) across thousands of photos writes temporary XML sidecar content to a static `<path>.phdev.tmp` before performing an atomic rename. When multiple virtual copies, duplicate files, or files sharing the same directory are processed concurrently, separate threads collision-write to the exact same temporary file.
+- **Why it matters**: Concurrent collisions cause write content truncation, race conditions, permission errors, or file corruption.
+- **Owner**: session 07 (this session, resolved in the develop execution layer).
+- **Status**: reconciled (2026-05-30, updated `crates/photohelper-sidecar/src/writer.rs` to append a thread-unique identifier `.phdev.<thread_id>.tmp` to temporary paths).
+
+### DN-033 — Precise keyword strip patterns for user data safety (2026-05-30, session 07)
+
+- **Observed**: To prevent keyword accumulation across subsequent `photohelper develop` runs, the initial merging design specified stripping any flat or hierarchical keywords case-insensitively starting with `"cluster:"` or `"nima:"`. However, doing so silently destroys custom user-defined keywords (e.g., `"cluster:london"` or `"nima:favorites"`).
+- **Why it matters**: Broad prefix-based stripping causes irreversible user data loss.
+- **Owner**: session 07 (this session, resolved in keyword merging logic).
+- **Status**: reconciled (2026-05-30, upgraded merging filters in `crates/photohelper-sidecar/src/settings.rs` to precisely match exact `"photohelper"`, starting with `"photohelper:"` / `"photohelper|"`, and strictly target `"cluster:<integer>"` and `"nima:<tier>"` where `<tier>` is one of our 5 valid aesthetic adjectives).
+
+### DN-034 — Negative database sentinels triggering builder validation errors (2026-05-30, session 07)
+
+- **Observed**: Database sentinels like `-1` are commonly used to represent unclustered photos in the catalog. Because `SidecarSettingsBuilder::build` enforces non-negative constraints (`dedup_cluster_id >= 0`), any negative values extracted from the SQLite database result in builder validation failures, skipping sidecar generation entirely.
+- **Why it matters**: Photos without duplicates are skipped and cannot have their NIMA rating or labels updated.
+- **Owner**: session 07 (this session, resolved in row mapping layer).
+- **Status**: reconciled (2026-05-30, updated `DevelopRow`'s getter in `crates/photohelper-catalog/src/row.rs` to map negative cluster ID values gracefully to `None` before reaching the builder).
+
+### DN-035 — Tag nesting stack depth safety in flat XML parser (2026-05-30, session 07)
+
+- **Observed**: Parsing malformed or maliciously crafted XMP documents with a flat loop state machine using a tag stack (`Vec<String>` path tracker) can lead to unbounded vector growth if the file contains millions of nested opening tags with no matching closing tags.
+- **Why it matters**: Unbounded tag stack growth leads to memory exhaustion (OOM) and panics under parallel environments.
+- **Owner**: session 07 (this session, resolved in reader loop).
+- **Status**: reconciled (2026-05-30, enforced a strict maximum depth limit of **64** on the qualified path stack inside `crates/photohelper-sidecar/src/reader.rs` and returns a parser error if exceeded).

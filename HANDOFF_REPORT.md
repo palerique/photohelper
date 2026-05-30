@@ -1167,3 +1167,38 @@ git switch -c session-07/lightroom-namespace-compatibility
 just session-start
 cat SESSION-STATE.md
 ```
+
+---
+
+## Checkpoint 17 — session 07 SHIPPED (2026-05-30; Lightroom compatibility + custom namespace resolution)
+
+**Status**: SHIPPED. PR #10 opened; CI pending merge.
+**Author**: Antigravity session 07, session-end window
+
+### What landed since Checkpoint 16 (D1-D5 + session-end review)
+
+**Lightroom Classic Custom Namespace Compatibility (DN-029)**:
+- Designed and implemented complete Lightroom Classic-supported field mappings for NIMA aesthetic culling scores and duplicate cluster IDs inside `photohelper-sidecar`.
+- Star ratings (`xmp:Rating`) represent rating states, where unrated (score 0) is natively omitted to prevent attribute clutter and rejected is represented as `-1`.
+- Color labels (`xmp:Label`) map to standard `"Red"` and `"Green"` values with explicit empty string `""` support to clear pre-existing labels on deep merge.
+- Flat keywords (`dc:subject`) and hierarchical keywords (`lr:hierarchicalSubject`) are safely merged and written under a single root `"photohelper"` tag list, avoiding keyword catalog pollution.
+- Upgraded the XMP sidecar parser with prefix-agnostic namespace parsing, lenient decimal-formatted numeric string conversion, non-finite score handling via out-of-range SQL numerical literal `9e999` evaluation, and safe Temperature (`[2000, 50000]`) and Tint (`[-150, 150]`) slider clamping.
+- Resolved write race hazards during Rayon parallel execution by deduping target paths and using thread-unique temporary files.
+- Added three comprehensive sidecar parsing and validation unit tests.
+- Closed TD-023 (pinning `time` crate dependency strictly to `=0.3.47` in `Cargo.toml`).
+
+**Final test count**: 226 tests.
+`just ci` GREEN: fmt, lint, tests, audit, unsafe-isolation, sanitize-check, model SHA-256.
+
+### What is not yet in place
+
+- TD-012 AHD demosaic, TD-017 O(n²) clustering, TD-018 f32 BLOB quantization, export/watermark subcommands, release engineering.
+
+### How to resume (session 08)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-08/export-integration
+just session-start
+cat SESSION-STATE.md
+```

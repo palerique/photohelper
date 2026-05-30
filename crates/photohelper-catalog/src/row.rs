@@ -146,8 +146,8 @@ impl EmbeddingRow {
     }
 }
 
-/// A 3-field projection for the develop pipeline: photo identity, path, and
-/// optional NIMA aesthetic score from the latest cull run.
+/// A 4-field projection for the develop pipeline: photo identity, path,
+/// optional NIMA aesthetic score, and optional duplicate cluster ID.
 ///
 /// Produced by [`super::Catalog::all_photos_with_cull_scores`].
 #[derive(Clone, Debug)]
@@ -158,15 +158,23 @@ pub struct DevelopRow {
     source_path: PathBuf,
     /// NIMA aesthetic score from the most recent cull run, if available.
     nima_score: Option<f32>,
+    /// Duplicate cluster ID from the most recent dedup run, if available.
+    dedup_cluster_id: Option<i64>,
 }
 
 impl DevelopRow {
     /// Construct from DB-retrieved values.
-    pub(crate) fn new(photo_id: PhotoId, source_path: PathBuf, nima_score: Option<f32>) -> Self {
+    pub(crate) fn new(
+        photo_id: PhotoId,
+        source_path: PathBuf,
+        nima_score: Option<f32>,
+        dedup_cluster_id: Option<i64>,
+    ) -> Self {
         Self {
             photo_id,
             source_path,
             nima_score,
+            dedup_cluster_id,
         }
     }
 
@@ -183,6 +191,11 @@ impl DevelopRow {
     /// NIMA aesthetic score, if the photo has been culled.
     pub fn nima_score(&self) -> Option<f32> {
         self.nima_score
+    }
+
+    /// Duplicate cluster ID, if the photo has been clustered.
+    pub fn dedup_cluster_id(&self) -> Option<i64> {
+        self.dedup_cluster_id
     }
 }
 

@@ -388,7 +388,21 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-023 — Pin `time` crate dependency strictly to `=0.3.47` in `Cargo.toml` to guarantee compiling stability under workspace Rust `1.88` MSRV
+
+- **Status**: CLOSED (2026-05-30, session 07). Pinned `time` strictly to `=0.3.47` in workspace `Cargo.toml` to ensure building stability under workspace Rust `1.88` MSRV.
+- **Opened**: 2026-05-30 (session 07)
+- **Stop-gap location**: `Cargo.toml`
+- **Fundamental fix**: Pin the `time` dependency in `Cargo.toml` to `=0.3.47` to prevent automated `cargo update` steps from fetching newer patches of the `time` library that require an MSRV newer than `1.88`. This isolates the photohelper build from breaking upstream MSRV bumps until our own MSRV is bumped.
+- **Binding trigger**: Next `cargo update` or automated dependency check that causes a build failure under MSRV 1.88.
+- **Scope estimate**: ~1 LoC / low risk
+- **Consequence of inaction**: Unpinned upstream dependencies can release patch versions that bump their MSRV, causing `cargo build` to fail for users or CI pipelines compiling with Rust 1.88, violating the workspace MSRV guarantee.
+- **Related**: `docs/plans/session-07.md § TD-023`
+
+---
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).
 - **TD-008** (decode constructor dead_code) — closed 2026-05-28 in session 2 (see entry above for the remediation).
+- **TD-023** (pin time crate) — closed 2026-05-30 in session 07 (see entry above for the remediation).

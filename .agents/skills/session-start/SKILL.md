@@ -21,4 +21,6 @@ You are starting a work session under the eng-protocol using the Antigravity CLI
 6. Declare the session goal by writing the top block of `docs/plans/session-NN.md` (the session contract): goal; what will exist by end-of-session; what's out of scope (deferrals → `TECH-DEBT.md`); how each deliverable is tested; which checkpoints fire.
 7. Hand off to plan review: tell the user the plan is ready for the `plan-review` skill.
 
+**CRITICAL SAFEGUARD**: Never write, edit, or modify any production, library, application, or test code during or after session-start. The agent must strictly wait until `plan-review` is completely finished, remediated, approved, and the user explicitly grants permission to start the implementation.
+
 Keep the branch name and the plan's stated scope consistent with `SESSION-STATE.md`. Commit the plan's top block before plan-review.

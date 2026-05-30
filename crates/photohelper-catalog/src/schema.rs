@@ -30,6 +30,7 @@ pub const INIT_SQL: &str = r"
     );
     CREATE INDEX IF NOT EXISTS idx_photos_source_path ON photos(source_path);
     CREATE INDEX IF NOT EXISTS idx_photos_camera_slug ON photos(camera_slug);
+    CREATE INDEX IF NOT EXISTS idx_photos_active_ingested ON photos(ingested_at_unix_seconds) WHERE superseded_at_unix_seconds IS NULL;
     PRAGMA user_version = 1;
 ";
 
@@ -86,6 +87,8 @@ pub const MIGRATE_V2_TO_V3_SQL: &str = r"
         PRIMARY KEY (photo_id, model_slug),
         FOREIGN KEY (photo_id, model_slug) REFERENCES embeddings(photo_id, model_slug)
     );
+
+    CREATE INDEX IF NOT EXISTS idx_photos_active_ingested ON photos(ingested_at_unix_seconds) WHERE superseded_at_unix_seconds IS NULL;
 
     PRAGMA user_version = 3;
 ";
