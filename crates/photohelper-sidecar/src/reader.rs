@@ -37,7 +37,8 @@ pub(crate) fn parse_xmp_str(content: &str, path: &Path) -> Result<SidecarSetting
     reader.config_mut().trim_text(true);
 
     let mut fields = ParsedFields::default();
-    // xmp:MetadataDate is used as fallback if ph:LastProcessedAt is absent.
+    // xmp:MetadataDate is stored separately for conflict detection; NOT a fallback
+    // for ph:LastProcessedAt. See end of function for the storage rationale.
     let mut metadata_date: Option<OffsetDateTime> = None;
 
     loop {
