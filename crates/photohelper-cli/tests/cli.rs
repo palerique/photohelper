@@ -324,7 +324,7 @@ fn ingest_lock_timeout_above_max_exits_2_clap_default() {
 fn stub_subcommands_exit_69_with_not_yet_implemented_message() {
     // "cull" removed after session 04 wired the real handler.
     // "develop" removed after session 06 D4 wired the real handler.
-    for name in ["export", "run", "models", "camera"] {
+    for name in ["run", "models", "camera"] {
         Command::cargo_bin("photohelper")
             .unwrap()
             .arg(name)
@@ -1722,4 +1722,196 @@ fn test_nima_score_mapping_boundaries() {
             "Hierarchical keyword incorrect for score {score}"
         );
     }
+}
+
+// =====================================================================
+// Export subcommand integration tests (Session 08).
+// =====================================================================
+
+#[test]
+fn export_empty_catalog_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let out_dir = tmp.path().join("export_out");
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "export",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0)
+        .stderr(predicates::str::contains(
+            "walked: 0, written: 0, skipped-existing: 0, skipped-rating: 0, file-missing: 0, errored: 0"
+        ));
+}
+
+#[test]
+fn export_runs_successfully_for_ingested_photos() {
+    let fixture_dir = cr3_fixture_dir();
+    if !fixture_dir.join("CRAW_FULL_FRAME.CR3").exists() {
+        return; // LFS fixtures not pulled; skip.
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let out_dir = tmp.path().join("export_out");
+
+    // Copy a real CR3 to a path inside tmp so we can ingest and export it
+    let test_cr3_src = fixture_dir.join("CRAW_FULL_FRAME.CR3");
+    let test_cr3_dest = tmp.path().join("CRAW_FULL_FRAME.CR3");
+    std::fs::copy(&test_cr3_src, &test_cr3_dest).unwrap();
+
+    // Ingest the photo
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "ingest",
+            tmp.path().to_str().unwrap(),
+        ])
+        .assert()
+        .code(0)
+        .stderr(contains("ingested: 1"));
+
+    // Run export with --min-rating 0 (which includes unrated photos), no resize, no watermark
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "export",
+            "--output",
+            out_dir.to_str().unwrap(),
+            "--min-rating",
+            "0",
+        ])
+        .assert()
+        .code(0)
+        .stderr(predicates::str::contains("written: 1"));
+
+    // Verify output file exists
+    let expected_jpg = out_dir.join("CRAW_FULL_FRAME.jpg");
+    assert!(expected_jpg.exists(), "Output JPEG must exist");
+    assert!(
+        std::fs::metadata(&expected_jpg).unwrap().len() > 0,
+        "Output JPEG must not be empty"
+    );
+}
+
+#[test]
+fn export_applies_resize_and_watermark() {
+    let fixture_dir = cr3_fixture_dir();
+    if !fixture_dir.join("CRAW_FULL_FRAME.CR3").exists() {
+        return; // LFS fixtures not pulled; skip.
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let out_dir = tmp.path().join("export_out");
+
+    let test_cr3_src = fixture_dir.join("CRAW_FULL_FRAME.CR3");
+    let test_cr3_dest = tmp.path().join("CRAW_FULL_FRAME.CR3");
+    std::fs::copy(&test_cr3_src, &test_cr3_dest).unwrap();
+
+    // Ingest
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "ingest",
+            tmp.path().to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
+
+    // Export with --min-rating 0, long-edge resize, watermark
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "export",
+            "--output",
+            out_dir.to_str().unwrap(),
+            "--min-rating",
+            "0",
+            "--long-edge",
+            "800",
+            "--watermark",
+            "Antigravity",
+            "--watermark-position",
+            "bottom-left",
+        ])
+        .assert()
+        .code(0)
+        .stderr(predicates::str::contains("written: 1"));
+
+    let expected_jpg = out_dir.join("CRAW_FULL_FRAME.jpg");
+    assert!(expected_jpg.exists(), "Output JPEG must exist");
+    assert!(
+        std::fs::metadata(&expected_jpg).unwrap().len() > 0,
+        "Output JPEG must not be empty"
+    );
+}
+
+#[test]
+fn export_strict_cancellation_on_missing_file() {
+    let fixture_dir = cr3_fixture_dir();
+    if !fixture_dir.join("CRAW_FULL_FRAME.CR3").exists() {
+        return; // LFS fixtures not pulled; skip.
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let out_dir = tmp.path().join("export_out");
+
+    let test_cr3_src = fixture_dir.join("CRAW_FULL_FRAME.CR3");
+    let test_cr3_dest = tmp.path().join("CRAW_FULL_FRAME.CR3");
+    std::fs::copy(&test_cr3_src, &test_cr3_dest).unwrap();
+
+    // Ingest
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "ingest",
+            tmp.path().to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
+
+    // Delete the file on disk to simulate missing file
+    std::fs::remove_file(&test_cr3_dest).unwrap();
+
+    // Export with strict, should fail
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "export",
+            "--output",
+            out_dir.to_str().unwrap(),
+            "--min-rating",
+            "0",
+            "--strict",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("file-missing: 1"));
 }

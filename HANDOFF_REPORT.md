@@ -1202,3 +1202,47 @@ git switch -c session-08/export-integration
 just session-start
 cat SESSION-STATE.md
 ```
+
+---
+
+## Checkpoint 18 — session 08 SHIPPED (2026-05-30; export integration completed and verified)
+
+**Status**: SHIPPED. PR #11 merged to main.
+**Author**: Antigravity session 08, session-end window
+
+### What landed since Checkpoint 17
+
+**Export Integration and Crate Implementation**:
+- Fully implemented the `photohelper-export` crate for aspect-ratio-aware high-fidelity image resizing (using `tiny-skia` with safe demultiplication), robust watermarking (using `cosmic-text` with custom embedded RobotoMono font loading bypassing system directory scans), and safe high-performance MozJPEG encoding.
+- Resolved the cosmic-text default font panic by replacing the corrupt placeholder HTML font with a valid, optimized, Google-Fonts-sourced TrueType RobotoMono binary file.
+- Wired up the `export` CLI subcommand to run in parallel using Rayon, complete with a clean unique-suffix filename collision prevention map calculated upfront on the main thread.
+- Standardized all CLI options, clippy warnings, and integer cast safety workspace-wide.
+- All 236 tests, formatting checks, clippy, and security audit checks are 100% green.
+
+### What is not yet in place
+
+- BUG-001 (Lightroom Classic Metadata Sync Gaps), TD-012 AHD demosaic, TD-017 O(n²) clustering, TD-018 f32 BLOB quantization.
+
+### How to resume (session 09)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-09/lightroom-sync-fixes
+just session-start
+cat SESSION-STATE.md
+```
+
+---
+
+## Checkpoint 19 — session 09 PLANNED (2026-05-30; Lightroom metadata syncing improvements)
+
+**Status**: PLANNED.
+**Author**: Antigravity session 09, planning window
+
+### What is planned
+
+**BUG-001 Mitigation & Lightroom Syncing**:
+- Add smart terminal warnings in `photohelper develop` if executed without active Lightroom metadata flags (ratings, labels, keywords) or auto-enable them.
+- Provide granular console logging warnings for every photo skipped because of Lightroom conflict preservation (`conflict-preserved`).
+- Write a comprehensive troubleshooting and sync guide under `docs/user-guide/lightroom-sync.md`.
+- Prevent localized color label mismatches by allowing standard translated color string configuration.

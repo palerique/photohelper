@@ -151,35 +151,39 @@ code "works."
    git switch -c session-NN/<kebab-slug>
    ```
    Working directly on `main` is never allowed.
-2. `just session-start` — runs `scripts/verify-state.sh`; prints the
-   required-reading list.
-3. Read, in order: `SESSION-STATE.md`, the latest
-   `docs/code-reviews/session-*-round2.md` (unresolved Round-2 items),
-   `HANDOFF_REPORT.md`, `docs/discovery-notes.md`.
-4. Resolve any blocking item before declaring a goal. Do **not** plan on top of
-   unresolved Round-2 regressions.
-5. Declare the session goal by writing the top block of
-   `docs/plans/session-NN.md` (the session contract).
-6. Submit the plan to the **plan-review** checkpoint.
+2. `just session-start` — runs `scripts/verify-state.sh`; prints the required-reading list.
+3. Read, in order: `SESSION-STATE.md`, the latest `docs/code-reviews/session-*-round2.md` (unresolved Round-2 items), `HANDOFF_REPORT.md`, and `docs/discovery-notes.md`. Resolve any blocking item. Do **not** plan on top of unresolved Round-2 regressions.
+4. **Codebase Exploration & Discovery (Code-Explorer Emulation)**:
+   - Methodically audit directories, public APIs, type invariants, Rust safe/unsafe boundaries, control/data flow, error-handling/silent-failure baselines, and existing test coverage before authoring the plan.
+5. **Architectural Blueprinting (Code-Architect Emulation)**:
+   - Formulate a clean architectural blueprint covering new types, compile-time safety checks, error-handling propagation, and cognitive simplification targets before drafting the plan.
+6. **Clarifying Questions Milestone**:
+   - Formulate and present deep, structured questions to the user across three key categories (Architectural Trade-offs, Requirements & Edge Cases, Integration & Regression Risks). Pause for user alignment.
+7. **Declare the Session Goal**: Write the top block of `docs/plans/session-NN.md` (the session contract) incorporating discoveries and assumptions.
+8. Submit the plan to the **plan-review** checkpoint.
 
 ---
 
 ## Plan-review protocol (mandatory before any code)
 
-Run the suite against the plan document. The plan must answer:
-
+Run the parallel 8-agent suite against the plan document. The plan must answer:
 - **What will exist by end-of-session?** (concrete files, types, behaviors)
 - **What is explicitly out of scope?** (deferrals go to `TECH-DEBT.md`)
 - **How is each deliverable tested?** (unit + integration boundaries named)
 - **Which checkpoints fire this session, and when?**
 - **What discovery items are expected?** (unknowns flagged up-front)
 
-Consolidate findings by theme; remediate in batched edits; re-run Round 2 on
-the remediated plan. Only after Round 2 + remediation begin writing code.
+### Deep Remediation Blueprint (Between Review & Fixes)
+Before making any batched edits to address findings (both for plan reviews and session-end/code reviews), the agent MUST draft a structured **Deep Remediation Blueprint** and present it to the user:
+- **Root-Cause Analysis (RCA)**: Categorize and analyze findings by Failure Mode (e.g., *Type Invariant Bypass*, *Silent Failure Path*) and trace why the initial design or code allowed this gap.
+- **Multi-Option Evaluation**: For CRITICAL/HIGH findings, contrast at least two alternative architectural approaches and justify the choice.
+- **Traceability Matrix**: Explicitly link Finding IDs (from the 9th Agent's verification) to the target files, line numbers, and scopes.
+- **Regression Assessment**: Identify side-effects on downstream callers/bindings and define verification checklists.
+- **Interactive Approval Milestone**: Explicitly pause and await user authorization before editing any plan or source files.
 
-**Why so strict at the plan stage?** Code written from a flawed plan needs both
-the plan *and* the code re-reviewed. Plan review is the cheapest defect-removal
-point in the entire pipeline.
+Re-run Round 2 on the remediated plan. Only after Round 2 is complete, clean, and remediated, begin writing code.
+
+**Why so strict at the plan stage?** Code written from a flawed plan needs both the plan *and* the code re-reviewed. Plan review is the cheapest defect-removal point in the entire pipeline.
 
 ---
 
@@ -259,6 +263,37 @@ specific session numbers and link to SESSION-STATE.md instead.
 
 Per-agent organization hides that the same issue surfaced three times — which
 is the signal that it's worth prioritizing.
+
+---
+
+## State & Context Synchronization Discipline
+
+To support seamless parallel development, multi-agent execution, and flawless handover between different LLM brains or automated harnesses, all agents MUST maintain perfect synchronization across our shared context files and workspace ledgers.
+
+### 1. Unified Reference Identity (URI)
+Any technical debt, decision, bug report, or architectural change must carry a unique and globally consistent reference identifier across all files:
+- **Technical Debt**: Must use the identifier format `TD-NNN` (where `NNN` is a sequential index from `TECH-DEBT.md`).
+- **Architectural Decisions**: Must use the identifier format `ADR-NNNN` (where `NNNN` is a sequential index from `docs/adr/`).
+- **Bug Investigations**: Must use the identifier format `BUG-NNN` (where `NNN` is a sequential index from `docs/bugs/`).
+Any update to one ledger referencing these IDs must immediately update all corresponding referencing ledgers (`SESSION-STATE.md`, `HANDOFF_REPORT.md`, `TECH-DEBT.md`) in the *same* session commit, eliminating stale pointers.
+
+### 2. High-Density, Non-Summarized Documentation
+When documenting session plans, goal accomplishments, design gaps, or remediation blueprints, agents MUST avoid vague, high-level summaries (e.g., "Updated decoders to fix errors").
+Instead, write **high-density, physically precise context**:
+- Cite the **exact** file names, line ranges, and fully-qualified types or functions changed (e.g., `src/raw.rs:L145-180`, `struct RawDecoder`, `fn decode_cr3`).
+- Detail the **exact** failure modes, returned error types, and concrete safety invariants enforced.
+- Document the *rationale* and technical trade-offs behind each decision so that downstream agents can ingest the state with zero ambiguity.
+
+### 3. Machine-Parsable Schema Formats
+Ledgers and reports are parsed both by humans and automated script chains. Agents must strictly adhere to the defined metadata formats:
+- Keep the `yaml` frontmatter and structured tables in all session plans, reviews, and handoff reports syntactically valid and physically precise.
+- Maintain the column headers, labels, and status flags of the progress tables inside `SESSION-STATE.md` and `HANDOFF_REPORT.md` verbatim.
+
+### 4. Zero-Friction Handover State
+At the end of every session, the final handoff documentation must represent a complete, runnable state transition. It must explicitly specify:
+- The exact `bash` bootstrap command to start the next session.
+- Any open Round-2 items, pending linting issues, or known blocked states.
+- The precise list of context files and directories the next agent or LLM must read first to immediately gain 100% domain context.
 
 ---
 

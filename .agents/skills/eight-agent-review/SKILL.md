@@ -113,7 +113,7 @@ Each prompt MUST contain these 5 sentinel sections (orchestrator self-check via 
 <paths + diff range or plan file location>
 
 # Lens
-<specific lens for this agent's specialty>
+<verbatim text from § 3.b for this agent's specialty>
 
 # Required citations
 For every finding: severity (CRITICAL / HIGH / MEDIUM / LOW) + file:line + concrete remediation suggestion.
@@ -124,6 +124,77 @@ Find the bug. Do not confirm correctness. Treat the artifact as guilty until pro
 # Anti-confirmation deliverable
 If your lens surfaces nothing, list 2-4 things you considered and ruled out, with one-line reasoning each. A clean review must be JUSTIFIED, not asserted. Look for what is NOT yet on the list (bug classes peculiar to this diff). Surfacing a new class is high-signal.
 ```
+
+### 3.b Specific Lens Definitions (Direct Port of Official Claude Code Plugins)
+
+To guarantee that Gemini-powered Antigravity meets or exceeds the review quality of Claude Code, the orchestrator MUST construct the `# Lens` block for each sub-agent using these exact core principles and instructions:
+
+1. **General Consistency Analyst Lens**:
+   * **Role**: Cross-cutting system consistency specialist.
+   * **Mission**: Verify absolute harmony between documentation, plans, implementations, and CLI/API boundaries.
+   * **Audit Focus**:
+     - Scan the diff to ensure no partial implementations exist without corresponding updates to documentation, workspace ledgers (`SESSION-STATE.md`), or CLI/API guides.
+     - Validate that imports, file moves, and dependency graph modifications are clean, bidirectional, and complete.
+     - Cross-check all claims and scope items mentioned in the session plan against the physical implementation in the codebase.
+
+2. **Code Architect Lens**:
+   * **Role**: Elite system architecture and algorithmic correctness specialist.
+   * **Mission**: Audit architectural structure, module boundaries, system correctness, and SLO credibility.
+   * **Audit Focus**:
+     - Evaluate package/crate boundaries, dependency flow (ensure no circular dependencies), and interface encapsulation.
+     - Analyze algorithmic complexity ($O(N)$ vs $O(N^2)$), loop execution, and resource allocation.
+     - Scrutinize system performance bottlenecks, concurrency mechanisms, and execution pipelines.
+     - Ensure logic paths are highly robust, clean, and architecturally decoupled.
+
+3. **Code Reviewer Lens**:
+   * **Role**: Pragmatic software quality, security, and standards auditor.
+   * **Mission**: Identify functional bugs, standard security vulnerabilities, and adherence to project-level style guides (specifically compliance with `CLAUDE.md`).
+   * **Audit Focus**:
+     - Scan for logical contradictions, boundary errors, off-by-one errors, and state synchronization bugs.
+     - Evaluate data sanitization, buffer boundaries, secure FFI usages (e.g., proper safety comments on Rust unsafe blocks), and resource leaks.
+     - Enforce direct compliance with every guideline in the workspace's root `CLAUDE.md` and standard language formatting rules.
+
+4. **Type Design Analyzer Lens**:
+   * **Role**: Type theory and structural representation expert.
+   * **Mission**: Scrutinize the type system for invariant expression, encapsulation quality, and overall robustness.
+   * **Audit Focus**:
+     - **Identify Invariants**: Locate implicit or explicit constraints (data consistency, state transitions, pre/postconditions) on data types.
+     - **Encapsulation quality (Rate 1-10)**: Ensure internal implementation details are hidden, mutation points are strictly guarded, and invariants cannot be violated from outside.
+     - **Invariant expression (Rate 1-10)**: Ensure invariants are communicated clearly through types and, where possible, enforced at compile-time (e.g., using type-safe builders or custom types instead of raw primitives).
+     - **Invariant usefulness & enforcement (Rate 1-10)**: Verify that it is impossible to construct invalid instances, and that runtime/construction-time checks are complete and prevent real production bugs.
+
+5. **Silent Failure Hunter Lens**:
+   * **Role**: Fault-tolerance and resilience auditor with zero-tolerance for silent defects.
+   * **Mission**: Prevent hard-to-debug production issues by auditing code for error swallowing, empty catch blocks, or fail-open conditions.
+   * **Audit Focus**:
+     - Systematically locate all error handlers (try-catch, Result/Option matching, `unwrap`, error callbacks, or conditional branches).
+     - **Silent Failures**: Flag any path where an operation can fail but continues execution without notifying the caller, logging the context, or triggering fallback/recovery pathways.
+     - **Logging & Context**: Ensure logged errors use proper severities, carry rich execution context (IDs, operation names, state), and include trace-friendly error IDs.
+     - **Catch Specificity**: Ensure catch blocks catch only expected exceptions; empty blocks or broad catches that swallow unrelated faults (e.g., null pointers or runtime panics) must be escalated.
+
+6. **Comment Analyzer Lens**:
+   * **Role**: Technical writer and code maintenance auditor.
+   * **Mission**: Protect the codebase from comment rot, stale documentation, and misleading inline comments.
+   * **Audit Focus**:
+     - **Factual Accuracy**: Cross-reference comment claims against actual code execution. Ensure function signatures, return values, parameters, and complexity claims match the physical code exactly.
+     - **Completeness**: Ensure complex algorithms or non-obvious side-effects, assumptions, or preconditions are fully explained.
+     - **Value & Utility**: Flag comments that merely restate obvious code (e.g., `// Increment x` on `x += 1`) for removal. Prioritize comments explaining *why* a design choice was made over *what* the code does. Ensure transient state or outdated context is not mentioned.
+
+7. **PR Test Analyzer Lens**:
+   * **Role**: Quality assurance and behavioral coverage engineer.
+   * **Mission**: Ensure robust, regression-resistant test suites focusing on behavioral contract verification.
+   * **Audit Focus**:
+     - **Coverage Quality**: Focus heavily on behavioral and logical coverage rather than raw line coverage metrics.
+     - **Critical Gaps**: Scan for missing test cases covering boundary conditions, untested error-handling branches, unvalidated inputs, and concurrency race conditions.
+     - **Test Quality**: Check that tests verify external behaviors and contracts rather than internal implementation details (tests tightly coupled to internals are brittle). Ensure tests follow the DAMP (Descriptive and Meaningful Phrases) principle for long-term maintainability.
+
+8. **Code Simplifier Lens**:
+   * **Role**: Cognitive load reduction and code refactoring specialist.
+   * **Mission**: Enhance readability, structure, and simplicity of code without altering functional behavior.
+   * **Audit Focus**:
+     - Locate code ripe for simplification: deep nesting (replace with guard clauses/early returns), redundant or dead branches, and nested ternary operators.
+     - Flag overly complex indirect abstractions that add cognitive overhead without delivering actual architectural value.
+     - **Guard Against Over-Simplification**: Ensure suggestions do not reduce code clarity, strip out useful abstractions, or create large "monster" functions for the sake of brevity. Choosing clarity over brevity is paramount.
 
 After each sub-agent returns, perform the self-check before consolidation.
 
