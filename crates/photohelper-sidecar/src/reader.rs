@@ -100,6 +100,9 @@ fn parse_description_attrs<B: std::io::BufRead>(
                 // write time" independently.
                 *metadata_date = parse_datetime(&val, "MetadataDate", path);
             }
+            "AutoTone" if match_prefix(prefix, "crs") => {
+                fields.auto_tone = parse_bool(&val, "AutoTone", path);
+            }
             "Temperature" if match_prefix(prefix, "crs") => {
                 fields.temperature = parse_i32(&val, "Temperature", path);
             }
@@ -263,126 +266,71 @@ pub(crate) fn parse_xmp_str(content: &str, path: &Path) -> Result<SidecarSetting
                 if len > 0 {
                     if let Some(current_tag) = tag_stack.get(len - 1) {
                         let (prefix, local) = split_tag(current_tag);
+
+                        let text = match e.unescape() {
+                            Ok(t) => t.trim().to_string(),
+                            Err(err) => {
+                                tracing::warn!(path = %path.display(), error = %err, "XML unescape error for {local}; skipping");
+                                break;
+                            }
+                        };
+
                         match local {
-                            "Rating" if match_prefix(prefix, "xmp") => match e.unescape() {
-                                Ok(text) => {
-                                    if let Some(r) = parse_i32(&text, "Rating", path) {
-                                        if let Ok(rating) = Rating::try_from(r) {
-                                            fields.rating = Some(rating);
-                                        } else {
-                                            tracing::warn!(
-                                                path = %path.display(),
-                                                value = r,
-                                                "invalid rating value; ignoring"
-                                            );
-                                        }
+                            "Rating" if match_prefix(prefix, "xmp") => {
+                                if let Some(r) = parse_i32(&text, "Rating", path) {
+                                    if let Ok(rating) = Rating::try_from(r) {
+                                        fields.rating = Some(rating);
+                                    } else {
+                                        tracing::warn!(
+                                            path = %path.display(),
+                                            value = r,
+                                            "invalid rating value; ignoring"
+                                        );
                                     }
                                 }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for Rating; skipping");
+                            }
+                            "MetadataDate" if match_prefix(prefix, "xmp") => {
+                                metadata_date = parse_datetime(&text, "MetadataDate", path);
+                            }
+                            "NimaScore" if match_prefix(prefix, "ph") => {
+                                fields.nima_score = parse_f32(&text, "NimaScore", path);
+                            }
+                            "DedupClusterId" if match_prefix(prefix, "ph") => {
+                                fields.dedup_cluster_id = parse_i64(&text, "DedupClusterId", path);
+                            }
+                            "PhotohelperId" if match_prefix(prefix, "ph") => {
+                                if !text.is_empty() {
+                                    fields.photohelper_id = Some(text);
                                 }
-                            },
-                            "MetadataDate" if match_prefix(prefix, "xmp") => match e.unescape() {
-                                Ok(text) => {
-                                    metadata_date = parse_datetime(&text, "MetadataDate", path);
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for MetadataDate; skipping");
-                                }
-                            },
-                            "NimaScore" if match_prefix(prefix, "ph") => match e.unescape() {
-                                Ok(text) => {
-                                    fields.nima_score = parse_f32(&text, "NimaScore", path);
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for NimaScore; skipping");
-                                }
-                            },
-                            "DedupClusterId" if match_prefix(prefix, "ph") => match e.unescape() {
-                                Ok(text) => {
-                                    fields.dedup_cluster_id =
-                                        parse_i64(&text, "DedupClusterId", path);
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for DedupClusterId; skipping");
-                                }
-                            },
-                            "PhotohelperId" if match_prefix(prefix, "ph") => match e.unescape() {
-                                Ok(text) => {
-                                    let trimmed = text.trim();
-                                    if !trimmed.is_empty() {
-                                        fields.photohelper_id = Some(trimmed.to_string());
-                                    }
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for PhotohelperId; skipping");
-                                }
-                            },
-                            "LastProcessedAt" if match_prefix(prefix, "ph") => match e.unescape() {
-                                Ok(text) => {
-                                    fields.last_processed_at =
-                                        parse_datetime(&text, "LastProcessedAt", path);
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for LastProcessedAt; skipping");
-                                }
-                            },
-                            "Label" if match_prefix(prefix, "xmp") => match e.unescape() {
-                                Ok(text) => {
-                                    fields.label = Some(text.trim().to_string());
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for Label; skipping");
-                                }
-                            },
-                            "Temperature" if match_prefix(prefix, "crs") => match e.unescape() {
-                                Ok(text) => {
-                                    fields.temperature = parse_i32(&text, "Temperature", path);
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for Temperature; skipping");
-                                }
-                            },
-                            "Tint" if match_prefix(prefix, "crs") => match e.unescape() {
-                                Ok(text) => {
-                                    fields.tint = parse_i32(&text, "Tint", path);
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for Tint; skipping");
-                                }
-                            },
-                            "Exposure2012" if match_prefix(prefix, "crs") => match e.unescape() {
-                                Ok(text) => {
-                                    fields.exposure = parse_f32(&text, "Exposure2012", path);
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for Exposure2012; skipping");
-                                }
-                            },
-                            "Contrast2012" if match_prefix(prefix, "crs") => match e.unescape() {
-                                Ok(text) => {
-                                    fields.contrast = parse_i32(&text, "Contrast2012", path);
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for Contrast2012; skipping");
-                                }
-                            },
-                            "Highlights2012" if match_prefix(prefix, "crs") => match e.unescape() {
-                                Ok(text) => {
-                                    fields.highlights = parse_i32(&text, "Highlights2012", path);
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for Highlights2012; skipping");
-                                }
-                            },
-                            "Shadows2012" if match_prefix(prefix, "crs") => match e.unescape() {
-                                Ok(text) => {
-                                    fields.shadows = parse_i32(&text, "Shadows2012", path);
-                                }
-                                Err(err) => {
-                                    tracing::warn!(path = %path.display(), error = %err, "XML unescape error for Shadows2012; skipping");
-                                }
-                            },
+                            }
+                            "LastProcessedAt" if match_prefix(prefix, "ph") => {
+                                fields.last_processed_at =
+                                    parse_datetime(&text, "LastProcessedAt", path);
+                            }
+                            "Label" if match_prefix(prefix, "xmp") => {
+                                fields.label = Some(text);
+                            }
+                            "AutoTone" if match_prefix(prefix, "crs") => {
+                                fields.auto_tone = parse_bool(&text, "AutoTone", path);
+                            }
+                            "Temperature" if match_prefix(prefix, "crs") => {
+                                fields.temperature = parse_i32(&text, "Temperature", path);
+                            }
+                            "Tint" if match_prefix(prefix, "crs") => {
+                                fields.tint = parse_i32(&text, "Tint", path);
+                            }
+                            "Exposure2012" if match_prefix(prefix, "crs") => {
+                                fields.exposure = parse_f32(&text, "Exposure2012", path);
+                            }
+                            "Contrast2012" if match_prefix(prefix, "crs") => {
+                                fields.contrast = parse_i32(&text, "Contrast2012", path);
+                            }
+                            "Highlights2012" if match_prefix(prefix, "crs") => {
+                                fields.highlights = parse_i32(&text, "Highlights2012", path);
+                            }
+                            "Shadows2012" if match_prefix(prefix, "crs") => {
+                                fields.shadows = parse_i32(&text, "Shadows2012", path);
+                            }
                             _ => {}
                         }
                     }
@@ -452,6 +400,18 @@ fn parse_f32(val: &str, field: &str, path: &Path) -> Option<f32> {
             tracing::warn!(path = %path.display(), field, value = val, "malformed XMP field value; ignoring");
             None
         })
+}
+
+fn parse_bool(val: &str, field: &str, path: &Path) -> Option<bool> {
+    let trimmed = val.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else if trimmed.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else {
+        tracing::warn!(path = %path.display(), field, value = val, "malformed XMP boolean value; ignoring");
+        None
+    }
 }
 
 fn parse_datetime(val: &str, field: &str, path: &Path) -> Option<OffsetDateTime> {

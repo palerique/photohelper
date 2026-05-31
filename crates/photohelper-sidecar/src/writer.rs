@@ -135,6 +135,10 @@ pub(crate) fn render_xmp(settings: &SidecarSettings) -> Result<String, Error> {
     if let Some(t) = settings.tint() {
         attrs.push_str(&format!("\n      crs:Tint=\"{t}\""));
     }
+    if let Some(b) = settings.auto_tone() {
+        let val = if b { "True" } else { "False" };
+        attrs.push_str(&format!("\n      crs:AutoTone=\"{val}\""));
+    }
     if let Some(e) = settings.exposure() {
         attrs.push_str(&format!("\n      crs:Exposure2012=\"{e:.2}\""));
     }

@@ -57,6 +57,10 @@ pub(crate) struct DevelopArgs {
     /// Write Lightroom color labels (Red/Green) based on NIMA score.
     #[arg(long, default_value_t = false)]
     pub(crate) lr_label: bool,
+    /// Write the exact NIMA score into the Lightroom color label field (e.g. '09.50').
+    /// This enables native Lightroom sorting by 'Label Text'.
+    #[arg(long, default_value_t = false, conflicts_with = "lr_label")]
+    pub(crate) lr_label_score: bool,
     /// Write photohelper keywords (tier/cluster) based on NIMA score and duplicate cluster ID.
     #[arg(long, default_value_t = false)]
     pub(crate) lr_keywords: bool,
@@ -69,6 +73,9 @@ pub(crate) struct DevelopArgs {
     /// Custom Lightroom color label for 'Green' (NIMA >= 7.0)
     #[arg(long, env = "PHOTOHELPER_LR_LABEL_GREEN", default_value = "Green")]
     pub(crate) lr_label_green: String,
+    /// Defers to Lightroom's internal `AutoTone` engine and does not apply numerical adjustments.
+    #[arg(long, default_value_t = false)]
+    pub(crate) auto_tone: bool,
 }
 
 /// AtomicU64 counters used for concurrent updates by Rayon parallel threads and safe cross-thread visibility for the heartbeat loop.
@@ -150,6 +157,7 @@ impl DevelopStats {
 pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     let lr_rating = args.all_lr || args.lr_rating;
     let lr_label = args.all_lr || args.lr_label;
+    let lr_label_score = args.lr_label_score; // all_lr does not trigger this, since it conflicts with lr_label
     let lr_keywords = args.all_lr || args.lr_keywords;
     let cancelled = std::sync::atomic::AtomicBool::new(false);
 
@@ -203,6 +211,9 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     }
     if let Some(v) = args.shadows {
         base_builder = base_builder.shadows(v);
+    }
+    if args.auto_tone {
+        base_builder = base_builder.auto_tone(true);
     }
     base_builder
         .clone()
@@ -358,10 +369,6 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
             }
         }
 
-        if let Some(score) = valid_nima {
-            builder = builder.nima_score(score);
-        }
-
         if let Some(cluster_id) = row.dedup_cluster_id().filter(|&id| id >= 0) {
             builder = builder.dedup_cluster_id(cluster_id);
         }
@@ -373,19 +380,22 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
         let now_utc = time::OffsetDateTime::now_utc();
         builder = builder.last_processed_at(now_utc);
 
-        // Write Lightroom star ratings (1 to 5) based on NIMA score.
-        if lr_rating {
-            if let Some(score) = valid_nima {
+        // Write rating, label, and keywords based on NIMA score.
+        if let Some(score) = valid_nima {
+            builder = builder.nima_score(score);
+
+            if lr_rating {
                 let (rating_num, _) = crate::commands::util::nima_score_to_rating_and_tier(score);
                 let rating = std::convert::TryFrom::try_from(rating_num)
                     .unwrap_or(photohelper_sidecar::Rating::Unrated);
                 builder = builder.rating(rating);
             }
-        }
 
-        // Write Lightroom color labels (Red/Green) based on NIMA score.
-        if lr_label {
-            if let Some(score) = valid_nima {
+            if lr_label_score {
+                // Zero-pad to ensure lexicographical sorting matches numeric value.
+                let label = format!("{score:05.2}");
+                builder = builder.label(&label);
+            } else if lr_label {
                 let label = if score < 4.0 {
                     red_trimmed
                 } else if score >= 7.0 {
@@ -395,29 +405,38 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
                 };
                 builder = builder.label(label);
             }
-        }
 
-        // Write photohelper keywords (tier/cluster) based on NIMA score and duplicate cluster ID.
-        if lr_keywords {
-            let mut flat = std::collections::BTreeSet::new();
-            let mut hierarchical = std::collections::BTreeSet::new();
+            if lr_keywords {
+                let mut flat = std::collections::BTreeSet::new();
+                let mut hierarchical = std::collections::BTreeSet::new();
 
-            flat.insert("photohelper".to_string());
-            hierarchical.insert("photohelper".to_string());
+                flat.insert("photohelper".to_string());
+                hierarchical.insert("photohelper".to_string());
 
-            if let Some(score) = valid_nima {
                 let (_, tier) = crate::commands::util::nima_score_to_rating_and_tier(score);
                 flat.insert(format!("nima:{tier}"));
                 hierarchical.insert(format!("photohelper|nima:{tier}"));
-            }
 
+                if let Some(cluster_id) = row.dedup_cluster_id().filter(|&id| id >= 0) {
+                    flat.insert(format!("cluster:{cluster_id}"));
+                    hierarchical.insert(format!("photohelper|cluster:{cluster_id}"));
+                }
+
+                builder = builder.keywords(flat);
+                builder = builder.hierarchical_keywords(hierarchical);
+            }
+        } else if lr_keywords {
+            // Handle cluster keywords even if NIMA score is missing
             if let Some(cluster_id) = row.dedup_cluster_id().filter(|&id| id >= 0) {
+                let mut flat = std::collections::BTreeSet::new();
+                let mut hierarchical = std::collections::BTreeSet::new();
+                flat.insert("photohelper".to_string());
+                hierarchical.insert("photohelper".to_string());
                 flat.insert(format!("cluster:{cluster_id}"));
                 hierarchical.insert(format!("photohelper|cluster:{cluster_id}"));
+                builder = builder.keywords(flat);
+                builder = builder.hierarchical_keywords(hierarchical);
             }
-
-            builder = builder.keywords(flat);
-            builder = builder.hierarchical_keywords(hierarchical);
         }
 
         let settings = match builder.build() {

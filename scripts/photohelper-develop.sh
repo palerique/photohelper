@@ -26,4 +26,4 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHOTOHELPER_MODEL_DIR="${PHOTOHELPER_MODEL_DIR:-$ROOT_DIR/crates/photohelper-ai/models}"
 export PHOTOHELPER_MODEL_DIR
 
-cargo run --release --manifest-path "$ROOT_DIR/Cargo.toml" -p photohelper-cli -- develop "$@"
+cargo run --release --manifest-path "$ROOT_DIR/Cargo.toml" -p photohelper-cli -- develop --auto-tone --lr-label-score "$@"

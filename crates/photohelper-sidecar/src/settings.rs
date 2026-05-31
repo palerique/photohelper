@@ -63,6 +63,29 @@ fn is_ph_suffix(suffix: &str) -> bool {
     false
 }
 
+fn merge_keywords(
+    existing: &Option<BTreeSet<String>>,
+    incoming: &Option<BTreeSet<String>>,
+) -> Option<BTreeSet<String>> {
+    match incoming {
+        None => existing.clone(),
+        Some(incoming_set) => {
+            let mut user_kws = BTreeSet::new();
+            if let Some(existing_set) = existing {
+                for kw in existing_set {
+                    if !is_photohelper_keyword(kw) {
+                        user_kws.insert(kw.clone());
+                    }
+                }
+            }
+            for kw in incoming_set {
+                user_kws.insert(kw.clone());
+            }
+            Some(user_kws)
+        }
+    }
+}
+
 /// Strongly-typed star rating state inside sidecar metadata.
 /// Supported range is `[-1, 5]`, where `-1` represents Rejected,
 /// `0` represents Unrated/None, and `[1, 5]` are standard stars.
@@ -120,6 +143,7 @@ pub(crate) struct ParsedFields {
     pub contrast: Option<i32>,
     pub highlights: Option<i32>,
     pub shadows: Option<i32>,
+    pub auto_tone: Option<bool>,
     pub nima_score: Option<f32>,
     pub dedup_cluster_id: Option<i64>,
     pub photohelper_id: Option<String>,
@@ -156,6 +180,7 @@ pub struct SidecarSettings {
     contrast: Option<i32>,
     highlights: Option<i32>,
     shadows: Option<i32>,
+    auto_tone: Option<bool>,
     // ph: namespace
     nima_score: Option<f32>,
     dedup_cluster_id: Option<i64>,
@@ -218,6 +243,12 @@ impl SidecarSettings {
     #[must_use]
     pub fn shadows(&self) -> Option<i32> {
         self.shadows
+    }
+
+    /// Auto Tone enablement, if set.
+    #[must_use]
+    pub fn auto_tone(&self) -> Option<bool> {
+        self.auto_tone
     }
 
     /// NIMA aesthetic score, if set.
@@ -289,6 +320,7 @@ impl SidecarSettings {
             || self.contrast.is_some()
             || self.highlights.is_some()
             || self.shadows.is_some()
+            || self.auto_tone.is_some()
     }
 
     /// Returns `true` if no fields (crs:, ph:, or standard) are set.
@@ -318,6 +350,7 @@ impl SidecarSettings {
         let contrast = incoming.contrast.or(self.contrast);
         let highlights = incoming.highlights.or(self.highlights);
         let shadows = incoming.shadows.or(self.shadows);
+        let auto_tone = incoming.auto_tone.or(self.auto_tone);
 
         let nima_score = incoming.nima_score.or(self.nima_score);
         let dedup_cluster_id = incoming.dedup_cluster_id.or(self.dedup_cluster_id);
@@ -331,41 +364,9 @@ impl SidecarSettings {
 
         let label = incoming.label.clone().or_else(|| self.label.clone());
 
-        let keywords = match &incoming.keywords {
-            None => self.keywords.clone(),
-            Some(incoming_set) => {
-                let mut user_kws = BTreeSet::new();
-                if let Some(existing_set) = &self.keywords {
-                    for kw in existing_set {
-                        if !is_photohelper_keyword(kw) {
-                            user_kws.insert(kw.clone());
-                        }
-                    }
-                }
-                for kw in incoming_set {
-                    user_kws.insert(kw.clone());
-                }
-                Some(user_kws)
-            }
-        };
-
-        let hierarchical_keywords = match &incoming.hierarchical_keywords {
-            None => self.hierarchical_keywords.clone(),
-            Some(incoming_set) => {
-                let mut user_kws = BTreeSet::new();
-                if let Some(existing_set) = &self.hierarchical_keywords {
-                    for kw in existing_set {
-                        if !is_photohelper_keyword(kw) {
-                            user_kws.insert(kw.clone());
-                        }
-                    }
-                }
-                for kw in incoming_set {
-                    user_kws.insert(kw.clone());
-                }
-                Some(user_kws)
-            }
-        };
+        let keywords = merge_keywords(&self.keywords, &incoming.keywords);
+        let hierarchical_keywords =
+            merge_keywords(&self.hierarchical_keywords, &incoming.hierarchical_keywords);
 
         Self {
             temperature,
@@ -374,6 +375,7 @@ impl SidecarSettings {
             contrast,
             highlights,
             shadows,
+            auto_tone,
             nima_score,
             dedup_cluster_id,
             photohelper_id,
@@ -392,26 +394,18 @@ impl SidecarSettings {
     /// values are ignored (mapped to `None`) with a `tracing::warn!`.
     pub(crate) fn from_parsed(fields: ParsedFields) -> Self {
         let temperature = fields.temperature.map(|v| {
-            if v < 2000 {
-                tracing::warn!(value = v, "crs:Temperature below 2000; clamping to 2000");
-                2000
-            } else if v > 50_000 {
-                tracing::warn!(value = v, "crs:Temperature above 50000; clamping to 50000");
-                50_000
-            } else {
-                v
+            let clamped = v.clamp(2000, 50_000);
+            if v != clamped {
+                tracing::warn!(value = v, "crs:Temperature out of bounds; clamped");
             }
+            clamped
         });
         let tint = fields.tint.map(|v| {
-            if v < -150 {
-                tracing::warn!(value = v, "crs:Tint below -150; clamping to -150");
-                -150
-            } else if v > 150 {
-                tracing::warn!(value = v, "crs:Tint above 150; clamping to 150");
-                150
-            } else {
-                v
+            let clamped = v.clamp(-150, 150);
+            if v != clamped {
+                tracing::warn!(value = v, "crs:Tint out of bounds; clamped");
             }
+            clamped
         });
         let exposure = fields.exposure.and_then(|v| {
             if v.is_finite() && (-5.0..=5.0).contains(&v) {
@@ -467,6 +461,7 @@ impl SidecarSettings {
             shadows: fields
                 .shadows
                 .and_then(|v| validate_100("crs:Shadows2012", v)),
+            auto_tone: fields.auto_tone,
             nima_score,
             dedup_cluster_id,
             photohelper_id: fields.photohelper_id,
@@ -490,6 +485,7 @@ pub struct SidecarSettingsBuilder {
     contrast: Option<i32>,
     highlights: Option<i32>,
     shadows: Option<i32>,
+    auto_tone: Option<bool>,
     nima_score: Option<f32>,
     dedup_cluster_id: Option<i64>,
     photohelper_id: Option<String>,
@@ -540,6 +536,14 @@ impl SidecarSettingsBuilder {
     #[must_use]
     pub fn shadows(mut self, v: i32) -> Self {
         self.shadows = Some(v);
+        self
+    }
+
+    /// Auto Tone flag.
+    /// Defers to Lightroom's internal `AutoTone` engine and does not apply numerical adjustments.
+    #[must_use]
+    pub fn auto_tone(mut self, v: bool) -> Self {
+        self.auto_tone = Some(v);
         self
     }
 
@@ -730,6 +734,7 @@ impl SidecarSettingsBuilder {
             contrast: self.contrast,
             highlights: self.highlights,
             shadows: self.shadows,
+            auto_tone: self.auto_tone,
             nima_score: self.nima_score,
             dedup_cluster_id: self.dedup_cluster_id,
             photohelper_id: self.photohelper_id,

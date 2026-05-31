@@ -50,7 +50,36 @@ Once set, `photohelper develop` will automatically pick these up without requiri
 
 ---
 
-## 4. Conflict Protection & Shielding
+## 4. Sorting by Aesthetic Value (NIMA Score)
+
+Lightroom Classic does not have a native numeric "score" field. However, you can configure `photohelper` to inject the exact aesthetic NIMA score (e.g., `09.50`) into the color label field using the `--lr-label-score` flag:
+```bash
+photohelper develop --lr-label-score
+```
+*Note: This flag is mutually exclusive with `--lr-label` (color labels).*
+
+### How to sort by score in Lightroom:
+1. Ensure you have read the metadata from files (see Section 2).
+2. Go to the **Grid View** (`G` key).
+3. In the bottom toolbar, find the **Sort:** dropdown.
+4. Select **Label Text** or **Label Color** (depending on your Lightroom version).
+5. Ensure the sorting order is set to **Z to A** (Descending) to see the highest-scored photos first.
+
+---
+
+## 5. Auto Tone (Auto Enhance)
+
+You can instruct Lightroom to automatically enhance your photos (applying its internal `AutoTone` engine) upon reading the metadata.
+Use the `--auto-tone` flag:
+```bash
+photohelper develop --auto-tone
+```
+
+*Note: `photohelper` does not compute its own image enhancements; it simply writes the `crs:AutoTone="True"` directive, which triggers Lightroom's native algorithms.*
+
+---
+
+## 6. Conflict Protection & Shielding
 
 To protect your manual Lightroom Classic adjustments, `photohelper` features an automatic filesystem-based **Conflict Shield**:
 1. When you edit metadata or raw adjustments inside Lightroom Classic and save them to disk (using `Cmd+S` / `Ctrl+S`), Lightroom updates the sidecar file's physical modification time (`mtime`).
@@ -60,5 +89,5 @@ To protect your manual Lightroom Classic adjustments, `photohelper` features an 
 ### Overriding Conflicts
 If you want to unconditionally force `photohelper` to overwrite manual Lightroom edits and apply its own ratings/labels/keywords, pass the `--force` flag:
 ```bash
-photohelper develop --all-lr --force
+photohelper develop --all-lr --force --auto-tone --lr-label-score
 ```

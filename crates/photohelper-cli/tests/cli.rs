@@ -2475,3 +2475,71 @@ fn run_negative_behavioral_min_rating_skip() {
         "JPEG must not be exported due to rating threshold"
     );
 }
+
+#[test]
+fn develop_lr_label_score_conflicts_with_lr_label() {
+    let mut cmd = Command::cargo_bin("photohelper").unwrap();
+    cmd.args(["develop", "--lr-label", "--lr-label-score"]);
+
+    cmd.assert()
+        .failure()
+        .stderr(contains("cannot be used with"));
+}
+
+#[test]
+fn develop_auto_tone_and_lr_label_score() {
+    let input_dir = tempfile::TempDir::new().unwrap();
+    let cat_dir = tempfile::TempDir::new().unwrap();
+    let cat_path = cat_dir.path().join("catalog.db");
+
+    // Create a RAW file
+    let raw_path = input_dir.path().join("photo.cr3");
+    std::fs::write(&raw_path, b"dummy raw").unwrap();
+
+    {
+        let _db = photohelper_catalog::Catalog::open(&cat_path, 5).unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&cat_path).unwrap();
+        conn.execute(
+            "INSERT INTO photos (
+                id, source_path, file_size, mtime_unix_seconds, mtime_anomalous, ingested_at_unix_seconds
+            ) VALUES (?1, ?2, 100, 0, 0, 0)",
+            rusqlite::params![&b"0123456789abcdef0123456789abcdef"[..], raw_path.to_str().unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) VALUES (?1, 'nima-aesthetic-v1', 8.25, 0)",
+            rusqlite::params![&b"0123456789abcdef0123456789abcdef"[..]],
+        )
+        .unwrap();
+    }
+
+    let output = Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "develop",
+            "--auto-tone",
+            "--lr-label-score",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        panic!("Command failed!\nstderr:\n{stderr}");
+    }
+    println!("Command stderr: {stderr}");
+
+    let xmp_path = raw_path.with_extension("xmp");
+    assert!(xmp_path.exists());
+    let xmp_content = std::fs::read_to_string(xmp_path).unwrap();
+    println!("XMP CONTENT:\n{xmp_content}");
+
+    assert!(xmp_content.contains("crs:AutoTone=\"True\""));
+    // Score should be 8.25 (rounded) and zero-padded to 08.25
+    assert!(xmp_content.contains("xmp:Label=\"08.25\""));
+}
