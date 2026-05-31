@@ -1243,6 +1243,7 @@ fn develop_cli_flags_written_to_sidecar() {
             "5500",
             "--exposure",
             "1.50",
+            "--auto-tone",
         ])
         .assert()
         .code(0);
@@ -1256,6 +1257,30 @@ fn develop_cli_flags_written_to_sidecar() {
         xml.contains("crs:Exposure2012=\"1.50\""),
         "Exposure must be in sidecar"
     );
+    assert!(
+        xml.contains("crs:AutoTone=\"True\""),
+        "AutoTone must be in sidecar"
+    );
+}
+
+#[test]
+fn develop_strict_exits_nonzero_on_xml_parse_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    // Write malformed XML to the sidecar.
+    std::fs::write(&xmp, "<x:xmpmeta><unclosed tag></x:xmpmeta>").unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--strict"])
+        .assert()
+        .code(1) // EX_STRICT_FAIL = 1
+        .stderr(contains("errored: 1"));
 }
 
 #[test]
@@ -1499,8 +1524,8 @@ fn develop_clean_isolation_by_default() {
         .args(["--catalog", cat_str, "develop"])
         .assert()
         .code(0)
-        .stderr(predicates::str::contains(
-            "WARNING: photohelper develop is running without any metadata flags activated.",
+        .stderr(contains(
+            "WARNING: photohelper develop is running without any Lightroom NIMA mapping flags activated.",
         ));
 
     let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
@@ -1918,6 +1943,28 @@ fn export_strict_cancellation_on_missing_file() {
 // =====================================================================
 // Lightroom Sync Improvement tests (Session 09).
 // =====================================================================
+
+#[test]
+fn develop_all_lr_and_lr_label_score() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let _cr3 = ingest_fake_cr3(cat_str, tmp.path());
+
+    // Both flags can coexist without a Clap conflict.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_str,
+            "develop",
+            "--all-lr",
+            "--lr-label-score",
+        ])
+        .assert()
+        .success();
+}
 
 #[test]
 fn develop_shorthand_all_lr() {
@@ -2529,9 +2576,10 @@ fn develop_auto_tone_and_lr_label_score() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        panic!("Command failed!\nstderr:\n{stderr}");
-    }
+    assert!(
+        output.status.success(),
+        "Command failed!\nstderr:\n{stderr}"
+    );
     println!("Command stderr: {stderr}");
 
     let xmp_path = raw_path.with_extension("xmp");

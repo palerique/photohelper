@@ -43,13 +43,15 @@ mod path;
 mod reader;
 mod settings;
 mod writer;
+mod xml;
 
 pub use crate::conflict::{ConflictStrategy, WriteOutcome, merge_and_write};
 pub use error::Error;
 pub use path::SidecarPath;
 pub use reader::read_xmp;
 pub use settings::{Rating, SidecarSettings, SidecarSettingsBuilder};
-pub use writer::{is_valid_xml_string, write_xmp};
+pub use writer::write_xmp;
+pub use xml::is_valid_xml_string;
 
 use static_assertions::assert_impl_all;
 assert_impl_all!(SidecarSettings: Send, Sync);
@@ -383,7 +385,7 @@ mod tests {
       <crs:Temperature>not-an-int</crs:Temperature>
       <crs:Exposure2012>not-a-float</crs:Exposure2012>
       <ph:NimaScore>not-a-finite-score</ph:NimaScore>
-      <ph:DedupClusterId>-123</ph:DedupClusterId>
+      <ph:DedupClusterId>not-an-int</ph:DedupClusterId>
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>"#;

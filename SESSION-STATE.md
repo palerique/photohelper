@@ -9,11 +9,11 @@
 
 **Last session**: 12 (`export-enhancements` — 2026-05-31) — **SHIPPED**. Feature enhancements for export pipeline including linear 16-bit to sRGB ISP with ToneMappingLut, watermarking implementation with tiny_skia, O(N) badge preloading, and O(1) collision resolution.
 
-**Current session**: 13 (`<to-be-determined>` — <date>) — branch `main`. **READY** (waiting for next prompt).
+**Current session**: 13 (`develop-lightroom-sync` — 2026-05-31) — branch `main`. **IMPLEMENTATION** (remediating Round 1 feedback).
 
-**Goal**: To be determined.
+**Goal**: Fix Lightroom sidecar synchronization bugs, resolve flag duplication, and clean up primitive obsession.
 
-**Action**: Read session state and await user prompt.
+**Action**: Remediate the round 1 feedback.
 
 **Session-end review (session 12 — COMPLETE)**:
 - R1 → 5 items remediated (O(N) badge preloading, O(N^2) collision, EX_PARTIAL_FAIL strictness, decoupling DevelopRow, watermark fail-open).

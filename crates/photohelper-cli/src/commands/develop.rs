@@ -164,7 +164,7 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     let red_trimmed = args.lr_label_red.trim();
     let green_trimmed = args.lr_label_green.trim();
 
-    if lr_label {
+    if lr_label && !lr_label_score {
         if red_trimmed.is_empty() {
             anyhow::bail!(
                 "invalid custom color label: 'Red' label cannot be empty or whitespace-only"
@@ -243,7 +243,25 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
 
         // On case-insensitive filesystems (or FAT32/exFAT mounts on Linux), normalize path casing for deduplication
         // to prevent duplicate rows targeting the same sidecar from causing concurrent write races.
-        let dedup_key: Vec<u8> = sidecar_path.to_string_lossy().to_lowercase().into_bytes();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let dedup_key: Vec<u8> = {
+            use unicode_normalization::UnicodeNormalization;
+            sidecar_path
+                .to_string_lossy()
+                .nfc()
+                .collect::<String>()
+                .to_lowercase()
+                .into_bytes()
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let dedup_key: Vec<u8> = {
+            use unicode_normalization::UnicodeNormalization;
+            sidecar_path
+                .to_string_lossy()
+                .nfc()
+                .collect::<String>()
+                .into_bytes()
+        };
 
         if seen_paths.insert(dedup_key) {
             unique_rows.push(row);
@@ -268,9 +286,9 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     let has_any_cull_score = rows.iter().any(|r| r.nima_score().is_some());
     let has_any_cluster = rows.iter().any(|r| r.dedup_cluster_id().is_some());
 
-    if !lr_rating && !lr_label && !lr_keywords {
+    if !lr_rating && !lr_label && !lr_keywords && !lr_label_score {
         eprintln!(
-            "WARNING: photohelper develop is running without any metadata flags activated.\n\
+            "WARNING: photohelper develop is running without any Lightroom NIMA mapping flags activated.\n\
              No Lightroom rating, color label, or keywords will be written to sidecars.\n\
              To enable metadata mapping, use the individual --lr-* flags or pass --all-lr."
         );
@@ -380,7 +398,8 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
         let now_utc = time::OffsetDateTime::now_utc();
         builder = builder.last_processed_at(now_utc);
 
-        // Write rating, label, and keywords based on NIMA score.
+        let cluster_id = row.dedup_cluster_id().filter(|&id| id >= 0);
+
         if let Some(score) = valid_nima {
             builder = builder.nima_score(score);
 
@@ -392,9 +411,7 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
             }
 
             if lr_label_score {
-                // Zero-pad to ensure lexicographical sorting matches numeric value.
-                let label = format!("{score:05.2}");
-                builder = builder.label(&label);
+                builder = builder.label(crate::commands::util::format_nima_score_label(score));
             } else if lr_label {
                 let label = if score < 4.0 {
                     red_trimmed
@@ -417,23 +434,34 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
                 flat.insert(format!("nima:{tier}"));
                 hierarchical.insert(format!("photohelper|nima:{tier}"));
 
-                if let Some(cluster_id) = row.dedup_cluster_id().filter(|&id| id >= 0) {
-                    flat.insert(format!("cluster:{cluster_id}"));
-                    hierarchical.insert(format!("photohelper|cluster:{cluster_id}"));
+                if let Some(id) = cluster_id {
+                    flat.insert(format!("cluster:{id}"));
+                    hierarchical.insert(format!("photohelper|cluster:{id}"));
                 }
 
                 builder = builder.keywords(flat);
                 builder = builder.hierarchical_keywords(hierarchical);
             }
-        } else if lr_keywords {
-            // Handle cluster keywords even if NIMA score is missing
-            if let Some(cluster_id) = row.dedup_cluster_id().filter(|&id| id >= 0) {
+        } else {
+            builder = builder.clear_nima_score();
+
+            if lr_rating {
+                builder = builder.rating(photohelper_sidecar::Rating::Unrated);
+            }
+            if lr_label_score || lr_label {
+                builder = builder.label("");
+            }
+            if lr_keywords {
                 let mut flat = std::collections::BTreeSet::new();
                 let mut hierarchical = std::collections::BTreeSet::new();
-                flat.insert("photohelper".to_string());
-                hierarchical.insert("photohelper".to_string());
-                flat.insert(format!("cluster:{cluster_id}"));
-                hierarchical.insert(format!("photohelper|cluster:{cluster_id}"));
+
+                if let Some(id) = cluster_id {
+                    flat.insert("photohelper".to_string());
+                    hierarchical.insert("photohelper".to_string());
+                    flat.insert(format!("cluster:{id}"));
+                    hierarchical.insert(format!("photohelper|cluster:{id}"));
+                }
+
                 builder = builder.keywords(flat);
                 builder = builder.hierarchical_keywords(hierarchical);
             }
@@ -490,7 +518,7 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     }
     stop.signal();
     if let Err(e) = heartbeat_handle.join() {
-        tracing::error!("heartbeat thread panicked: {:?}", e);
+        anyhow::bail!("heartbeat thread panicked: {e:?}");
     }
 
     eprintln!("{}", stats.summary_line());

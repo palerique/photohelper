@@ -9,17 +9,56 @@ use time::OffsetDateTime;
 
 use crate::error::Error;
 
-/// Case-insensitive, char-boundary-safe prefix checking helper.
-fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    let len = prefix.len();
-    if s.len() >= len && s.is_char_boundary(len) {
-        if let (Some(head), Some(tail)) = (s.get(..len), s.get(len..)) {
-            if head.eq_ignore_ascii_case(prefix) {
-                return Some(tail);
-            }
+/// Represents an explicit update instruction for a sidecar field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Update<T> {
+    /// Keep the existing value (no-op during merge).
+    Keep,
+    /// Clear (delete) the existing value.
+    Clear,
+    /// Set a new value.
+    Set(T),
+}
+
+impl<T> Default for Update<T> {
+    fn default() -> Self {
+        Self::Keep
+    }
+}
+
+impl<T> Update<T> {
+    /// Returns `Some(&v)` if `Set`, otherwise `None`.
+    pub fn as_option(&self) -> Option<&T> {
+        match self {
+            Self::Set(v) => Some(v),
+            _ => None,
         }
     }
-    None
+
+    /// Resolves this update against an existing absolute value.
+    pub fn resolve(self, existing: Option<T>) -> Option<T> {
+        match self {
+            Update::Keep => existing,
+            Update::Clear => None,
+            Update::Set(v) => Some(v),
+        }
+    }
+}
+
+impl<T> From<Option<T>> for Update<T> {
+    fn from(opt: Option<T>) -> Self {
+        match opt {
+            Some(v) => Self::Set(v),
+            None => Self::Clear,
+        }
+    }
+}
+
+/// Case-insensitive, char-boundary-safe prefix checking helper.
+fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    s.get(..prefix.len())
+        .filter(|h| h.eq_ignore_ascii_case(prefix))
+        .and_then(|_| s.get(prefix.len()..))
 }
 
 /// Helper function to precisely identify photohelper-managed keywords so they
@@ -64,23 +103,19 @@ fn is_ph_suffix(suffix: &str) -> bool {
 }
 
 fn merge_keywords(
-    existing: &Option<BTreeSet<String>>,
-    incoming: &Option<BTreeSet<String>>,
+    existing: Option<&BTreeSet<String>>,
+    incoming: Option<&BTreeSet<String>>,
 ) -> Option<BTreeSet<String>> {
     match incoming {
-        None => existing.clone(),
+        None => existing.cloned(),
         Some(incoming_set) => {
-            let mut user_kws = BTreeSet::new();
-            if let Some(existing_set) = existing {
-                for kw in existing_set {
-                    if !is_photohelper_keyword(kw) {
-                        user_kws.insert(kw.clone());
-                    }
-                }
-            }
-            for kw in incoming_set {
-                user_kws.insert(kw.clone());
-            }
+            let mut user_kws: BTreeSet<String> = existing
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|k| !is_photohelper_keyword(k))
+                .collect();
+            user_kws.extend(incoming_set.iter().cloned());
             Some(user_kws)
         }
     }
@@ -182,16 +217,16 @@ pub struct SidecarSettings {
     shadows: Option<i32>,
     auto_tone: Option<bool>,
     // ph: namespace
-    nima_score: Option<f32>,
-    dedup_cluster_id: Option<i64>,
-    photohelper_id: Option<String>,
+    nima_score: Update<f32>,
+    dedup_cluster_id: Update<i64>,
+    photohelper_id: Update<String>,
     last_processed_at: Option<OffsetDateTime>,
     // Conflict-resolution metadata (reader-only, not set by builder).
     /// The raw `xmp:MetadataDate` from the parsed sidecar; kept separate from
     /// `ph:LastProcessedAt` so the conflict resolver can compare "external edit
     /// time" vs "our last write time" independently.
     metadata_date: Option<OffsetDateTime>,
-    /// True if any `crs:` attribute was present in the parsed XML, even if not
+    /// True if any `crs:` attribute or element was present in the parsed XML, even if not
     /// numerically parsed. Guards the (None,None) conflict path against overwriting
     /// sidecars with untracked `crs:` settings (e.g. `crs:WhiteBalance`).
     has_any_crs_attr: bool,
@@ -254,19 +289,19 @@ impl SidecarSettings {
     /// NIMA aesthetic score, if set.
     #[must_use]
     pub fn nima_score(&self) -> Option<f32> {
-        self.nima_score
+        self.nima_score.as_option().copied()
     }
 
     /// Duplicate cluster ID from the catalog, if set.
     #[must_use]
     pub fn dedup_cluster_id(&self) -> Option<i64> {
-        self.dedup_cluster_id
+        self.dedup_cluster_id.as_option().copied()
     }
 
     /// photohelper photo ID (43-char base64url), if set.
     #[must_use]
     pub fn photohelper_id(&self) -> Option<&str> {
-        self.photohelper_id.as_deref()
+        self.photohelper_id.as_option().map(|s| s.as_str())
     }
 
     /// Timestamp of the last photohelper develop pass, if set.
@@ -327,9 +362,9 @@ impl SidecarSettings {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         !self.has_crs_fields()
-            && self.nima_score.is_none()
-            && self.dedup_cluster_id.is_none()
-            && self.photohelper_id.is_none()
+            && matches!(self.nima_score, Update::Keep | Update::Clear)
+            && matches!(self.dedup_cluster_id, Update::Keep | Update::Clear)
+            && matches!(self.photohelper_id, Update::Keep | Update::Clear)
             && self.last_processed_at.is_none()
             && self.rating.is_none_or(|r| r == Rating::Unrated)
             && self.label.as_ref().is_none_or(|l| l.is_empty())
@@ -352,21 +387,32 @@ impl SidecarSettings {
         let shadows = incoming.shadows.or(self.shadows);
         let auto_tone = incoming.auto_tone.or(self.auto_tone);
 
-        let nima_score = incoming.nima_score.or(self.nima_score);
-        let dedup_cluster_id = incoming.dedup_cluster_id.or(self.dedup_cluster_id);
+        let nima_score = incoming
+            .nima_score
+            .clone()
+            .resolve(self.nima_score.clone().as_option().copied())
+            .into();
+        let dedup_cluster_id = incoming
+            .dedup_cluster_id
+            .clone()
+            .resolve(self.dedup_cluster_id.clone().as_option().copied())
+            .into();
         let photohelper_id = incoming
             .photohelper_id
             .clone()
-            .or_else(|| self.photohelper_id.clone());
+            .resolve(self.photohelper_id.clone().as_option().cloned())
+            .into();
         let last_processed_at = incoming.last_processed_at.or(self.last_processed_at);
 
         let rating = incoming.rating.or(self.rating);
 
         let label = incoming.label.clone().or_else(|| self.label.clone());
 
-        let keywords = merge_keywords(&self.keywords, &incoming.keywords);
-        let hierarchical_keywords =
-            merge_keywords(&self.hierarchical_keywords, &incoming.hierarchical_keywords);
+        let keywords = merge_keywords(self.keywords.as_ref(), incoming.keywords.as_ref());
+        let hierarchical_keywords = merge_keywords(
+            self.hierarchical_keywords.as_ref(),
+            incoming.hierarchical_keywords.as_ref(),
+        );
 
         Self {
             temperature,
@@ -430,22 +476,7 @@ impl SidecarSettings {
                 None
             }
         };
-        let nima_score = fields.nima_score.and_then(|v| {
-            if v.is_finite() {
-                Some(v.clamp(1.0, 10.0))
-            } else {
-                tracing::warn!(value = v, "ph:NimaScore is non-finite; ignoring");
-                None
-            }
-        });
-        let dedup_cluster_id = fields.dedup_cluster_id.and_then(|v| {
-            if v >= 0 {
-                Some(v)
-            } else {
-                tracing::warn!(value = v, "ph:DedupClusterId is negative; ignoring");
-                None
-            }
-        });
+
         let label = fields.label.map(|v| v.trim().to_string());
 
         Self {
@@ -462,9 +493,9 @@ impl SidecarSettings {
                 .shadows
                 .and_then(|v| validate_100("crs:Shadows2012", v)),
             auto_tone: fields.auto_tone,
-            nima_score,
-            dedup_cluster_id,
-            photohelper_id: fields.photohelper_id,
+            nima_score: fields.nima_score.into(),
+            dedup_cluster_id: fields.dedup_cluster_id.into(),
+            photohelper_id: fields.photohelper_id.into(),
             last_processed_at: fields.last_processed_at,
             metadata_date: fields.metadata_date,
             has_any_crs_attr: fields.has_any_crs_attr,
@@ -486,9 +517,9 @@ pub struct SidecarSettingsBuilder {
     highlights: Option<i32>,
     shadows: Option<i32>,
     auto_tone: Option<bool>,
-    nima_score: Option<f32>,
-    dedup_cluster_id: Option<i64>,
-    photohelper_id: Option<String>,
+    nima_score: Update<f32>,
+    dedup_cluster_id: Update<i64>,
+    photohelper_id: Update<String>,
     last_processed_at: Option<OffsetDateTime>,
     rating: Option<Rating>,
     label: Option<String>,
@@ -550,24 +581,41 @@ impl SidecarSettingsBuilder {
     /// NIMA aesthetic score.
     #[must_use]
     pub fn nima_score(mut self, v: f32) -> Self {
-        self.nima_score = Some(v);
+        self.nima_score = Update::Set(v);
+        self
+    }
+    /// Clear (delete) the NIMA aesthetic score.
+    #[must_use]
+    pub fn clear_nima_score(mut self) -> Self {
+        self.nima_score = Update::Clear;
         self
     }
 
     /// Duplicate cluster ID (must be non-negative).
     #[must_use]
     pub fn dedup_cluster_id(mut self, v: i64) -> Self {
-        self.dedup_cluster_id = Some(v);
+        self.dedup_cluster_id = Update::Set(v);
+        self
+    }
+    /// Clear (delete) the duplicate cluster ID.
+    #[must_use]
+    pub fn clear_dedup_cluster_id(mut self) -> Self {
+        self.dedup_cluster_id = Update::Clear;
         self
     }
 
     /// photohelper photo ID (43-char base64url string from `PhotoId`).
     #[must_use]
     pub fn photohelper_id(mut self, v: impl Into<String>) -> Self {
-        self.photohelper_id = Some(v.into());
+        self.photohelper_id = Update::Set(v.into());
         self
     }
-
+    /// Clear (delete) the photohelper photo ID.
+    #[must_use]
+    pub fn clear_photohelper_id(mut self) -> Self {
+        self.photohelper_id = Update::Clear;
+        self
+    }
     /// Timestamp of the last photohelper develop pass.
     #[must_use]
     pub fn last_processed_at(mut self, v: OffsetDateTime) -> Self {
@@ -643,14 +691,14 @@ impl SidecarSettingsBuilder {
                 }
             }
         }
-        if let Some(s) = self.nima_score {
+        if let Some(&s) = self.nima_score.as_option() {
             if !s.is_finite() || !(1.0..=10.0).contains(&s) {
                 return Err(Error::Validation {
                     message: format!("nima_score {s} is not finite or outside [1.0, 10.0]"),
                 });
             }
         }
-        if let Some(c) = self.dedup_cluster_id {
+        if let Some(&c) = self.dedup_cluster_id.as_option() {
             if c < 0 {
                 return Err(Error::Validation {
                     message: format!("dedup_cluster_id {c} is negative (must be >= 0)"),
@@ -658,7 +706,6 @@ impl SidecarSettingsBuilder {
             }
         }
 
-        // Normalize color label: trim and convert to String::new() if whitespace/empty
         let label = self.label.map(|v| {
             let trimmed = v.trim().to_string();
             if trimmed.is_empty() {
@@ -691,8 +738,8 @@ impl SidecarSettingsBuilder {
             set
         });
 
-        if let Some(pid) = &self.photohelper_id {
-            if !crate::writer::is_valid_xml_string(pid) {
+        if let Some(pid) = self.photohelper_id.as_option() {
+            if !crate::xml::is_valid_xml_string(pid) {
                 return Err(Error::Validation {
                     message: "photohelper_id contains invalid XML characters".to_string(),
                 });
@@ -700,7 +747,7 @@ impl SidecarSettingsBuilder {
         }
 
         if let Some(l) = &label {
-            if !crate::writer::is_valid_xml_string(l) {
+            if !crate::xml::is_valid_xml_string(l) {
                 return Err(Error::Validation {
                     message: "label contains invalid XML characters".to_string(),
                 });
@@ -709,7 +756,7 @@ impl SidecarSettingsBuilder {
 
         if let Some(kws) = &keywords {
             for kw in kws {
-                if !crate::writer::is_valid_xml_string(kw) {
+                if !crate::xml::is_valid_xml_string(kw) {
                     return Err(Error::Validation {
                         message: "keyword contains invalid XML characters".to_string(),
                     });
@@ -719,7 +766,7 @@ impl SidecarSettingsBuilder {
 
         if let Some(kws) = &hierarchical_keywords {
             for kw in kws {
-                if !crate::writer::is_valid_xml_string(kw) {
+                if !crate::xml::is_valid_xml_string(kw) {
                     return Err(Error::Validation {
                         message: "hierarchical_keyword contains invalid XML characters".to_string(),
                     });

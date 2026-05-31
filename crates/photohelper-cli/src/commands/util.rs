@@ -11,3 +11,19 @@ pub fn nima_score_to_rating_and_tier(score: f32) -> (i32, &'static str) {
         (5, "excellent")
     }
 }
+
+pub fn format_nima_score_label(score: f32) -> String {
+    format!("{score:05.2}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_nima_score_label() {
+        assert_eq!(format_nima_score_label(9.5), "09.50");
+        assert_eq!(format_nima_score_label(10.0), "10.00");
+        assert_eq!(format_nima_score_label(3.1425), "03.14");
+    }
+}

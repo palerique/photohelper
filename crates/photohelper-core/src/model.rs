@@ -674,19 +674,11 @@ impl RgbImage {
     ) -> Result<Self, Error> {
         let expected = u64::from(width.get()) * u64::from(height.get()) * 3;
         if pixels.len() as u64 != expected {
-            return Err(Error::Io {
-                path: std::path::PathBuf::new(),
-                op: "rgb-image-construct",
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "RgbImage buffer mismatch: expected {} bytes ({}x{}x3), got {}",
-                        expected,
-                        width.get(),
-                        height.get(),
-                        pixels.len()
-                    ),
-                ),
+            return Err(Error::RgbImageDimensionMismatch {
+                expected,
+                actual: pixels.len(),
+                width: width.get(),
+                height: height.get(),
             });
         }
         Ok(Self {
