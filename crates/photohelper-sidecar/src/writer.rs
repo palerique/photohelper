@@ -70,8 +70,23 @@ pub fn write_xmp(path: &SidecarPath, settings: &SidecarSettings) -> Result<(), E
     // Copy permissions from original file if it exists, to avoid inheriting umask defaults
     match std::fs::metadata(path.as_path()) {
         Ok(metadata) => {
-            if let Err(e) = std::fs::set_permissions(&tmp_path, metadata.permissions()) {
-                tracing::warn!(path = %tmp_path.display(), error = %e, "failed to copy permissions to temp file");
+            let mut perms = metadata.permissions();
+            if perms.readonly() {
+                #[allow(clippy::permissions_set_readonly_false)]
+                perms.set_readonly(false);
+            }
+            if let Err(e) = std::fs::set_permissions(&tmp_path, perms) {
+                tracing::warn!(path = %tmp_path.display(), error = %e, "[PH-PERM-COPY-FAIL] failed to inherit permissions");
+            }
+
+            #[cfg(windows)]
+            {
+                if metadata.permissions().readonly() {
+                    let mut target_perms = metadata.permissions();
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    target_perms.set_readonly(false);
+                    let _ = std::fs::set_permissions(path.as_path(), target_perms);
+                }
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -134,6 +149,10 @@ pub(crate) fn render_xmp(settings: &SidecarSettings) -> Result<String, Error> {
     }
     if let Some(t) = settings.tint() {
         attrs.push_str(&format!("\n      crs:Tint=\"{t}\""));
+    }
+    if let Some(b) = settings.auto_tone() {
+        let val = if b { "True" } else { "False" };
+        attrs.push_str(&format!("\n      crs:AutoTone=\"{val}\""));
     }
     if let Some(e) = settings.exposure() {
         attrs.push_str(&format!("\n      crs:Exposure2012=\"{e:.2}\""));
@@ -239,6 +258,7 @@ pub fn is_valid_xml_char(c: char) -> bool {
 }
 
 /// Returns true if the string contains only valid XML 1.0 characters.
+#[allow(dead_code)]
 pub fn is_valid_xml_string(s: &str) -> bool {
     s.chars().all(is_valid_xml_char)
 }

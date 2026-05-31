@@ -25,13 +25,19 @@ use crate::Cli;
 use crate::exit_code;
 use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
 
-/// Position of watermark (bottom-left or top-right).
+/// Position of watermark.
 #[derive(clap::ValueEnum, Clone, Debug, Copy, PartialEq, Eq)]
 pub(crate) enum CliWatermarkPosition {
     #[value(name = "bottom-left")]
     BottomLeft,
     #[value(name = "top-right")]
     TopRight,
+    #[value(name = "top-left")]
+    TopLeft,
+    #[value(name = "bottom-right")]
+    BottomRight,
+    #[value(name = "center")]
+    Center,
 }
 
 impl From<CliWatermarkPosition> for WatermarkPosition {
@@ -39,7 +45,58 @@ impl From<CliWatermarkPosition> for WatermarkPosition {
         match pos {
             CliWatermarkPosition::BottomLeft => WatermarkPosition::BottomLeft,
             CliWatermarkPosition::TopRight => WatermarkPosition::TopRight,
+            CliWatermarkPosition::TopLeft => WatermarkPosition::TopLeft,
+            CliWatermarkPosition::BottomRight => WatermarkPosition::BottomRight,
+            CliWatermarkPosition::Center => WatermarkPosition::Center,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BadgeArg {
+    pub path: PathBuf,
+    pub pos: WatermarkPosition,
+    pub scale: Option<f32>,
+}
+
+impl std::str::FromStr for BadgeArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut path = None;
+        let mut pos = None;
+        let mut scale = None;
+
+        for part in s.split(',') {
+            let Some((k, v)) = part.split_once('=') else {
+                return Err(format!("Invalid badge arg part (expected k=v): {part}"));
+            };
+            match k {
+                "path" => path = Some(PathBuf::from(v)),
+                "pos" => {
+                    pos = Some(match v {
+                        "bottom-left" => WatermarkPosition::BottomLeft,
+                        "top-right" => WatermarkPosition::TopRight,
+                        "top-left" => WatermarkPosition::TopLeft,
+                        "bottom-right" => WatermarkPosition::BottomRight,
+                        "center" => WatermarkPosition::Center,
+                        _ => return Err(format!("Invalid position: {v}")),
+                    });
+                }
+                "scale" => {
+                    scale = Some(
+                        v.parse::<f32>()
+                            .map_err(|e| format!("Invalid scale: {e}"))?,
+                    );
+                }
+                _ => return Err(format!("Unknown badge parameter: {k}")),
+            }
+        }
+
+        let path = path.ok_or_else(|| "Missing path in --badge".to_string())?;
+        let pos = pos.ok_or_else(|| "Missing pos in --badge".to_string())?;
+
+        Ok(Self { path, pos, scale })
     }
 }
 
@@ -63,9 +120,13 @@ pub(crate) struct ExportArgs {
     #[arg(long)]
     pub(crate) watermark: Option<String>,
 
-    /// Position of watermark (bottom-left or top-right).
+    /// Position of watermark text (e.g. bottom-left, top-right).
     #[arg(long, default_value = "bottom-left")]
     pub(crate) watermark_position: CliWatermarkPosition,
+
+    /// Image badge watermark. Format: path=<PATH>,pos=<POS>[,scale=<PCT>]
+    #[arg(long = "badge")]
+    pub(crate) badges: Vec<BadgeArg>,
 
     /// Minimum rating to export (0..=5).
     #[arg(long, default_value = "3", value_parser = clap::value_parser!(u8).range(0..=5))]
@@ -190,12 +251,14 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             .join("catalog.db")
     });
 
-    let catalog = Catalog::open(&catalog_path, cli.catalog_lock_timeout_seconds)
-        .with_context(|| format!("opening catalog at {}", catalog_path.display()))?;
+    let rows = {
+        let catalog = Catalog::open(&catalog_path, cli.catalog_lock_timeout_seconds)
+            .with_context(|| format!("opening catalog at {}", catalog_path.display()))?;
 
-    let rows = catalog
-        .all_photos_with_cull_scores(MODEL_SLUG, CLIP_MODEL_SLUG)
-        .with_context(|| "querying catalog for active photos")?;
+        catalog
+            .all_photos_with_cull_scores(MODEL_SLUG, CLIP_MODEL_SLUG)
+            .with_context(|| "querying catalog for active photos")?
+    };
 
     if rows.is_empty() {
         eprintln!(
@@ -205,8 +268,8 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
     }
 
     // 3. Deterministic Collision Resolution
-    let mut seen_targets = std::collections::HashSet::new();
     let mut collision_map = HashMap::new();
+    let mut stem_counts: HashMap<PathBuf, usize> = HashMap::new();
 
     for row in &rows {
         let source_path = row.source_path();
@@ -235,36 +298,37 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
         let mut candidate = args.output.join(&base_name);
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let mut target_key = PathBuf::from(candidate.to_string_lossy().to_lowercase());
+        let target_key = PathBuf::from(candidate.to_string_lossy().to_lowercase());
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let mut target_key = candidate.clone();
+        let target_key = candidate.clone();
 
-        if seen_targets.contains(&target_key) {
-            let mut suffix = 1;
+        let count = stem_counts.entry(target_key).or_insert(0);
+        if *count > 0 {
             let base_stem = base_name.strip_suffix(".jpg").unwrap_or(&base_name);
-            loop {
-                let suffix_name = format!("{base_stem}_{suffix}.jpg");
-                candidate = args.output.join(&suffix_name);
-
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
-                let current_key = PathBuf::from(candidate.to_string_lossy().to_lowercase());
-                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                let current_key = candidate.clone();
-
-                if !seen_targets.contains(&current_key) {
-                    target_key = current_key;
-                    break;
-                }
-                suffix += 1;
-            }
+            let suffix_name = format!("{base_stem}_{count}.jpg");
+            candidate = args.output.join(&suffix_name);
         }
+        *count += 1;
 
-        seen_targets.insert(target_key);
         collision_map.insert(source_path.to_path_buf(), candidate);
     }
 
     let stats = Arc::new(ExportStats::new());
     let cancelled = Arc::new(AtomicBool::new(false));
+
+    // 4. Preload badges
+    let mut preloaded_badges = HashMap::new();
+    for badge in &args.badges {
+        let preloaded = photohelper_export::PreloadedBadge::load(
+            &badge.path,
+            badge.scale.map(photohelper_export::Scale::new),
+        )
+        .with_context(|| format!("failed to preload badge at {}", badge.path.display()))?;
+
+        if preloaded_badges.insert(badge.pos, preloaded).is_some() {
+            anyhow::bail!("Duplicate watermark position detected: {:?}", badge.pos);
+        }
+    }
 
     // 4. Spawn Heartbeat progress thread
     let stop = Arc::new(HeartbeatStop::new());
@@ -306,15 +370,19 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             return;
         }
 
-        // Step b: effective rating evaluation
+        // Step b: effective rating and tone mapping evaluation
         let xmp_path = source_path.with_extension("xmp");
         let mut rating_val = None;
+        let mut tone_mapping = photohelper_export::ToneMappingOptions::default();
 
         if xmp_path.exists() {
             match read_xmp(&xmp_path) {
                 Ok(settings) => {
                     if let Some(r) = settings.rating() {
                         rating_val = Some(r.as_i32());
+                    }
+                    if let Some(ev) = settings.exposure() {
+                        tone_mapping.exposure_ev = ev;
                     }
                 }
                 Err(e) => {
@@ -381,14 +449,22 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
         let tmp_path = final_target_path.with_extension("tmp");
         let mut guard = TempFileGuard::new(tmp_path.clone());
 
+        let mut watermarks = HashMap::new();
+        if let Some(ref text) = args.watermark {
+            watermarks.insert(args.watermark_position.into(), photohelper_export::Watermark::Text(text.clone()));
+        }
+        for (pos, badge) in &preloaded_badges {
+            watermarks.insert(*pos, photohelper_export::Watermark::Image(badge.clone()));
+        }
+
         // Step d: invoke export_photo pipeline
         let options = ExportOptions {
             output_path: tmp_path.clone(),
             quality: args.quality,
             long_edge: args.long_edge,
-            watermark: args.watermark.clone(),
-            watermark_position: args.watermark_position.into(),
+            watermarks,
             force: args.force,
+            tone_mapping,
         };
 
         let rating = Rating::new(rating_val);
@@ -398,7 +474,7 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             nima_score,
         };
 
-        match export_photo(&options, row, &metadata) {
+        match export_photo(&options, source_path, &metadata) {
             Ok(()) => {
                 guard.commit();
                 if let Err(e) = std::fs::rename(&tmp_path, final_target_path) {
@@ -447,8 +523,11 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
     let total_failures =
         stats.file_missing.load(Ordering::Relaxed) + stats.errored.load(Ordering::Relaxed);
 
-    if args.strict && total_failures > 0 {
-        return Ok(exit_code::EX_STRICT_FAIL);
+    if total_failures > 0 {
+        if args.strict {
+            return Ok(exit_code::EX_STRICT_FAIL);
+        }
+        return Ok(exit_code::EX_PARTIAL_FAIL);
     }
 
     Ok(0)

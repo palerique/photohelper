@@ -325,3 +325,6 @@
 - **Owner**: Any future code interacting with file attributes or existence checks.
 - **Binding trigger**: Next time filesystem interaction is added or reviewed.
 - **Status**: reconciled (2026-05-31, updated `conflict.rs` to propagate non-NotFound IO errors natively and `writer.rs` to explicitly match `NotFound` and escalate other errors).
+
+### DN-029: Lightroom Label Sorting and NIMA score padding
+Lightroom native sorting by "Label Text" works lexicographically rather than numerically. To support native NIMA score sorting via labels, the CLI must pad the floating-point values with leading zeros (e.g., `09.50` instead of `9.5`). This ensures that a score of `10.00` correctly sorts after `09.99`.

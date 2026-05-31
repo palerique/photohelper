@@ -103,3 +103,24 @@ uint32_t ph_libraw_img_data_size(libraw_processed_image_t *img) {
 unsigned char *ph_libraw_img_data(libraw_processed_image_t *img) {
     return img->data;
 }
+
+/* === Declarative Options for Processing === */
+
+typedef struct {
+    int output_bps;      // 8 or 16
+    int linear_gamma;    // 1 for linear (gamm=[1.0, 1.0]), 0 for sRGB (default)
+    int no_auto_bright;  // 1 to disable auto bright
+} ph_decode_options_t;
+
+/* Run dcraw_process with explicit declarative options, replacing individual
+ * state-mutating setters per the architectural constraint. */
+int ph_libraw_dcraw_process_with_options(libraw_data_t *lr, ph_decode_options_t opts) {
+    lr->params.output_bps = opts.output_bps;
+    if (opts.linear_gamma) {
+        lr->params.gamm[0] = 1.0;
+        lr->params.gamm[1] = 1.0;
+    }
+    lr->params.no_auto_bright = opts.no_auto_bright;
+
+    return libraw_dcraw_process(lr);
+}

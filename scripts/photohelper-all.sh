@@ -62,7 +62,7 @@ echo ">>> Step 4.5: Deduplicating (Clustering)..."
 # 5. Develop
 echo ""
 echo ">>> Step 5: Developing (Writing XMP sidecars)..."
-"$ROOT_DIR/scripts/photohelper-develop.sh" --catalog "$CATALOG_DB" --all-lr --force
+"$ROOT_DIR/scripts/photohelper-develop.sh" --catalog "$CATALOG_DB" --lr-rating --lr-keywords --force
 
 # 6. Export
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")

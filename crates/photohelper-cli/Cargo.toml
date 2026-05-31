@@ -33,6 +33,7 @@ num_cpus.workspace = true
 rusqlite.workspace = true
 time.workspace = true
 dunce = "1.0.5"
+unicode-normalization = "0.1.25"
 
 [dev-dependencies]
 assert_cmd.workspace = true

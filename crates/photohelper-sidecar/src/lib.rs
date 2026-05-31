@@ -43,13 +43,15 @@ mod path;
 mod reader;
 mod settings;
 mod writer;
+mod xml;
 
 pub use crate::conflict::{ConflictStrategy, WriteOutcome, merge_and_write};
 pub use error::Error;
 pub use path::SidecarPath;
 pub use reader::read_xmp;
 pub use settings::{Rating, SidecarSettings, SidecarSettingsBuilder};
-pub use writer::{is_valid_xml_string, write_xmp};
+pub use writer::write_xmp;
+pub use xml::is_valid_xml_string;
 
 use static_assertions::assert_impl_all;
 assert_impl_all!(SidecarSettings: Send, Sync);
@@ -130,6 +132,17 @@ mod tests {
             .expect("valid settings must build");
         assert_eq!(s.temperature(), Some(5500));
         assert_eq!(s.nima_score(), Some(7.25));
+    }
+
+    #[test]
+    fn auto_tone_propagates_to_has_crs_fields() {
+        let s1 = SidecarSettings::builder().auto_tone(true).build().unwrap();
+        assert!(s1.has_crs_fields());
+        assert_eq!(s1.auto_tone(), Some(true));
+
+        let s2 = SidecarSettings::builder().auto_tone(false).build().unwrap();
+        assert!(s2.has_crs_fields());
+        assert_eq!(s2.auto_tone(), Some(false));
     }
 
     // ── Sidecar path convention ───────────────────────────────────────────
@@ -249,6 +262,36 @@ mod tests {
     }
 
     #[test]
+    fn read_auto_tone() {
+        let xml_true = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:AutoTone="True" />
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s1 = reader::parse_xmp_str(xml_true, Path::new("test.xmp")).unwrap();
+        assert_eq!(s1.auto_tone(), Some(true));
+
+        let xml_false = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:AutoTone="False" />
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s2 = reader::parse_xmp_str(xml_false, Path::new("test.xmp")).unwrap();
+        assert_eq!(s2.auto_tone(), Some(false));
+
+        let xml_invalid = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:AutoTone="1" />
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        let s3 = reader::parse_xmp_str(xml_invalid, Path::new("test.xmp")).unwrap();
+        assert_eq!(s3.auto_tone(), None);
+    }
+
+    #[test]
     fn read_malformed_temperature_warns_and_returns_none() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
@@ -342,7 +385,7 @@ mod tests {
       <crs:Temperature>not-an-int</crs:Temperature>
       <crs:Exposure2012>not-a-float</crs:Exposure2012>
       <ph:NimaScore>not-a-finite-score</ph:NimaScore>
-      <ph:DedupClusterId>-123</ph:DedupClusterId>
+      <ph:DedupClusterId>not-an-int</ph:DedupClusterId>
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>"#;

@@ -40,6 +40,11 @@ pub struct RunArgs {
     #[arg(long, default_value_t = false)]
     pub lr_label: bool,
 
+    /// Write the exact NIMA score into the Lightroom color label field (e.g. '09.50').
+    /// This enables native Lightroom sorting by 'Label Text'.
+    #[arg(long, default_value_t = false, conflicts_with = "lr_label")]
+    pub lr_label_score: bool,
+
     /// Map duplicates to keywords for Lightroom Smart Collections.
     #[arg(long, default_value_t = false)]
     pub lr_keywords: bool,
@@ -84,6 +89,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub shadows: Option<i32>,
 
+    /// Defers to Lightroom's internal `AutoTone` engine and does not apply numerical adjustments.
+    #[arg(long, default_value_t = false)]
+    pub auto_tone: bool,
+
     /// Cosine-similarity threshold for dedup clustering (0.0, 1.0].
     #[arg(long, default_value_t = 0.95_f32, value_parser = crate::commands::dedup::parse_similarity_threshold)]
     pub similarity_threshold: f32,
@@ -95,6 +104,10 @@ pub struct RunArgs {
     /// Position of watermark (bottom-left or top-right).
     #[arg(long, default_value = "bottom-left")]
     pub watermark_position: CliWatermarkPosition,
+
+    /// Image badge watermark. Format: path=<PATH>,pos=<POS>[,scale=<PCT>]
+    #[arg(long = "badge")]
+    pub badges: Vec<crate::commands::export::BadgeArg>,
 
     /// Set export JPEG quality (1-100).
     #[arg(long, default_value_t = 80, value_parser = clap::value_parser!(u8).range(1..=100))]
@@ -185,10 +198,12 @@ pub fn run_pipeline(
         shadows: args.shadows,
         lr_rating: args.lr_rating,
         lr_label: args.lr_label,
+        lr_label_score: args.lr_label_score,
         lr_keywords: args.lr_keywords,
         all_lr: args.all_lr,
         lr_label_red: args.lr_label_red.clone(),
         lr_label_green: args.lr_label_green.clone(),
+        auto_tone: args.auto_tone,
     };
 
     let export_args = ExportArgs {
@@ -197,6 +212,7 @@ pub fn run_pipeline(
         quality: args.quality,
         watermark: args.watermark.clone(),
         watermark_position: args.watermark_position,
+        badges: args.badges.clone(),
         min_rating: args.min_rating,
         force: args.force,
         strict: args.strict,

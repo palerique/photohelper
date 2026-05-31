@@ -1243,6 +1243,7 @@ fn develop_cli_flags_written_to_sidecar() {
             "5500",
             "--exposure",
             "1.50",
+            "--auto-tone",
         ])
         .assert()
         .code(0);
@@ -1256,6 +1257,30 @@ fn develop_cli_flags_written_to_sidecar() {
         xml.contains("crs:Exposure2012=\"1.50\""),
         "Exposure must be in sidecar"
     );
+    assert!(
+        xml.contains("crs:AutoTone=\"True\""),
+        "AutoTone must be in sidecar"
+    );
+}
+
+#[test]
+fn develop_strict_exits_nonzero_on_xml_parse_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    // Write malformed XML to the sidecar.
+    std::fs::write(&xmp, "<x:xmpmeta><unclosed tag></x:xmpmeta>").unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--strict"])
+        .assert()
+        .code(1) // EX_STRICT_FAIL = 1
+        .stderr(contains("errored: 1"));
 }
 
 #[test]
@@ -1499,8 +1524,8 @@ fn develop_clean_isolation_by_default() {
         .args(["--catalog", cat_str, "develop"])
         .assert()
         .code(0)
-        .stderr(predicates::str::contains(
-            "WARNING: photohelper develop is running without any metadata flags activated.",
+        .stderr(contains(
+            "WARNING: photohelper develop is running without any Lightroom NIMA mapping flags activated.",
         ));
 
     let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
@@ -1918,6 +1943,28 @@ fn export_strict_cancellation_on_missing_file() {
 // =====================================================================
 // Lightroom Sync Improvement tests (Session 09).
 // =====================================================================
+
+#[test]
+fn develop_all_lr_and_lr_label_score() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let _cr3 = ingest_fake_cr3(cat_str, tmp.path());
+
+    // Both flags can coexist without a Clap conflict.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_str,
+            "develop",
+            "--all-lr",
+            "--lr-label-score",
+        ])
+        .assert()
+        .success();
+}
 
 #[test]
 fn develop_shorthand_all_lr() {
@@ -2474,4 +2521,73 @@ fn run_negative_behavioral_min_rating_skip() {
         exported_jpegs.is_empty(),
         "JPEG must not be exported due to rating threshold"
     );
+}
+
+#[test]
+fn develop_lr_label_score_conflicts_with_lr_label() {
+    let mut cmd = Command::cargo_bin("photohelper").unwrap();
+    cmd.args(["develop", "--lr-label", "--lr-label-score"]);
+
+    cmd.assert()
+        .failure()
+        .stderr(contains("cannot be used with"));
+}
+
+#[test]
+fn develop_auto_tone_and_lr_label_score() {
+    let input_dir = tempfile::TempDir::new().unwrap();
+    let cat_dir = tempfile::TempDir::new().unwrap();
+    let cat_path = cat_dir.path().join("catalog.db");
+
+    // Create a RAW file
+    let raw_path = input_dir.path().join("photo.cr3");
+    std::fs::write(&raw_path, b"dummy raw").unwrap();
+
+    {
+        let _db = photohelper_catalog::Catalog::open(&cat_path, 5).unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&cat_path).unwrap();
+        conn.execute(
+            "INSERT INTO photos (
+                id, source_path, file_size, mtime_unix_seconds, mtime_anomalous, ingested_at_unix_seconds
+            ) VALUES (?1, ?2, 100, 0, 0, 0)",
+            rusqlite::params![&b"0123456789abcdef0123456789abcdef"[..], raw_path.to_str().unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) VALUES (?1, 'nima-aesthetic-v1', 8.25, 0)",
+            rusqlite::params![&b"0123456789abcdef0123456789abcdef"[..]],
+        )
+        .unwrap();
+    }
+
+    let output = Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "develop",
+            "--auto-tone",
+            "--lr-label-score",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "Command failed!\nstderr:\n{stderr}"
+    );
+    println!("Command stderr: {stderr}");
+
+    let xmp_path = raw_path.with_extension("xmp");
+    assert!(xmp_path.exists());
+    let xmp_content = std::fs::read_to_string(xmp_path).unwrap();
+    println!("XMP CONTENT:\n{xmp_content}");
+
+    assert!(xmp_content.contains("crs:AutoTone=\"True\""));
+    // Score should be 8.25 (rounded) and zero-padded to 08.25
+    assert!(xmp_content.contains("xmp:Label=\"08.25\""));
 }

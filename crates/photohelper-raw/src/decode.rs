@@ -131,31 +131,79 @@ pub fn read_raw(path: &Path) -> Result<RawImage, Error> {
     ffi::parse_libraw_image(&raw_path)
 }
 
+/// Options for processing the image with `libraw_dcraw_process`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessOptions {
+    /// Standard 8-bit sRGB demosaic (used by AI pipeline).
+    Srgb8,
+    /// 16-bit linear demosaic (used by Export pipeline).
+    Linear16,
+}
+
+/// A decoded, processed image buffer with verified spatial bounds.
+#[derive(Debug)]
+pub struct ImageBuffer<T> {
+    /// The raw pixel data.
+    pub data: Vec<T>,
+    /// The width of the image.
+    pub width: NonZeroU32,
+    /// The height of the image.
+    pub height: NonZeroU32,
+    /// Number of color channels (e.g. 3 for RGB).
+    pub channels: u8,
+}
+
+assert_impl_all!(ImageBuffer<u8>: Send, Sync);
+assert_impl_all!(ImageBuffer<u16>: Send, Sync);
+
+/// Represents the possible outputs of `decode_image`.
+#[derive(Debug)]
+pub enum ProcessedImage {
+    /// 8-bit per channel output (usually sRGB).
+    Rgb8(ImageBuffer<u8>),
+    /// 16-bit per channel output (usually linear).
+    Linear16(ImageBuffer<u16>),
+}
+
 /// Decode a Canon CR3 (or other LibRaw-supported RAW) file via the
-/// AHD demosaic pipeline and return a demosaiced 8-bit sRGB [`RgbImage`].
+/// AHD demosaic pipeline and return a processed image based on `options`.
 ///
-/// Calls `libraw_dcraw_process` (default parameters: AHD demosaic,
-/// 8-bit output) then `libraw_dcraw_make_mem_image`. The resulting pixel
-/// buffer is copied into Rust-owned memory before the LibRaw handle is
-/// released; no raw pointers survive the call.
-///
-/// This is the entry point for the AI culling pipeline (session 04 §D1e):
-/// the returned `RgbImage` is resized to 224×224 and fed to the NIMA model
-/// by `photohelper_ai::nima::Nima::score`.
+/// Calls `libraw_dcraw_process` then `libraw_dcraw_make_mem_image`. The
+/// resulting pixel buffer is copied into Rust-owned memory before the LibRaw
+/// handle is released; no raw pointers survive the call.
 ///
 /// # Errors
 ///
-/// Returns [`crate::Error::RawDecodeFailed`] with
-/// [`crate::RawDecodeCause::RgbConversionFailed`] if LibRaw produces
-/// output that is not 8-bit 3-channel sRGB. Other [`crate::Error`]
-/// variants cover path-validation, LibRaw API failures, and dimension
-/// mismatches.
-pub fn read_raw_rgb(path: &Path) -> Result<RgbImage, Error> {
-    // TD-012: AHD demosaic stop-gap — the algorithm is the LibRaw default for
-    // non-Fuji Bayer sensors; upgrade to configurable pipeline when DxO-quality
-    // demosaic lands. See TECH-DEBT.md § TD-012.
+/// Returns [`crate::Error::RawDecodeFailed`] if LibRaw produces
+/// unexpected output or memory allocation fails. Other [`crate::Error`]
+/// variants cover path-validation and LibRaw API failures.
+pub fn decode_image(path: &Path, options: ProcessOptions) -> Result<ProcessedImage, Error> {
     let raw_path = RawPath::new(path)?;
-    ffi::parse_libraw_rgb_image(&raw_path)
+    ffi::parse_processed_image(&raw_path, options)
+}
+
+/// Compatibility wrapper for the AI culling pipeline (session 04 §D1e).
+/// It calls `decode_image` with `ProcessOptions::Srgb8` and maps the
+/// `ImageBuffer<u8>` into an `RgbImage`.
+pub fn read_raw_rgb(path: &Path) -> Result<RgbImage, Error> {
+    match decode_image(path, ProcessOptions::Srgb8)? {
+        ProcessedImage::Rgb8(buf) => {
+            RgbImage::new(buf.data, buf.width, buf.height).map_err(|_| Error::RawDecodeFailed {
+                path: path.to_path_buf(),
+                cause: RawDecodeCause::LibRawCallFailed {
+                    libraw_code: 0,
+                    op: "pixel buffer length != width*height*3",
+                },
+            })
+        }
+        ProcessedImage::Linear16(_) => Err(Error::RawDecodeFailed {
+            path: path.to_path_buf(),
+            cause: RawDecodeCause::RgbConversionFailed {
+                bits: 16,
+                colors: 3,
+            },
+        }),
+    }
 }
 
 /// The raw Bayer-pattern sensor buffer plus its dimensions, with the

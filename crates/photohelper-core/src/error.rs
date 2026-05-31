@@ -42,6 +42,21 @@ pub enum Error {
         source: BoxedSourceError,
     },
 
+    /// The provided pixel buffer length does not match `width * height * 3`.
+    #[error(
+        "RgbImage buffer mismatch: expected {expected} bytes ({width}x{height}x3), got {actual}"
+    )]
+    RgbImageDimensionMismatch {
+        /// Expected size (`width * height * 3`)
+        expected: u64,
+        /// Actual size of the provided buffer.
+        actual: usize,
+        /// Specified width.
+        width: u32,
+        /// Specified height.
+        height: u32,
+    },
+
     /// File too small to derive a meaningful `PhotoId` (e.g., zero bytes).
     #[error("hash window too small for {path} (file size = {len})")]
     HashWindowTooSmall {
