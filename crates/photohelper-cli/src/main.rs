@@ -218,7 +218,7 @@ fn main() -> ExitCode {
 
 fn stub(name: &str) -> ExitCode {
     eprintln!(
-        "photohelper {name}: not yet implemented in v0.1 (ingest only); \
+        "photohelper {name}: not yet implemented in v0.1; \
          see README.md for the current scope."
     );
     ExitCode::from(exit_code::EX_UNAVAILABLE)

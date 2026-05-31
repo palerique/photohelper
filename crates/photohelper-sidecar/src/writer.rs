@@ -16,6 +16,9 @@ use crate::settings::SidecarSettings;
 /// best-effort. If any step fails the temp file is removed and the original
 /// (if any) is preserved.
 ///
+/// **Physical mtime alignment**: On successful write, the physical filesystem modification time
+/// (`mtime`) is set to match `ph:LastProcessedAt` exactly to prevent false conflict triggers.
+///
 /// Core namespaces (such as `crs:` and `xmp:`) are always emitted on `rdf:Description`,
 /// while conditional namespaces (such as `dc:` and `lr:`) are declared only when their
 /// respective collections are non-empty.
@@ -58,7 +61,17 @@ pub fn write_xmp(path: &Path, settings: &SidecarSettings) -> Result<(), Error> {
             path: path.to_path_buf(),
             source: e,
         }
-    })
+    })?;
+
+    // Align filesystem modification time (mtime) with ph:LastProcessedAt exactly.
+    if let Some(dt) = settings.last_processed_at() {
+        let ft = filetime::FileTime::from_unix_time(dt.unix_timestamp(), dt.nanosecond());
+        if let Err(e) = filetime::set_file_mtime(path, ft) {
+            tracing::warn!(path = %path.display(), error = %e, "failed to set physical file mtime to match last_processed_at");
+        }
+    }
+
+    Ok(())
 }
 
 /// Render XMP as a UTF-8 string.

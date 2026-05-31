@@ -64,7 +64,8 @@ def estimate_codebase_tokens():
     for f in tracked_files.splitlines():
         if os.path.exists(f) and os.path.isfile(f):
             # Ignore path patterns
-            if any(p in f for p in ["target/", "vendor/", "Cargo.lock", ".git/"]):
+            f_norm = f.replace("\\", "/")
+            if any(p in f_norm for p in ["target/", "vendor/", "Cargo.lock", ".git/"]):
                 continue
             # Ignore binary extensions
             if any(f.lower().endswith(ext) for ext in binary_extensions):
@@ -77,7 +78,7 @@ def estimate_codebase_tokens():
 
 def get_brain_metrics():
     # Find brain folders
-    brain_dir = "/Users/ph/.gemini/antigravity-cli/brain"
+    brain_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain")
     if not os.path.exists(brain_dir):
         return None
 
@@ -92,7 +93,8 @@ def get_brain_metrics():
     # Sort by modification time to find the active conversation
     log_files.sort(key=os.path.getmtime, reverse=True)
     active_log = log_files[0]
-    conv_id = active_log.split("/")[-4]
+    parts = os.path.normpath(active_log).split(os.sep)
+    conv_id = parts[-4] if len(parts) >= 4 else "unknown"
 
     # Parse transcript to estimate tokens and costs
     input_tokens = 0

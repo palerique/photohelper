@@ -330,7 +330,7 @@ fn stub_subcommands_exit_69_with_not_yet_implemented_message() {
             .arg(name)
             .assert()
             .code(69)
-            .stderr(contains("not yet implemented in v0.1 (ingest only)"));
+            .stderr(contains("not yet implemented in v0.1"));
     }
 }
 
@@ -1493,13 +1493,15 @@ fn develop_clean_isolation_by_default() {
     let cr3 = ingest_fake_cr3(cat_str, tmp.path());
     let xmp = cr3.with_extension("xmp");
 
-    // Default develop without LR flags should write sidecar but omit Lightroom tags if they weren't in existing
     Command::cargo_bin("photohelper")
         .unwrap()
         .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
         .args(["--catalog", cat_str, "develop"])
         .assert()
-        .code(0);
+        .code(0)
+        .stderr(predicates::str::contains(
+            "WARNING: photohelper develop is running without any metadata flags activated.",
+        ));
 
     let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
     assert!(
@@ -1914,4 +1916,263 @@ fn export_strict_cancellation_on_missing_file() {
         .assert()
         .code(1)
         .stderr(predicates::str::contains("file-missing: 1"));
+}
+
+// =====================================================================
+// Lightroom Sync Improvement tests (Session 09).
+// =====================================================================
+
+#[test]
+fn develop_shorthand_all_lr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    {
+        let conn = rusqlite::Connection::open(&cat_path).unwrap();
+        let photo_id: Vec<u8> = conn
+            .query_row("SELECT id FROM photos LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        // 8.0 is < 8.5, so it maps to Rating::Four (4) and "good" keyword
+        conn.execute(
+            "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![photo_id, "nima-aesthetic-v1", 8.0, 1_700_000_000],
+        )
+        .unwrap();
+    }
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--all-lr"])
+        .assert()
+        .code(0);
+
+    let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
+    assert!(
+        xml.contains("xmp:Rating=\"4\""),
+        "Rating should be written via --all-lr"
+    );
+    assert!(
+        xml.contains("xmp:Label=\"Green\""),
+        "Label should be written via --all-lr"
+    );
+    assert!(
+        xml.contains("<rdf:li>nima:good</rdf:li>"),
+        "Keywords should be written via --all-lr"
+    );
+}
+
+#[test]
+fn develop_custom_labels() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    {
+        let conn = rusqlite::Connection::open(&cat_path).unwrap();
+        let photo_id: Vec<u8> = conn
+            .query_row("SELECT id FROM photos LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        // Low rating to ensure red label
+        conn.execute(
+            "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![photo_id, "nima-aesthetic-v1", 3.0, 1_700_000_000],
+        )
+        .unwrap();
+    }
+
+    // Set custom red label via env var, and green label via CLI argument
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .env("PHOTOHELPER_LR_LABEL_RED", "Vermelho")
+        .args([
+            "--catalog",
+            cat_str,
+            "develop",
+            "--lr-label",
+            "--lr-label-green",
+            "Verde",
+        ])
+        .assert()
+        .code(0);
+
+    let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
+    assert!(
+        xml.contains("xmp:Label=\"Vermelho\""),
+        "Custom red label should be written"
+    );
+}
+
+#[test]
+fn develop_custom_labels_upfront_validation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+
+    // 1. Colliding labels (exits 74 EX_IOERR for fatal configuration bails)
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args([
+            "--catalog",
+            cat_str,
+            "develop",
+            "--lr-label",
+            "--lr-label-red",
+            "Same",
+            "--lr-label-green",
+            "Same",
+        ])
+        .assert()
+        .code(74)
+        .stderr(predicates::str::contains(
+            "invalid custom color label: 'Red' and 'Green' labels must be distinct",
+        ));
+
+    // 2. Empty/whitespace red label
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args([
+            "--catalog",
+            cat_str,
+            "develop",
+            "--lr-label",
+            "--lr-label-red",
+            "   ",
+        ])
+        .assert()
+        .code(74)
+        .stderr(predicates::str::contains(
+            "invalid custom color label: 'Red' label cannot be empty",
+        ));
+
+    // 3. Illegal XML character validation
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .args([
+            "--catalog",
+            cat_str,
+            "develop",
+            "--lr-label",
+            "--lr-label-red",
+            "Red\x01Label",
+        ])
+        .assert()
+        .code(74)
+        .stderr(predicates::str::contains(
+            "invalid custom color label: 'Red' label contains illegal XML characters",
+        ));
+}
+
+#[test]
+fn develop_mtime_conflict_shield() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+    let xmp = cr3.with_extension("xmp");
+
+    // Write initial sidecar to set up ph:LastProcessedAt
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "develop", "--all-lr"])
+        .assert()
+        .code(0);
+
+    // Verify sidecar exists
+    assert!(xmp.exists());
+
+    // Wait a brief moment, then simulate an external tool edit by touching the modification time of the sidecar file forward.
+    let mtime = std::fs::metadata(&xmp).unwrap().modified().unwrap();
+    let forward_mtime = mtime + std::time::Duration::from_secs(5);
+    filetime::set_file_mtime(&xmp, filetime::FileTime::from_system_time(forward_mtime)).unwrap();
+
+    // Now run develop again with verbose flag -v. It should preserve the sidecar as conflict_preserved because file's mtime is newer.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["-v", "--catalog", cat_str, "develop", "--all-lr"])
+        .assert()
+        .code(0)
+        .stderr(predicates::str::contains(
+            "Preserved newer Lightroom Classic edits; skipped",
+        ))
+        .stderr(predicates::str::contains(
+            "1 files were skipped to protect Lightroom Classic manual edits",
+        ))
+        .stderr(predicates::str::contains(
+            "If you want to unconditionally force overwrite, re-run with --force.",
+        ));
+}
+
+#[test]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn develop_case_insensitive_path_deduplication() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+
+    // Ingest first photo row (e.g. photo.cr3)
+    let cr3_lower = tmp.path().join("photo.cr3");
+    std::fs::write(&cr3_lower, vec![0xCCu8; 200]).unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["--catalog", cat_str, "ingest", tmp.path().to_str().unwrap()])
+        .assert()
+        .code(0);
+
+    // Let's manually inject a duplicate photo row into the db with different casing targeting the same sidecar path.
+    // e.g. "PHOTO.cr3".
+    {
+        let conn = rusqlite::Connection::open(&cat_path).unwrap();
+        let (mut id, file_size, mtime, anomalous, ingested_at): (Vec<u8>, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT id, file_size, mtime_unix_seconds, mtime_anomalous, ingested_at_unix_seconds FROM photos LIMIT 1",
+                [],
+                |r| Ok((r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap(), r.get(3).unwrap(), r.get(4).unwrap())),
+            )
+            .unwrap();
+
+        // Ensure we generate a unique PRIMARY KEY by flipping the first byte.
+        if let Some(first) = id.get_mut(0) {
+            *first ^= 1;
+        }
+
+        // Inject path with duplicate/upper casing pointing to the same file location on case-insensitive filesystems
+        let cr3_upper = std::fs::canonicalize(tmp.path()).unwrap().join("PHOTO.cr3");
+        let cr3_upper_str = cr3_upper.to_string_lossy().to_string();
+
+        conn.execute(
+            "INSERT INTO photos (
+                id, source_path, file_size, mtime_unix_seconds,
+                mtime_anomalous, make, model, camera_slug,
+                capture_time_unix_seconds, width, height,
+                exif_orientation, ingested_at_unix_seconds,
+                superseded_at_unix_seconds
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?6, NULL)",
+            rusqlite::params![id, cr3_upper_str, file_size, mtime, anomalous, ingested_at],
+        )
+        .unwrap();
+    }
+
+    // Now run develop subcommand with verbose logging. It should trigger the warning about skipping duplicate photo row to prevent race conditions.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(["-v", "--catalog", cat_str, "develop", "--all-lr"])
+        .assert()
+        .code(0)
+        .stderr(predicates::str::contains(
+            "skipping duplicate photo row targeting the same sidecar path to prevent concurrent write race hazards",
+        ));
 }

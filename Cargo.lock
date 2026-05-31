@@ -1100,6 +1100,7 @@ dependencies = [
 name = "photohelper-sidecar"
 version = "0.0.0"
 dependencies = [
+ "filetime",
  "quick-xml",
  "static_assertions",
  "tempfile",

@@ -8,7 +8,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
 
 use anyhow::Context as _;
 
@@ -59,10 +58,18 @@ pub(crate) struct DevelopArgs {
     /// Write photohelper keywords (tier/cluster) based on NIMA score and duplicate cluster ID.
     #[arg(long, default_value_t = false)]
     lr_keywords: bool,
+    /// Write rating, label, and keywords (convenience shorthand).
+    #[arg(long, default_value_t = false)]
+    all_lr: bool,
+    /// Custom Lightroom color label for 'Red' (NIMA < 4.0)
+    #[arg(long, env = "PHOTOHELPER_LR_LABEL_RED", default_value = "Red")]
+    lr_label_red: String,
+    /// Custom Lightroom color label for 'Green' (NIMA >= 7.0)
+    #[arg(long, env = "PHOTOHELPER_LR_LABEL_GREEN", default_value = "Green")]
+    lr_label_green: String,
 }
 
-/// AtomicU64 counters for the develop pipeline summary.
-/// AtomicU64 used for heartbeat-thread cross-thread visibility (not rayon parallelism).
+/// AtomicU64 counters used for concurrent updates by Rayon parallel threads and safe cross-thread visibility for the heartbeat loop.
 struct DevelopStats {
     walked: AtomicU64,
     /// WriteOutcome::Created — new sidecar file.
@@ -107,12 +114,61 @@ impl DevelopStats {
     }
 }
 
+fn is_valid_xml_string(s: &str) -> bool {
+    s.chars().all(|c| {
+        let val = c as u32;
+        let is_valid_xml_char = (0x20..=0xD7FF).contains(&val)
+            || val == 0x09
+            || val == 0x0A
+            || val == 0x0D
+            || (0xE000..=0xFFFD).contains(&val)
+            || (0x10000..=0x10_FFFF).contains(&val);
+        let is_noncharacter = (0xFDD0..=0xFDEF).contains(&val) || (val & 0xFFFE) == 0xFFFE;
+        is_valid_xml_char && !is_noncharacter
+    })
+}
+
 /// Driver for `photohelper develop`.
 ///
 /// # Errors
 ///
 /// Returns `Err` only for fatal setup failures (catalog open, photo query, heartbeat spawn).
 pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
+    let lr_rating = args.all_lr || args.lr_rating;
+    let lr_label = args.all_lr || args.lr_label;
+    let lr_keywords = args.all_lr || args.lr_keywords;
+
+    let red_trimmed = args.lr_label_red.trim();
+    let green_trimmed = args.lr_label_green.trim();
+
+    if lr_label {
+        if red_trimmed.is_empty() {
+            anyhow::bail!(
+                "invalid custom color label: 'Red' label cannot be empty or whitespace-only"
+            );
+        }
+        if green_trimmed.is_empty() {
+            anyhow::bail!(
+                "invalid custom color label: 'Green' label cannot be empty or whitespace-only"
+            );
+        }
+        if red_trimmed == green_trimmed {
+            anyhow::bail!(
+                "invalid custom color label: 'Red' and 'Green' labels must be distinct (got '{red_trimmed}')"
+            );
+        }
+        if !is_valid_xml_string(red_trimmed) {
+            anyhow::bail!(
+                "invalid custom color label: 'Red' label contains illegal XML characters"
+            );
+        }
+        if !is_valid_xml_string(green_trimmed) {
+            anyhow::bail!(
+                "invalid custom color label: 'Green' label contains illegal XML characters"
+            );
+        }
+    }
+
     // Validate command-line parameters up-front before doing database locks or starting workers.
     {
         let mut builder = SidecarSettings::builder();
@@ -188,12 +244,20 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     let has_any_cull_score = rows.iter().any(|r| r.nima_score().is_some());
     let has_any_cluster = rows.iter().any(|r| r.dedup_cluster_id().is_some());
 
-    if (args.lr_rating || args.lr_label) && !has_any_cull_score {
+    if !lr_rating && !lr_label && !lr_keywords {
+        eprintln!(
+            "WARNING: photohelper develop is running without any metadata flags activated.\n\
+             No Lightroom rating, color label, or keywords will be written to sidecars.\n\
+             To enable metadata mapping, use the individual --lr-* flags or pass --all-lr."
+        );
+    }
+
+    if (lr_rating || lr_label) && !has_any_cull_score {
         eprintln!(
             "WARNING: Lightroom rating/label flags were requested, but no culled scores exist in the catalog."
         );
     }
-    if args.lr_keywords && !has_any_cull_score && !has_any_cluster {
+    if lr_keywords && !has_any_cull_score && !has_any_cluster {
         eprintln!(
             "WARNING: Lightroom keywords flag was requested, but neither culled scores nor duplicate clusters exist in the catalog."
         );
@@ -228,17 +292,6 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
             })
             .context("spawning heartbeat thread")?
     };
-
-    // Check the clock once before the loop (not per-photo) to avoid log spam.
-    // A broken clock degrades conflict resolution (sidecars written without timestamps).
-    let now_utc = unix_now_as_datetime();
-    if now_utc.is_none() {
-        tracing::warn!(
-            "system clock returned a pre-epoch or invalid time; \
-             XMP sidecars will be written without timestamps — \
-             conflict resolution with Lightroom edits is degraded"
-        );
-    }
 
     // Walk in parallel using Rayon (sidecar I/O is per-photo; heartbeat reads stats cross-thread).
     rows.par_iter().for_each(|row| {
@@ -299,12 +352,14 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
         }
 
         builder = builder.photohelper_id(row.photo_id().to_string());
-        if let Some(dt) = now_utc {
-            builder = builder.last_processed_at(dt);
-        }
+
+        // Retrieve the UTC timestamp per-photo immediately before writing
+        // to completely eliminate write-buffer delay and scheduling drift.
+        let now_utc = time::OffsetDateTime::now_utc();
+        builder = builder.last_processed_at(now_utc);
 
         // Write Lightroom star ratings (1 to 5) based on NIMA score.
-        if args.lr_rating {
+        if lr_rating {
             if let Some(score) = valid_nima {
                 let rating = if score < 4.0 {
                     photohelper_sidecar::Rating::One
@@ -322,12 +377,12 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
         }
 
         // Write Lightroom color labels (Red/Green) based on NIMA score.
-        if args.lr_label {
+        if lr_label {
             if let Some(score) = valid_nima {
                 let label = if score < 4.0 {
-                    "Red"
+                    red_trimmed
                 } else if score >= 7.0 {
-                    "Green"
+                    green_trimmed
                 } else {
                     "" // Empty string clears existing label during merge
                 };
@@ -336,7 +391,7 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
         }
 
         // Write photohelper keywords (tier/cluster) based on NIMA score and duplicate cluster ID.
-        if args.lr_keywords {
+        if lr_keywords {
             let mut flat = std::collections::BTreeSet::new();
             let mut hierarchical = std::collections::BTreeSet::new();
 
@@ -387,12 +442,18 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
             }
             Ok(WriteOutcome::ConflictPreserved) => {
                 stats.conflict_preserved.fetch_add(1, Ordering::Relaxed);
+                // Log concisely at info/debug inside loop to prevent lock contention
+                tracing::info!(
+                    path = %sidecar_path.display(),
+                    "Preserved newer Lightroom Classic edits; skipped"
+                );
             }
             Ok(WriteOutcome::ForcedOverwrite) => {
                 stats.force_overwritten.fetch_add(1, Ordering::Relaxed);
             }
             Ok(other) => {
                 tracing::warn!("encountered unexpected XMP write outcome: {:?}", other);
+                stats.errored.fetch_add(1, Ordering::Relaxed);
             }
             Err(e) => {
                 tracing::warn!(path = %source_path.display(), error = %e, "XMP write failed");
@@ -412,20 +473,18 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
 
     eprintln!("{}", stats.summary_line());
 
+    let conflict_count = stats.conflict_preserved.load(Ordering::Relaxed);
+    if conflict_count > 0 {
+        eprintln!(
+            "\nWARNING: {conflict_count} files were skipped to protect Lightroom Classic manual edits.\n\
+             If you want to unconditionally force overwrite, re-run with --force."
+        );
+    }
+
     // Exit code.
     let errors = stats.file_missing.load(Ordering::Relaxed) + stats.errored.load(Ordering::Relaxed);
     if args.strict && errors > 0 {
         return Ok(exit_code::EX_STRICT_FAIL);
     }
     Ok(0)
-}
-
-/// Returns the current UTC time as a `time::OffsetDateTime`, or `None` on
-/// clock failure (highly unlikely but handle gracefully).
-fn unix_now_as_datetime() -> Option<time::OffsetDateTime> {
-    SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_secs()).ok())
-        .and_then(|s| time::OffsetDateTime::from_unix_timestamp(s).ok())
 }
