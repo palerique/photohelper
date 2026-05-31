@@ -22,7 +22,7 @@ authors = ["Paulo Henrique Lerbach Rodrigues <palerique@gmail.com>"]
 
 [workspace.dependencies]
 # CLI / observability
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"

@@ -1234,15 +1234,21 @@ cat SESSION-STATE.md
 
 ---
 
-## Checkpoint 19 — session 09 PLANNED (2026-05-30; Lightroom metadata syncing improvements)
+## Checkpoint 19 — session 09 SHIPPED (2026-05-31; Lightroom metadata syncing improvements and conflict shield)
 
-**Status**: PLANNED.
-**Author**: Antigravity session 09, planning window
+**Status**: SHIPPED. PR #12 merged to main.
+**Author**: Paulo Henrique Lerbach Rodrigues (Antigravity session 09, session-end window)
 
-### What is planned
+### What landed since Checkpoint 18
 
-**BUG-001 Mitigation & Lightroom Syncing**:
-- Add smart terminal warnings in `photohelper develop` if executed without active Lightroom metadata flags (ratings, labels, keywords) or auto-enable them.
-- Provide granular console logging warnings for every photo skipped because of Lightroom conflict preservation (`conflict-preserved`).
-- Write a comprehensive troubleshooting and sync guide under `docs/user-guide/lightroom-sync.md`.
-- Prevent localized color label mismatches by allowing standard translated color string configuration.
+**BUG-001 Mitigation & Lightroom Classic Metadata Sync Gaps**:
+- **Smart CLI Warnings & Shorthand**: Added `--all-lr` shorthand that automatically activates all three metadata fields (`lr_rating`, `lr_label`, `lr_keywords`). Added a highly visible startup warning to `stderr` if `develop` is run with no metadata fields active.
+- **High-Performance Granular Conflict Logging**: Shifted individual parallel sidecar skip logging from `tracing::warn!` to `tracing::info!`/`tracing::debug!` to completely avoid parallel terminal lock contention. Added a consolidated warning on `stderr` exactly once at the end of the run if conflicts were preserved.
+- **Type-Safe Localized Color Label Customization**: Replaced ad-hoc CSV string configurations with separate `--lr-label-red` and `--lr-label-green` arguments with upfront XML safety, non-empty, and distinct validation in `run_develop` before starting threads or catalogs.
+- **mtime-Based Fallback Conflict Shield**: Implemented filesystem `mtime` comparison against `ph:LastProcessedAt` with a 2-second safety margin to shield manual Lightroom edits that might not have updated `xmp:MetadataDate`. Added a graceful database-fallback if filesystem `mtime` retrieval fails.
+- **Precision mtime Alignment**: Explicitly updated written sidecars' physical `mtime` to match the internal `ph:LastProcessedAt` timestamp using the `filetime` crate, completely eliminating scheduling delay and OS write skews.
+- **XML Parser Resiliency**: Refactored `photohelper-sidecar` XMP reading to handle CData block type-normalization correctly, and carry full sidecar file path context `%path.display()` on all warning logs.
+- **Syncing Guide**: Authored a premium user-facing guide at `docs/user-guide/lightroom-sync.md` documenting passive sync, reload steps, case sensitivity, custom label configurations, and conflict overrides. Updated `README.md` to link the guide and align subcommand statuses.
+
+**Final test count**: 248 tests (all 100% passing).
+`just ci` is completely green.

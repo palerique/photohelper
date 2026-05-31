@@ -418,6 +418,37 @@ mod tests {
     }
 
     #[test]
+    fn conflict_preserve_mtime_conflict_shield() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("photo.xmp");
+
+        let our_past = past();
+        let existing = SidecarSettings::builder()
+            .exposure(1.0)
+            .last_processed_at(our_past)
+            .build()
+            .unwrap();
+        write_xmp(&p, &existing).unwrap();
+
+        // Set the physical mtime to 5 seconds after our last processed time (simulating Lightroom edit)
+        let ft = filetime::FileTime::from_unix_time(our_past.unix_timestamp() + 5, 0);
+        filetime::set_file_mtime(&p, ft).unwrap();
+
+        let incoming = SidecarSettings::builder()
+            .exposure(0.0)
+            .last_processed_at(now())
+            .build()
+            .unwrap();
+
+        let outcome = merge_and_write(&p, &incoming, false).unwrap();
+        assert_eq!(outcome, WriteOutcome::ConflictPreserved);
+
+        // Verify existing value is preserved
+        let check = read_xmp(&p).unwrap();
+        assert!((check.exposure().unwrap() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
     fn conflict_overwrite_older_lightroom_edit() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("photo.xmp");
@@ -524,9 +555,18 @@ mod tests {
         let s = SidecarSettings::builder().exposure(1.0).build().unwrap();
         let result = write_xmp(&p, &s);
         assert!(result.is_err(), "write to read-only dir must fail");
-        // No .phdev.tmp left.
-        let tmp = readonly_dir.join("photo.phdev.tmp");
-        assert!(!tmp.exists(), ".phdev.tmp must not persist after failure");
+        // Ensure no temporary files containing "phdev" and ending with ".tmp" are left behind.
+        for entry in std::fs::read_dir(&readonly_dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !(name.contains("phdev")
+                    && std::path::Path::new(&name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))),
+                "leaked temporary file found: {name}"
+            );
+        }
     }
 
     #[test]

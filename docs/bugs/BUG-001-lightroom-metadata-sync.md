@@ -1,6 +1,6 @@
 # BUG-001 — Lightroom Classic Metadata Synchronization Gaps
 
-> **Status**: PROPOSED
+> **Status**: RESOLVED
 > **Severity**: HIGH (Blocks primary end-user workflow)
 > **Date**: 2026-05-30
 > **Authors**: Antigravity ( Session 08 )
@@ -77,3 +77,15 @@ To ensure that `photohelper`'s metadata is 100% visible, intuitive, and reliable
    - Verify that localized custom labels can be written if configured.
 2. **User Acceptance Verification**:
    - Run the updated pipeline on a test set of raw photos, import them into Lightroom, verify immediate auto-read, and verify pull-to-sync for pre-existing catalog items.
+
+---
+
+## 5. Resolution Summary (Session 09)
+
+This bug was successfully resolved by implementing the following core features and safeguards:
+1. **Convenience & Safety Shorthand (`--all-lr`)**: Added a convenient `--all-lr` shorthand that enables ratings, labels, and keywords with a highly visible startup warning if no metadata flags are active.
+2. **Type-Safe Custom Translations**: Added command-line arguments `--lr-label-red` and `--lr-label-green` (and environment variables `PHOTOHELPER_LR_LABEL_RED`/`PHOTOHELPER_LR_LABEL_GREEN`) to support localized Lightroom catalogs, fully verified via upfront XML character and collision validation.
+3. **MTime-Based Conflict Shielding**: Implemented filesystem modification time (`mtime`) checks with a 2-second safety margin. If the file has been modified externally after our last write, we skip the sidecar and output a summary skip warning directing the user to `--force` override if desired.
+4. **Precision Alignment**: Integrated the `filetime` crate in `writer.rs` to set the physical file's `mtime` to match our internal `ph:LastProcessedAt` exactly, neutralizing write-buffer, scheduler, or network share clock skews.
+5. **XML Parsing Robustness**: Ensured all XML decode and attribute parsing errors log sidecar paths and recover gracefully.
+6. **Documentation**: Authored [docs/user-guide/lightroom-sync.md](file:///Users/ph/area-de-trabalho/pessoal/photohelper/docs/user-guide/lightroom-sync.md) explaining exactly how to trigger metadata reloading inside Adobe Lightroom Classic.

@@ -17,6 +17,8 @@ time.workspace = true
 thiserror.workspace = true
 static_assertions.workspace = true
 tracing.workspace = true
+filetime.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+filetime.workspace = true

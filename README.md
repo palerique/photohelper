@@ -6,11 +6,9 @@ configurable long-edge resize plus orientation-aware watermarks. Lightroom /
 Aftershoot / DxO PureRAW-class workflow as a single binary on Linux, macOS,
 and Windows.
 
-> **Project status**: v0.1 in progress — `ingest` is implemented and
-> fully tested (CR3 EXIF via LibRaw 0.22.1, BLAKE3 content IDs,
-> SQLite catalog with file-lock + WAL). `cull`, `develop`, `export`,
-> and the other subcommands are planned for session 04+ (see § Roadmap
-> below for the full scope and timeline).
+> **Project status**: v0.1 in progress — `ingest`, `cull` (NIMA-based aesthetic), `dedup` (CLIP grouping), `develop` (XMP-based metadata development), and `export` (batch resizing & watermark exports) are fully implemented and shipped.
+>
+> To learn how to synchronize your developed metadata with Adobe Lightroom Classic, please see the [Lightroom Classic Synchronization Guide](file:///Users/ph/area-de-trabalho/pessoal/photohelper/docs/user-guide/lightroom-sync.md).
 >
 > This repo follows the **eng-protocol** — a session-based engineering
 > discipline (see `CLAUDE.md` and `docs/quality-assurance.md`). Changes land
@@ -73,14 +71,6 @@ Read-only against the SQLite catalog at `<ingest-dir>/.photohelper/catalog.db`.
 Pass `--catalog <db-path>` instead of a directory for a custom location.
 Run `just list-catalog --help` for the full flag list.
 
-### Cull a catalog (planned — session 04+)
-
-AI culling (`photohelper cull`) is not yet implemented. The `cull` subcommand
-exits with a "not yet implemented in v0.1" message. Planned scope for session
-04+: NIMA aesthetic scorer (requires an ONNX model with a clear MIT/Apache-2.0
-license — see `docs/analysis/ANL-002-ort-nima-preflight.md` for the blocker and
-resolution paths) + `cull_scores` catalog table + per-photo star assignment.
-
 ### Avoiding the two-shell PATH drift footgun
 
 If you use Claude Code in one terminal and a separate shell in another, remember
@@ -91,17 +81,18 @@ get `zsh: no such file or directory` when trying to run them.
 
 ## Roadmap
 
-### Shipped (as of session 03 / 2026-05-28)
+### Shipped subcommands
 
 | Subcommand | Status | Notes |
 |---|---|---|
 | `ingest` | **Shipped** | CR3 via LibRaw 0.22.1, BLAKE3 content IDs, SQLite catalog |
-| `cull` | Planned (session 04+) | Blocked on NIMA ONNX model with clear license (DN-026) |
-| `develop` | Planned (session 05+) | Demosaic, WB, exposure, tone curve, XMP sidecars |
-| `export` | Planned (session 05+) | Long-edge resize, orientation-aware watermarks, mozjpeg |
-| `run` | Planned (session 06+) | Orchestrate ingest → cull → develop → export |
-| `models` | Planned (session 04+) | Manage AI model bundles |
-| `camera` | Planned (session 04+) | Inspect camera profiles |
+| `cull` | **Shipped** | NIMA aesthetic culling (1–5 star ratings based on NIMA range) |
+| `dedup` | **Shipped** | MobileCLIP-based image embeddings & duplicate clustering |
+| `develop` | **Shipped** | Write Lightroom-compatible XMP sidecars with ratings, labels, and keywords |
+| `export` | **Shipped** | Batch JPEG export with long-edge resize, watermarks, and MozJPEG encoding |
+| `run` | Planned (session 10+) | Orchestrate ingest → cull → develop → export |
+| `models` | Planned (session 10+) | Manage AI model bundles |
+| `camera` | Planned (session 10+) | Inspect camera profiles |
 
 ### Planned milestones
 

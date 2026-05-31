@@ -7,19 +7,19 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 8 (`export-integration` — 2026-05-30) — **SHIPPED** via PR #11. Implemented the `photohelper-export` crate for image resizing, watermarking, and MozJPEG encoding, and integrated it into the `export` CLI subcommand. Session-end R1 (0C+0H+2L; 2 resolved) → R2 CLEAN (0 findings).
+**Last session**: 9 (`lightroom-sync-fixes` — 2026-05-31) — **SHIPPED** via PR #12. Implemented BUG-001 fixes including smart CLI warnings/shorthands (`--all-lr`), upfront validation for distinct and XML-safe custom color labels, high-performance granular conflict logging, `mtime`-based conflict shield, and precision `mtime` alignment. Session-end R1 (0C+1H+2M+2L; 5 resolved) → R2 CLEAN (0 findings).
 
-**Current session**: 9 (`lightroom-sync-fixes` — 2026-05-30) — branch `session-09/lightroom-sync-fixes`. **PLANNED** (Addressing BUG-001 with CLI smart warnings, granular conflict feedback, and Lightroom sync guide).
+**Current session**: 10 (`run-pipeline` — 2026-05-31) — branch `session-10/run-pipeline`. **PLANNED** (Implementing the orchestrating `run` subcommand).
 
-**Goal**: Address Lightroom Classic metadata sync gaps identified in BUG-001 by implementing smart CLI warnings, granular conflict feedback, and authoring a comprehensive Lightroom syncing guide.
+**Goal**: Orchestrate ingest → cull → develop → export pipelines via the `run` subcommand.
 
-**Action**: Author the session plan `docs/plans/session-09.md` and run the multi-agent double-review on it.
+**Action**: Create the session plan `docs/plans/session-10.md` and run plan-review on it.
 
-**Session-end review (session 08 — COMPLETE)**:
-- R1 → 0C+0H+2L (2 total; clippy formatting/cast warnings) → resolved.
+**Session-end review (session 09 — COMPLETE)**:
+- R1 → 0C+1H+2M+2L (5 total; integration test drift, XML validation error specialization, CData type mismatch, README outdated roadmap, warnings path context) → resolved.
 - R2 → 0 findings; CLEAN.
 
-**Final test count**: 236 (226 from session 07 baseline + 10 new integration tests)
+**Final test count**: 248 (236 from session 08 baseline + 12 new integration and unit tests)
 
 **Plan-review history (session 08 — COMPLETE)**:
 - R1 → 6 CRITICAL + 9 HIGH + 3 MEDIUM + 2 LOW (20 total) → plan v2 (bounds safeguards, embedded Roboto fallback, upfront query, 3-channel demultiplication, atomic writes, strict cancellation).

@@ -86,6 +86,10 @@ session-end:
     @echo ""
     @just ci
 
+# Print real-time Antigravity session status, branch sync, context usage, and costs.
+status:
+    @python3 scripts/status.py
+
 # Print the git-log timeline for the two audit-trail files.
 session-trail:
     @echo "=== HANDOFF_REPORT.md trail ==="

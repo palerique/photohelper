@@ -1,13 +1,16 @@
 //! Conflict resolution for XMP sidecar writes.
 //!
-//! The 4-case decision table (per plan § Design decisions § Conflict resolution):
+//! The decision table (per plan § Design decisions § Conflict resolution):
 //!
 //! | `xmp:MetadataDate` | `ph:LastProcessedAt` | Outcome |
 //! |---|---|---|
 //! | `Some(md)` | `Some(lp)` | `md > lp` → ConflictPreserved; else Overwritten (merged) |
 //! | `Some(_)` | `None` | Overwritten (merges existing Lightroom edits on first run) |
-//! | `None` | `Some(_)` | ConflictPreserved + warn |
-//! | `None` | `None` | if any crs: field exists → ConflictPreserved + warn; else Overwritten (merged) |
+//! | `None` | `Some(_)` | if `is_ours` → Overwritten (merged); else ConflictPreserved (logged at debug) |
+//! | `None` | `None` | if any `crs:` field exists and not `is_ours` → ConflictPreserved (logged at debug); else Overwritten (merged) |
+//!
+//! Additionally, physical file modification time (`mtime`) is checked against `ph:LastProcessedAt`
+//! with a 2.0-second safety margin to detect external manual edits.
 //!
 //! `--force` always produces `ForcedOverwrite`.
 
@@ -37,7 +40,10 @@ pub enum WriteOutcome {
 /// sidecar.
 ///
 /// If `force` is `true`, always overwrites and returns `ForcedOverwrite`.
-/// Otherwise applies the 4-case timestamp decision table (see module doc).
+/// Otherwise applies the timestamp decision table (see module doc).
+///
+/// On successful write/update, the physical filesystem modification time (`mtime`) is
+/// aligned exactly with `ph:LastProcessedAt` to prevent false conflict triggers on subsequent runs.
 ///
 /// # Errors
 ///
@@ -83,74 +89,112 @@ pub fn merge_and_write(
     let lightroom_ts = existing.metadata_date(); // xmp:MetadataDate
     let our_ts = existing.last_processed_at(); // ph:LastProcessedAt (no fallback)
 
-    let outcome = match (lightroom_ts, our_ts) {
-        (Some(lr_time), Some(our_time)) => {
-            // Both timestamps present: Lightroom has updated xmp:MetadataDate after our write?
-            if lr_time > our_time {
+    let mtime_conflict = if let Some(our_time) = our_ts {
+        match path.metadata().and_then(|m| m.modified()) {
+            Ok(mtime) => {
+                let our_system_time = std::time::SystemTime::from(our_time);
+                match mtime.duration_since(our_system_time) {
+                    // A 2.1-second safety margin is used because FAT32/exFAT (commonly
+                    // used on camera SD cards or external drives) only support 2-second resolution
+                    // for physical file modification times (mtime). It also absorbs clock skew,
+                    // sub-second rounding discrepancies, or rapid back-to-back write latency.
+                    Ok(dur) if dur > std::time::Duration::from_secs_f64(2.1) => {
+                        tracing::debug!(
+                            path = %path.display(),
+                            "develop: file mtime is newer than ph:LastProcessedAt by {}s; preserving manual edits",
+                            dur.as_secs_f64()
+                        );
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to retrieve sidecar file mtime; falling back to metadata timestamp comparison"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    let outcome = if mtime_conflict {
+        tracing::debug!(
+            path = %path.display(),
+            "develop: external filesystem modification detected; preserving existing crs: settings"
+        );
+        WriteOutcome::ConflictPreserved
+    } else {
+        match (lightroom_ts, our_ts) {
+            (Some(lr_time), Some(our_time)) => {
+                // Both timestamps present: Lightroom has updated xmp:MetadataDate after our write?
+                if lr_time > our_time {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "develop: Lightroom edited after our last write; preserving crs: settings"
+                    );
+                    WriteOutcome::ConflictPreserved
+                } else {
+                    // We are newer (or same time) — safe to update.
+                    tracing::info!(path = %path.display(), "develop: updating XMP sidecar");
+                    WriteOutcome::Overwritten
+                }
+            }
+            (Some(_), None) => {
+                // Existing sidecar has a date (Lightroom-written) but we have never
+                // written ph:LastProcessedAt — this is our first photohelper run.
                 tracing::info!(
                     path = %path.display(),
-                    "develop: Lightroom edited after our last write; preserving crs: settings"
+                    "develop: existing XMP has metadata date; merging Lightroom edits with incoming settings (first photohelper run)"
                 );
-                WriteOutcome::ConflictPreserved
-            } else {
-                // We are newer (or same time) — safe to update.
-                tracing::info!(path = %path.display(), "develop: updating XMP sidecar");
-                let merged = existing.merge(incoming);
-                write_xmp(path, &merged)?;
                 WriteOutcome::Overwritten
             }
-        }
-        (Some(_), None) => {
-            // Existing sidecar has a date (Lightroom-written) but we have never
-            // written ph:LastProcessedAt — this is our first photohelper run.
-            tracing::info!(
-                path = %path.display(),
-                "develop: existing XMP has metadata date; merging Lightroom edits with incoming settings (first photohelper run)"
-            );
-            let merged = existing.merge(incoming);
-            write_xmp(path, &merged)?;
-            WriteOutcome::Overwritten
-        }
-        (None, Some(_)) => {
-            // Existing sidecar has ph:LastProcessedAt (photohelper-written) but no
-            // xmp:MetadataDate — if we own it, we can safely update it. Otherwise,
-            // conservatively preserve; the absence of a date is ambiguous.
-            let is_ours = existing.photohelper_id().is_some()
-                && existing.photohelper_id() == incoming.photohelper_id();
-            if is_ours {
-                tracing::info!(path = %path.display(), "develop: updating owned XMP sidecar despite missing MetadataDate");
-                let merged = existing.merge(incoming);
-                write_xmp(path, &merged)?;
-                WriteOutcome::Overwritten
-            } else {
-                tracing::warn!(
-                    path = %path.display(),
-                    "develop: existing XMP has no xmp:MetadataDate; preserving existing crs: settings"
-                );
-                WriteOutcome::ConflictPreserved
+            (None, Some(_)) => {
+                // Existing sidecar has ph:LastProcessedAt (photohelper-written) but no
+                // xmp:MetadataDate — if we own it, we can safely update it. Otherwise,
+                // conservatively preserve; the absence of a date is ambiguous.
+                let is_ours = existing.photohelper_id().is_some()
+                    && existing.photohelper_id() == incoming.photohelper_id();
+                if is_ours {
+                    tracing::info!(path = %path.display(), "develop: updating owned XMP sidecar despite missing MetadataDate");
+                    WriteOutcome::Overwritten
+                } else {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "develop: existing XMP has no xmp:MetadataDate; preserving existing crs: settings"
+                    );
+                    WriteOutcome::ConflictPreserved
+                }
             }
-        }
-        (None, None) => {
-            // Neither timestamp present — check for any crs: attribute (not just
-            // the 6 numeric ones) to avoid overwriting Lightroom settings like
-            // crs:WhiteBalance or crs:CameraProfile (Theme B fix).
-            let is_ours = existing.photohelper_id().is_some()
-                && existing.photohelper_id() == incoming.photohelper_id();
-            if existing.has_any_crs_attribute() && !is_ours {
-                tracing::warn!(
-                    path = %path.display(),
-                    "develop: existing XMP has crs: attributes but no timestamps; preserving"
-                );
-                WriteOutcome::ConflictPreserved
-            } else {
-                // No crs: attributes or it is ours — safe to overwrite/merge.
-                tracing::info!(path = %path.display(), "develop: overwriting XMP sidecar");
-                let merged = existing.merge(incoming);
-                write_xmp(path, &merged)?;
-                WriteOutcome::Overwritten
+            (None, None) => {
+                // Neither timestamp present — check for any crs: attribute (not just
+                // the 6 numeric ones) to avoid overwriting Lightroom settings like
+                // crs:WhiteBalance or crs:CameraProfile (Theme B fix).
+                let is_ours = existing.photohelper_id().is_some()
+                    && existing.photohelper_id() == incoming.photohelper_id();
+                if existing.has_any_crs_attribute() && !is_ours {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "develop: existing XMP has crs: attributes but no timestamps; preserving"
+                    );
+                    WriteOutcome::ConflictPreserved
+                } else {
+                    // No crs: attributes or it is ours — safe to overwrite/merge.
+                    tracing::info!(path = %path.display(), "develop: overwriting XMP sidecar");
+                    WriteOutcome::Overwritten
+                }
             }
         }
     };
+
+    if outcome == WriteOutcome::Overwritten {
+        let merged = existing.merge(incoming);
+        write_xmp(path, &merged)?;
+    }
 
     Ok(outcome)
 }
