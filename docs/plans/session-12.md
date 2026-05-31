@@ -4,33 +4,42 @@
 Elevate `photohelper export` from a proxy-renderer to a true standalone Image Signal Processor (ISP) by establishing a 16-bit linear pipeline (DN-033), and implement dynamic, auto-scaling image-based watermarks (DN-036).
 
 ## 2. Deliverables
+- **Workspace Cleanup**:
+  - Remove leftover discovery files: `crates/photohelper-export/src/bin.rs` and `crates/photohelper-export/src/pixmap_test.rs`.
+  - Revert the unstaged rogue `uuid` dependency addition in `crates/photohelper-sidecar/Cargo.toml`.
+
 - **DN-036: Dynamic Image Watermarks**
-  - **CLI Updates**: Add `--badge <PATH>:<POSITION>[:SCALE_PERCENT]` to the `export` subcommand.
-  - **Auto-Scaling**: If `SCALE_PERCENT` is omitted, the engine automatically calculates a harmonious default scale (e.g., 5% of the target long edge).
-  - **Validation**: Fail fast (throw an error) if the user provides multiple badges targeted at the exact same `WatermarkPosition`.
-  - **Rendering**: Utilize `tiny-skia`'s native PNG decoding and affine transforms to composite the badge onto the export image.
+  - **CLI Updates**: Add paired arguments `--badge <PATH>` and `--badge-pos <POSITION>` (and optionally `--badge-scale <PERCENT>`) instead of a colon-delimited string to prevent Windows path collisions (`C:\`).
+  - **Auto-Scaling**: If `--badge-scale` is omitted, automatically calculate a default scale (e.g., 5% of the target long edge), enforcing a strict clamp of `max(computed_size, 1.0)` to prevent zero-pixel affine matrix panics.
+  - **O(1) Validation**: Parse CLI options directly into a `HashMap<WatermarkPosition, Badge>` to detect duplicate positions instantly. Fail fast if ANY watermark (text or image) shares the same position. Explicitly define `ExportError::DuplicateWatermarkPosition` and `ExportError::InvalidBadgeFormat`.
+  - **Rendering**: Utilize `tiny-skia` (via `png` crate) to load badges. Composite badges linearly or securely after OETF. Use a custom affine blending loop onto the target RGB buffer rather than coercing the massive 24MP image into an RGBA `Pixmap`, saving memory.
 
 - **DN-033: Standalone ISP Pipeline (Phase 1)**
-  - **C-Shim Updates**: Extend `cpp/photohelper_libraw_shim.c` with setters for LibRaw's `output_bps` (set to 16-bit), `gamm` (set to `[1.0, 1.0]` for linear), and `no_auto_bright` (to disable LibRaw's auto-exposure).
-  - **16-bit Linear Extraction**: Introduce `photohelper_raw::decode::read_raw_linear_16bit`, replacing the default 8-bit sRGB extraction.
-  - **Rust ISP Engine**: Create a new pipeline in `photohelper-export` that takes the 16-bit linear sensor data and applies:
-    - **Exposure**: True linear multiplier derived from `crs:Exposure2012`.
-    - **Tone Mapping**: Custom S-curves applied to the linear data to emulate `crs:Contrast2012`, `crs:Highlights2012`, and `crs:Shadows2012`.
-    - **OETF (Gamma)**: Convert the fully-graded linear data back into standard 8-bit sRGB for MozJPEG encoding and watermarking.
+  - **Data Boundary**: Expand `ExportOptions` with a `ToneMappingOptions` struct carrying XMP edits from the CLI layer into `photohelper-export`.
+  - **C-Shim Updates**: Extend `cpp/photohelper_libraw_shim.c` with setters for `output_bps` (16-bit), `gamm` (`[1.0, 1.0]`), and `no_auto_bright` (1). Update the header comment to document the shift to a state-mutating API.
+  - **16-bit Linear Extraction**: Introduce `photohelper_raw::decode::read_raw_linear_16bit` as an *additional* method exclusively for export, preserving `read_raw_rgb` to prevent breaking the `photohelper-ai` processing pipeline. All new `unsafe` FFI blocks must carry strict `// SAFETY:` justifications.
+  - **Rust ISP Engine (LUT-accelerated)**:
+    - Normalization: Extract `imgdata.color.maximum` and `imgdata.color.black` to anchor the 16-bit array to a strict normalized `0.0..=1.0` or `0..=65535` baseline before tone mapping.
+    - LUT Generation: Precalculate the Exposure, S-Curve tone mapping, clipping, and OETF gamma pass into a single 1D Lookup Table mapping `0..=65535` to `u8`. This condenses millions of transcendental math operations into an `O(N)` cache-coherent map.
+    - Strict Clipping: Ensure the LUT generation explicitly clamps values exceeding `1.0` (or `65535`) to prevent `f32` -> `u8` integer overflow panics.
 
-## 3. Out of Scope (Deferred)
-- **Complex White Balance (Temp/Tint)**: Translating Lightroom's `Temperature/Tint` slider values into accurate `cam_mul` multipliers requires full chromatic adaptation (CAT02) and camera-specific XYZ calibration matrices. For Phase 1, we will apply the *camera's as-shot white balance* via LibRaw, deferring `Temp/Tint` sliders to a dedicated color-science session.
-- **Full ACEScg Color Space**: While the data will be processed in linear RGB, migrating the entire pipeline to the ACEScg wide-gamut working space is deferred until the foundational linear pipeline lands securely.
+## 3. Out of Scope (Deferred Tasks & Tech Debt)
+- **Complex White Balance (Temp/Tint) & ACEScg**: Translating Lightroom's `Temperature/Tint` sliders to XYZ matrices is too complex for this session. We will rely on LibRaw's as-shot white balance. The ACEScg colorspace and Temp/Tint integration are deferred.
+- *Binding Trigger*: Added to `TECH-DEBT.md` (TD-015: "Full ACEScg Color Science & Temp/Tint Adaptation") with an explicit constraint to tackle before `session-14`, estimated at ~400 LoC.
 
 ## 4. Testing Plan
-- **Unit Tests**: Ensure the CLI parser correctly rejects duplicate badge positions and defaults the scale when omitted.
-- **Unit Tests**: Verify the Rust ISP tone curves and linear-to-sRGB OETF mathematical correctness.
-- **Integration Tests**: Run `just ci` to ensure `run_export` respects the new `--badge` flag and correctly outputs JPEGs via the 16-bit linear pipeline.
+- **Unit Tests**:
+  - Verify graceful rejection of invalid badge paths, unreadable PNGs, non-numeric scales, and out-of-bounds scales.
+  - Supply extreme exposure multipliers to the LUT generator and verify integer bounds are clamped without panics.
+- **Integration Tests**:
+  - Programmatically assert that `photohelper export` produces a valid JPEG file with correct dimensions.
+  - Verify that watermark composite calculations respect the raw image's orientation flag.
+  - Verify successful end-to-end rendering of multiple distinct badges at different positions.
 
-## 5. Discoveries and Assumptions
-- **Discovery**: `tiny-skia` v0.12.0 natively compiles with `decode_png`, removing the need to add external dependencies like `image`.
-- **Assumption**: A simple mathematically-defined S-curve will be used to approximate Lightroom's contrast and tonal mapping on the linear data. This provides immediate value while establishing the architecture for future precise LUTs or profiling.
-- **Synchronization Compliance**: All modifications and struct names (e.g., `ExportOptions`, `ImageBadge`) adhere strictly to `docs/quality-assurance.md § State & Context Synchronization Discipline`. Any deferred tasks (ACEScg, Temp/Tint) will be logged in `TECH-DEBT.md`.
+## 5. Synchronization Compliance
+- Update the `SESSION-STATE.md` "Component progress" table to reflect `photohelper-export` native ISP capabilities.
+- Update `README.md` and CLI documentation with the new `--badge` and `--badge-pos` usage instructions.
+- Ensure all variable names and domain terms match `docs/quality-assurance.md`.
 
 ## 6. Checkpoints
 - Plan Review (Round 1 & 2)
