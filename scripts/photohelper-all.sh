@@ -66,7 +66,8 @@ echo ">>> Step 5: Developing (Writing XMP sidecars)..."
 
 # 6. Export
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-EXPORT_DIR="$TARGET_DIR/exports-${TIMESTAMP}"
+TARGET_DIR_NAME=$(basename "$TARGET_DIR")
+EXPORT_DIR="$HOME/Pictures/photohelper-exports/${TARGET_DIR_NAME}-${TIMESTAMP}"
 echo ""
 echo ">>> Step 6: Exporting to $EXPORT_DIR..."
 mkdir -p "$EXPORT_DIR"

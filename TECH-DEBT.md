@@ -377,7 +377,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-022 — XMP sidecar I/O uses hand-rolled `quick-xml` template instead of Adobe XMP Toolkit SDK
 
-- **Status**: Open
+- **Status**: CLOSED (2026-05-31, session 14; replaced with full state-machine pass-through writer that preserves all third-party fields)
 - **Opened**: 2026-05-29 (session 06, D3 — S1 stop-gap from plan v2)
 - **Stop-gap location**: `crates/photohelper-sidecar/src/writer.rs::render_xmp` — hand-rolled XML/RDF template emits XMP attributes as strings rather than using a proper XMP namespace-aware library. In-source: `// TD-022: quick-xml manual XMP template; see TECH-DEBT.md § TD-022.`
 - **Fundamental fix**: Replace `render_xmp` with a proper XMP library. Candidates: (a) `xmp-toolkit` crate (wraps Adobe XMP Toolkit SDK C++ — adds a C++ build dependency but guarantees namespace correctness and round-trip fidelity), or (b) `rdf-xml` / `sophia_xml` for pure-Rust RDF/XML generation, or (c) extend `quick-xml` usage with full namespace tracking. The reader (`reader.rs`) would also benefit from namespace-aware parsing rather than prefix-stripped key matching.

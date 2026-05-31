@@ -992,4 +992,264 @@ mod tests {
         let xml = std::fs::read_to_string(&raw_p).unwrap();
         assert!(xml.contains("&lt;Hack &amp; &quot;Test&quot;&gt;"));
     }
+
+    #[test]
+    fn test_third_party_namespace_preservation() {
+        let raw = r#"<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">
+   <crs:ToneCurveName2012>Custom</crs:ToneCurveName2012>
+   <crs:CameraProfile>Adobe Standard</crs:CameraProfile>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#;
+        let s = SidecarSettings::builder().label("Blue").build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        std::fs::write(&raw_p, raw).unwrap();
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        write_xmp(&p, &s).unwrap();
+
+        let output = std::fs::read_to_string(&raw_p).unwrap();
+        assert!(output.contains("<crs:ToneCurveName2012>Custom</crs:ToneCurveName2012>"));
+        assert!(output.contains("<crs:CameraProfile>Adobe Standard</crs:CameraProfile>"));
+        assert!(output.contains(r#"xmp:Label="Blue""#));
+    }
+
+    #[test]
+    fn test_child_element_reinjection_and_sibling_preservation() {
+        let raw = r#"<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
+   <dc:subject>
+    <rdf:Bag>
+     <rdf:li>OldKeyword</rdf:li>
+    </rdf:Bag>
+   </dc:subject>
+   <SomeThirdPartyTag>KeepMe</SomeThirdPartyTag>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#;
+        let mut kws = std::collections::BTreeSet::new();
+        kws.insert("NewKeyword".to_string());
+        let s = SidecarSettings::builder().keywords(kws).build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        std::fs::write(&raw_p, raw).unwrap();
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        write_xmp(&p, &s).unwrap();
+
+        let output = std::fs::read_to_string(&raw_p).unwrap();
+        assert!(!output.contains("OldKeyword"));
+        assert!(output.contains("NewKeyword"));
+        assert!(output.contains("<SomeThirdPartyTag>KeepMe</SomeThirdPartyTag>"));
+        // Ensure only one subject block
+        assert_eq!(output.matches("<dc:subject").count(), 1);
+    }
+
+    #[test]
+    fn test_multiple_rdf_description_tags() {
+        let raw = r#"<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:Exposure2012="0.0"/>
+  <rdf:Description rdf:about="Another" crs:Exposure2012="9.9"/>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#;
+        let s = SidecarSettings::builder().exposure(1.0).build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        std::fs::write(&raw_p, raw).unwrap();
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        write_xmp(&p, &s).unwrap();
+
+        let output = std::fs::read_to_string(&raw_p).unwrap();
+        println!("OUTPUT:\n{output}");
+        assert!(output.contains(r#"crs:Exposure2012="1""#));
+        assert!(output.contains(r#"crs:Exposure2012="9.9""#));
+    }
+
+    #[test]
+    fn test_valid_xml_missing_rdf_description() {
+        let raw = r#"<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#;
+        let s = SidecarSettings::builder().exposure(1.0).build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        std::fs::write(&raw_p, raw).unwrap();
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        write_xmp(&p, &s).unwrap();
+        let output = std::fs::read_to_string(&raw_p).unwrap();
+        assert!(output.contains("rdf:Description"));
+        assert!(output.contains(r#"crs:Exposure2012="1""#));
+    }
+
+    #[test]
+    fn test_duplicate_attribute_guard() {
+        let raw = r#"<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:ph="http://photohelper.io/1.0/" ph:NimaScore="3.0"/>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#;
+        let s = SidecarSettings::builder().nima_score(5.0).build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        std::fs::write(&raw_p, raw).unwrap();
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        write_xmp(&p, &s).unwrap();
+
+        let output = std::fs::read_to_string(&raw_p).unwrap();
+        assert_eq!(output.matches("ph:NimaScore").count(), 1);
+        assert!(output.contains(r#"ph:NimaScore="5.0000""#));
+    }
+
+    #[test]
+    fn test_attribute_deletion_and_edge_boundaries() {
+        let raw = r#"<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:ph="http://photohelper.io/1.0/" ph:NimaScore="3.0" xmp:Label="Red"/>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#;
+        let s = SidecarSettings::builder()
+            .clear_nima_score()
+            .label("")
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        std::fs::write(&raw_p, raw).unwrap();
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        write_xmp(&p, &s).unwrap();
+
+        let output = std::fs::read_to_string(&raw_p).unwrap();
+        assert!(!output.contains(r#"ph:NimaScore=""#));
+        assert!(output.contains(r#"xmp:Label="""#));
+    }
+
+    #[test]
+    fn test_namespace_injection_boundary() {
+        let raw = r#"<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" />
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#;
+        let s = SidecarSettings::builder().nima_score(5.0).build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        std::fs::write(&raw_p, raw).unwrap();
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        write_xmp(&p, &s).unwrap();
+
+        let output = std::fs::read_to_string(&raw_p).unwrap();
+        assert_eq!(output.matches("xmlns:ph=").count(), 1);
+        assert!(output.contains(r#"xmlns:ph="http://ns.photohelper.dev/1.0/""#));
+    }
+
+    #[test]
+    fn test_missing_rdf_description_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        let malformed_xml = r#"<?xml version="1.0"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 5.5.0">
+</x:xmpmeta>
+"#;
+        std::fs::write(&raw_p, malformed_xml).unwrap();
+
+        let settings = SidecarSettings::builder().exposure(1.0).build().unwrap();
+        let err = crate::writer::write_xmp(&p, &settings).unwrap_err();
+        assert!(matches!(err, Error::MissingRdfDescription { .. }));
+    }
+
+    #[test]
+    fn test_creation_from_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        let settings = SidecarSettings::builder().exposure(1.5).build().unwrap();
+
+        // Use the ConflictStrategy::ForceOverwrite with a missing file to test creation bypass
+        let outcome = merge_and_write(&p, &settings, ConflictStrategy::ForceOverwrite).unwrap();
+        assert_eq!(outcome, WriteOutcome::Created);
+
+        let content = std::fs::read_to_string(&raw_p).unwrap();
+        assert!(content.contains(r#"crs:Exposure2012="1.5""#));
+    }
+
+    #[test]
+    fn test_malformed_xml_and_temp_file_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        let malformed_xml = r#"<?xml version="1.0"?><broken>"#;
+        std::fs::write(&raw_p, malformed_xml).unwrap();
+
+        let settings = SidecarSettings::builder().exposure(1.0).build().unwrap();
+        let err = crate::writer::write_xmp(&p, &settings).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::XmlParse { .. } | Error::MissingRdfDescription { .. }
+        ));
+
+        // Ensure no leftover temp files exist
+        let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1); // Only the original broken file
+        assert_eq!(
+            entries.first().unwrap().as_ref().unwrap().file_name(),
+            "photo.xmp"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_persist_permission_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        let valid_xml = r#"<?xml version="1.0"?><x:xmpmeta><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><crs:Exposure2012>0.0</crs:Exposure2012></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        std::fs::write(&raw_p, valid_xml).unwrap();
+
+        // Make the file read-only
+        let mut perms = std::fs::metadata(&raw_p).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&raw_p, perms).unwrap();
+
+        let settings = SidecarSettings::builder().exposure(1.0).build().unwrap();
+
+        // Attempting to overwrite it should succeed on Unix since atomic rename replaces the inode,
+        // and we specifically restore the read-only perms.
+        let result = crate::writer::write_xmp(&p, &settings);
+        assert!(result.is_ok());
+
+        // The file should be updated AND still be read-only
+        let content = std::fs::read_to_string(&raw_p).unwrap();
+        assert!(content.contains(r#"crs:Exposure2012="1""#));
+        assert!(std::fs::metadata(&raw_p).unwrap().permissions().readonly());
+    }
 }

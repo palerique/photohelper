@@ -37,7 +37,7 @@ pub enum WriteOutcome {
     Created,
     /// Existing sidecar overwritten (our timestamp was newer).
     Overwritten,
-    /// Existing `crs:` settings preserved (Lightroom or another tool is newer,
+    /// Existing XMP settings preserved (Lightroom or another tool is newer,
     /// or timestamps are absent and the existing sidecar has `crs:` data).
     ConflictPreserved,
     /// Existing sidecar overwritten unconditionally (`--force`).
@@ -47,7 +47,7 @@ pub enum WriteOutcome {
 /// Write `incoming` settings to `path`, resolving conflicts with any existing
 /// sidecar.
 ///
-/// If `force` is `true`, always overwrites and returns `ForcedOverwrite`.
+/// If `strategy` is `ForceOverwrite`, always overwrites and returns `ForcedOverwrite`.
 /// Otherwise applies the timestamp decision table (see module doc).
 ///
 /// On successful write/update, the physical filesystem modification time (`mtime`) is
@@ -68,14 +68,14 @@ pub fn merge_and_write(
         Err(e) => {
             if let Error::Io { source, .. } = &e {
                 if source.kind() == std::io::ErrorKind::NotFound {
-                    write_xmp(path, incoming)?;
+                    crate::writer::write_xmp_force(path, incoming)?;
                     tracing::info!(path = %path.display(), "develop: XMP sidecar created");
                     return Ok(WriteOutcome::Created);
                 }
             }
             if strategy == ConflictStrategy::ForceOverwrite && matches!(e, Error::XmlParse { .. }) {
                 tracing::warn!(path = %path.display(), error = %e, "force: failed to parse existing XMP; falling back to direct write");
-                write_xmp(path, incoming)?;
+                crate::writer::write_xmp_force(path, incoming)?;
                 tracing::info!(path = %path.display(), "develop: XMP sidecar force-overwritten");
                 return Ok(WriteOutcome::ForcedOverwrite);
             }
@@ -90,22 +90,20 @@ pub fn merge_and_write(
         return Ok(WriteOutcome::ForcedOverwrite);
     }
 
-    // Correct conflict detection (Theme A + B fix):
+    // Correct conflict detection:
     // - `existing.metadata_date()` = xmp:MetadataDate (Lightroom's write timestamp)
     // - `existing.last_processed_at()` = ph:LastProcessedAt (our last write timestamp)
     // Detect external edit: did a third-party tool write AFTER our last develop pass?
     let lightroom_ts = existing.metadata_date(); // xmp:MetadataDate
     let our_ts = existing.last_processed_at(); // ph:LastProcessedAt (no fallback)
 
+    let mut current_mtime = None;
     let mtime_conflict = if let Some(our_time) = our_ts {
         match path.metadata().and_then(|m| m.modified()) {
             Ok(mtime) => {
+                current_mtime = Some(mtime);
                 let our_system_time = std::time::SystemTime::from(our_time);
                 match mtime.duration_since(our_system_time) {
-                    // A 2.1-second safety margin is used because FAT32/exFAT (commonly
-                    // used on camera SD cards or external drives) only support 2-second resolution
-                    // for physical file modification times (mtime). It also absorbs clock skew,
-                    // sub-second rounding discrepancies, or rapid back-to-back write latency.
                     Ok(dur) if dur > std::time::Duration::from_secs_f64(2.1) => {
                         tracing::debug!(
                             path = %path.display(),
@@ -139,7 +137,7 @@ pub fn merge_and_write(
     let outcome = if mtime_conflict {
         tracing::debug!(
             path = %path.display(),
-            "develop: external filesystem modification detected; preserving existing crs: settings"
+            "develop: external filesystem modification detected; preserving existing XMP settings"
         );
         WriteOutcome::ConflictPreserved
     } else {
@@ -149,7 +147,7 @@ pub fn merge_and_write(
                 if lr_time > our_time {
                     tracing::debug!(
                         path = %path.display(),
-                        "develop: Lightroom edited after our last write; preserving crs: settings"
+                        "develop: Lightroom edited after our last write; preserving XMP settings"
                     );
                     WriteOutcome::ConflictPreserved
                 } else {
@@ -177,7 +175,7 @@ pub fn merge_and_write(
                 } else {
                     tracing::debug!(
                         path = %path.display(),
-                        "develop: existing XMP has no xmp:MetadataDate; preserving existing crs: settings"
+                        "develop: existing XMP has no xmp:MetadataDate; preserving existing XMP settings"
                     );
                     WriteOutcome::ConflictPreserved
                 }
@@ -203,7 +201,11 @@ pub fn merge_and_write(
 
     if outcome == WriteOutcome::Overwritten {
         let merged = existing.merge(incoming);
-        write_xmp(path, &merged)?;
+        if let Some(mtime) = current_mtime {
+            crate::writer::write_xmp_guarded(path, &merged, mtime)?;
+        } else {
+            write_xmp(path, &merged)?;
+        }
     }
 
     Ok(outcome)
