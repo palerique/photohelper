@@ -96,6 +96,10 @@ pub struct RunArgs {
     #[arg(long, default_value = "bottom-left")]
     pub watermark_position: CliWatermarkPosition,
 
+    /// Image badge watermark. Format: path=<PATH>,pos=<POS>[,scale=<PCT>]
+    #[arg(long = "badge")]
+    pub badges: Vec<crate::commands::export::BadgeArg>,
+
     /// Set export JPEG quality (1-100).
     #[arg(long, default_value_t = 80, value_parser = clap::value_parser!(u8).range(1..=100))]
     pub quality: u8,
@@ -197,6 +201,7 @@ pub fn run_pipeline(
         quality: args.quality,
         watermark: args.watermark.clone(),
         watermark_position: args.watermark_position,
+        badges: args.badges.clone(),
         min_rating: args.min_rating,
         force: args.force,
         strict: args.strict,

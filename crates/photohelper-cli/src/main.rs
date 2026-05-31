@@ -113,6 +113,8 @@ mod exit_code {
     pub const EX_NOPERM: u8 = 77;
     /// `--strict` escalation (POSIX generic failure).
     pub const EX_STRICT_FAIL: u8 = 1;
+    /// Partial failure in bulk operations.
+    pub const EX_PARTIAL_FAIL: u8 = 2;
 }
 
 /// Map a fatal `anyhow::Error` (which wraps a `photohelper_core::Error` on the

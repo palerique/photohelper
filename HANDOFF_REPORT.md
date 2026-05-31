@@ -1309,3 +1309,33 @@ git switch -c session-12/to-be-determined
 just session-start
 cat SESSION-STATE.md
 ```
+
+---
+
+## Checkpoint 22 — session 12 SHIPPED (2026-05-31; export enhancements: ISP and watermarks)
+
+**Status**: SHIPPED. PR #15 merged to main.
+**Author**: Antigravity session 12, session-end window
+
+### What landed since Checkpoint 21
+
+- **Image Signal Processor (ISP)**: Implemented `ToneMappingLut` in `photohelper-export` for O(1) tone mapping of 16-bit linear RAW samples to 8-bit sRGB. Converts linear float with exposure compensation, applies ACES-like filmic S-curve, and finalizes with the sRGB OETF.
+- **Image Watermarking**: Replaced empty badge stubs with `tiny-skia` based PNG decoding and compositing. Supports percentage-based scaling (relative to the image's long edge) and robust boundary checks with explicit fail-safe error propagation (`WatermarkOmitted`).
+- **Tech-Debt Remediation**:
+  - Pre-load badges once per run using `PreloadedBadge::load` and `Arc<tiny_skia::Pixmap>` to avoid $O(N)$ repeated disk I/O and PNG decoding bottlenecks per image.
+  - Refactored `run_export` collision resolution using a `HashMap<PathBuf, usize>` for the target file stems, optimizing it from an $O(N^2)$ prefix scan to amortized $O(1)$.
+  - Decoupled `export_photo` from the catalog persistence objects (`DevelopRow`), accepting abstract filesystem paths instead.
+  - Replaced masking logic where failure outcomes on `--strict` were incorrectly shadowed.
+
+### What is not yet in place
+
+- TD-012 AHD demosaic, TD-017 O(n²) clustering, TD-018 f32 BLOB quantization.
+
+### How to resume (session 13)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-13/to-be-determined
+just session-start
+cat SESSION-STATE.md
+```

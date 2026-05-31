@@ -7,17 +7,17 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 11 (`lightroom-metadata-sync-fixes` — 2026-05-31) — **SHIPPED** via PR #14. Bug fixes for BUG-002, TOCTOU vulnerability, XML character sanitization, and strictly typed metadata properties.
+**Last session**: 12 (`export-enhancements` — 2026-05-31) — **SHIPPED**. Feature enhancements for export pipeline including linear 16-bit to sRGB ISP with ToneMappingLut, watermarking implementation with tiny_skia, O(N) badge preloading, and O(1) collision resolution.
 
-**Current session**: 12 (`<to-be-determined>` — <date>) — branch `main`. **READY** (waiting for next prompt).
+**Current session**: 13 (`<to-be-determined>` — <date>) — branch `main`. **READY** (waiting for next prompt).
 
 **Goal**: To be determined.
 
 **Action**: Read session state and await user prompt.
 
-**Session-end review (session 11 — COMPLETE)**:
-- Round 3 → 15 total findings (TOCTOU, silent XML sanitization fail-open, missing test coverage, strict nima_score boundaries, deduplication logic bug) → remediated.
-- Round 4 → CLEAN.
+**Session-end review (session 12 — COMPLETE)**:
+- R1 → 5 items remediated (O(N) badge preloading, O(N^2) collision, EX_PARTIAL_FAIL strictness, decoupling DevelopRow, watermark fail-open).
+- R2 → CLEAN.
 
 **Session-end review (session 09 — COMPLETE)**:
 - R1 → 0C+1H+2M+2L (5 total; integration test drift, XML validation error specialization, CData type mismatch, README outdated roadmap, warnings path context) → resolved.
