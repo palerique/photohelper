@@ -11,4 +11,4 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHOTOS_DIR="$1"
 shift
 
-cargo run --manifest-path "$ROOT_DIR/Cargo.toml" -p photohelper-cli -- ingest "$PHOTOS_DIR" "$@"
+cargo run --release --manifest-path "$ROOT_DIR/Cargo.toml" -p photohelper-cli -- ingest "$PHOTOS_DIR" "$@"

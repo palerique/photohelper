@@ -251,12 +251,14 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             .join("catalog.db")
     });
 
-    let catalog = Catalog::open(&catalog_path, cli.catalog_lock_timeout_seconds)
-        .with_context(|| format!("opening catalog at {}", catalog_path.display()))?;
+    let rows = {
+        let catalog = Catalog::open(&catalog_path, cli.catalog_lock_timeout_seconds)
+            .with_context(|| format!("opening catalog at {}", catalog_path.display()))?;
 
-    let rows = catalog
-        .all_photos_with_cull_scores(MODEL_SLUG, CLIP_MODEL_SLUG)
-        .with_context(|| "querying catalog for active photos")?;
+        catalog
+            .all_photos_with_cull_scores(MODEL_SLUG, CLIP_MODEL_SLUG)
+            .with_context(|| "querying catalog for active photos")?
+    };
 
     if rows.is_empty() {
         eprintln!(
