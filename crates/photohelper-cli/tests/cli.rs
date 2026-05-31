@@ -1605,7 +1605,8 @@ fn develop_handles_out_of_bounds_scores() {
             .query_row("SELECT id FROM photos LIMIT 1", [], |r| r.get(0))
             .unwrap();
 
-        // 99.9 is out of bounds, so it clamps to the maximum rating (5)
+        // 99.9 is out of bounds, so the builder now correctly rejects it.
+        // It does not silently clamp.
         conn.execute(
             "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![photo_id, "nima-aesthetic-v1", 99.9, 1_700_000_000],
@@ -1618,12 +1619,13 @@ fn develop_handles_out_of_bounds_scores() {
         .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
         .args(["--catalog", cat_str, "develop", "--lr-rating", "--lr-label"])
         .assert()
-        .code(0);
+        .code(0)
+        .stderr(predicates::str::contains("invalid settings; skipping"))
+        .stderr(predicates::str::contains("errored: 1"));
 
-    let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
     assert!(
-        xml.contains("xmp:Rating=\"5\""),
-        "Out of bounds high score clamps safely to max rating"
+        !xmp.exists(),
+        "Sidecar should not be written for out of bounds score"
     );
 }
 

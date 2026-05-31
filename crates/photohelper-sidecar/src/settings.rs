@@ -482,7 +482,7 @@ impl SidecarSettings {
 }
 
 /// Builder for [`SidecarSettings`].
-#[derive(Debug, Default)]
+#[derive(Default, Clone)]
 pub struct SidecarSettingsBuilder {
     temperature: Option<i32>,
     tint: Option<i32>,
@@ -604,7 +604,7 @@ impl SidecarSettingsBuilder {
     /// # Errors
     ///
     /// Returns [`Error::Validation`] if any field is out of its valid range.
-    pub fn build(mut self) -> Result<SidecarSettings, Error> {
+    pub fn build(self) -> Result<SidecarSettings, Error> {
         if let Some(t) = self.temperature {
             if !(2000..=50_000).contains(&t) {
                 return Err(Error::Validation {
@@ -640,12 +640,11 @@ impl SidecarSettingsBuilder {
             }
         }
         if let Some(s) = self.nima_score {
-            if !s.is_finite() {
+            if !s.is_finite() || !(1.0..=10.0).contains(&s) {
                 return Err(Error::Validation {
-                    message: format!("nima_score {s} is not finite"),
+                    message: format!("nima_score {s} is not finite or outside [1.0, 10.0]"),
                 });
             }
-            self.nima_score = Some(s.clamp(1.0, 10.0));
         }
         if let Some(c) = self.dedup_cluster_id {
             if c < 0 {
@@ -687,6 +686,42 @@ impl SidecarSettingsBuilder {
             }
             set
         });
+
+        if let Some(pid) = &self.photohelper_id {
+            if !crate::writer::is_valid_xml_string(pid) {
+                return Err(Error::Validation {
+                    message: "photohelper_id contains invalid XML characters".to_string(),
+                });
+            }
+        }
+
+        if let Some(l) = &label {
+            if !crate::writer::is_valid_xml_string(l) {
+                return Err(Error::Validation {
+                    message: "label contains invalid XML characters".to_string(),
+                });
+            }
+        }
+
+        if let Some(kws) = &keywords {
+            for kw in kws {
+                if !crate::writer::is_valid_xml_string(kw) {
+                    return Err(Error::Validation {
+                        message: "keyword contains invalid XML characters".to_string(),
+                    });
+                }
+            }
+        }
+
+        if let Some(kws) = &hierarchical_keywords {
+            for kw in kws {
+                if !crate::writer::is_valid_xml_string(kw) {
+                    return Err(Error::Validation {
+                        message: "hierarchical_keyword contains invalid XML characters".to_string(),
+                    });
+                }
+            }
+        }
 
         Ok(SidecarSettings {
             temperature: self.temperature,

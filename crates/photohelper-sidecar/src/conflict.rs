@@ -14,12 +14,20 @@
 //!
 //! `--force` always produces `ForcedOverwrite`.
 
-use std::path::Path;
-
 use crate::error::Error;
+use crate::path::SidecarPath;
 use crate::reader::read_xmp;
 use crate::settings::SidecarSettings;
 use crate::writer::write_xmp;
+
+/// Write strategy for conflict resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictStrategy {
+    /// Safe merge: applies timestamp decision table.
+    Safe,
+    /// Force overwrite: overwrites existing sidecar unconditionally.
+    ForceOverwrite,
+}
 
 /// Outcome of a [`merge_and_write`] call. Maps 1:1 to `DevelopStats` counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,36 +59,38 @@ pub enum WriteOutcome {
 ///   (other than file-not-found, which is treated as "no prior sidecar").
 /// - [`Error::Io`] / [`Error::AtomicWrite`] if writing the new sidecar fails.
 pub fn merge_and_write(
-    path: &Path,
+    path: &SidecarPath,
     incoming: &SidecarSettings,
-    force: bool,
+    strategy: ConflictStrategy,
 ) -> Result<WriteOutcome, Error> {
-    if force {
-        let to_write = if path.exists() {
-            match read_xmp(path) {
-                Ok(existing) => existing.merge(incoming),
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "force: failed to read existing XMP; falling back to direct write");
-                    incoming.clone()
+    let existing = match read_xmp(path) {
+        Ok(settings) => settings,
+        Err(e) => {
+            if let Error::Io { source, .. } = &e {
+                if source.kind() == std::io::ErrorKind::NotFound {
+                    write_xmp(path, incoming)?;
+                    tracing::info!(path = %path.display(), "develop: XMP sidecar created");
+                    return Ok(WriteOutcome::Created);
                 }
             }
-        } else {
-            incoming.clone()
-        };
-        write_xmp(path, &to_write)?;
+            if strategy == ConflictStrategy::ForceOverwrite {
+                if matches!(e, Error::XmlParse { .. }) {
+                    tracing::warn!(path = %path.display(), error = %e, "force: failed to parse existing XMP; falling back to direct write");
+                    write_xmp(path, incoming)?;
+                    tracing::info!(path = %path.display(), "develop: XMP sidecar force-overwritten");
+                    return Ok(WriteOutcome::ForcedOverwrite);
+                }
+            }
+            return Err(e);
+        }
+    };
+
+    if strategy == ConflictStrategy::ForceOverwrite {
+        let merged = existing.merge(incoming);
+        write_xmp(path, &merged)?;
         tracing::info!(path = %path.display(), "develop: XMP sidecar force-overwritten");
         return Ok(WriteOutcome::ForcedOverwrite);
     }
-
-    // No existing sidecar — create new.
-    if !path.exists() {
-        write_xmp(path, incoming)?;
-        tracing::info!(path = %path.display(), "develop: XMP sidecar created");
-        return Ok(WriteOutcome::Created);
-    }
-
-    // Existing sidecar — read and apply conflict resolution.
-    let existing = read_xmp(path)?;
 
     // Correct conflict detection (Theme A + B fix):
     // - `existing.metadata_date()` = xmp:MetadataDate (Lightroom's write timestamp)
@@ -113,14 +123,20 @@ pub fn merge_and_write(
                 tracing::warn!(
                     path = %path.display(),
                     error = %e,
-                    "failed to retrieve sidecar file mtime; falling back to metadata timestamp comparison"
+                    "failed to retrieve sidecar file mtime; aborting to prevent overwrite"
                 );
-                false
+                return Err(Error::Io {
+                    path: path.to_path_buf(),
+                    source: e,
+                });
             }
         }
     } else {
         false
     };
+
+    let is_ours = existing.photohelper_id().is_some()
+        && existing.photohelper_id() == incoming.photohelper_id();
 
     let outcome = if mtime_conflict {
         tracing::debug!(
@@ -157,8 +173,6 @@ pub fn merge_and_write(
                 // Existing sidecar has ph:LastProcessedAt (photohelper-written) but no
                 // xmp:MetadataDate — if we own it, we can safely update it. Otherwise,
                 // conservatively preserve; the absence of a date is ambiguous.
-                let is_ours = existing.photohelper_id().is_some()
-                    && existing.photohelper_id() == incoming.photohelper_id();
                 if is_ours {
                     tracing::info!(path = %path.display(), "develop: updating owned XMP sidecar despite missing MetadataDate");
                     WriteOutcome::Overwritten
@@ -174,8 +188,6 @@ pub fn merge_and_write(
                 // Neither timestamp present — check for any crs: attribute (not just
                 // the 6 numeric ones) to avoid overwriting Lightroom settings like
                 // crs:WhiteBalance or crs:CameraProfile (Theme B fix).
-                let is_ours = existing.photohelper_id().is_some()
-                    && existing.photohelper_id() == incoming.photohelper_id();
                 if existing.has_any_crs_attribute() && !is_ours {
                     tracing::debug!(
                         path = %path.display(),
