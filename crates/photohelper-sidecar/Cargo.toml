@@ -18,6 +18,7 @@ thiserror.workspace = true
 static_assertions.workspace = true
 tracing.workspace = true
 filetime.workspace = true
+uuid = { version = "1.23.2", features = ["v4"] }
 
 [dev-dependencies]
 tempfile.workspace = true
