@@ -23,11 +23,11 @@ use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
 use crate::{Cli, exit_code};
 
 /// Clap args for `photohelper cull`.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone)]
 pub(crate) struct CullArgs {
     /// Treat decode, inference, or derive failures as fatal at end-of-run.
     #[arg(long, default_value_t = false)]
-    strict: bool,
+    pub(crate) strict: bool,
 }
 
 /// Atomic counters for the `cull` summary line.
@@ -217,9 +217,9 @@ pub fn run_cull(
         tracing::warn!("heartbeat thread died before end-of-cull; liveness signal was unavailable");
     }
     stop.signal();
-    // join() result discarded intentionally — early death is already surfaced
-    // by the is_finished() WARN above; the panic payload adds no extra value.
-    let _ = heartbeat_handle.join();
+    if let Err(e) = heartbeat_handle.join() {
+        tracing::error!("heartbeat thread panicked: {:?}", e);
+    }
 
     eprintln!("{}", stats.summary_line());
 
@@ -230,10 +230,11 @@ pub fn run_cull(
     let infer_failed = stats.infer_failed.load(Ordering::Relaxed);
     let derive_failed = stats.derive_failed.load(Ordering::Relaxed);
 
-    // --strict exits non-zero when the inference pipeline itself fails.
-    // Transient / user-caused conditions (file_missing, content_changed,
-    // catalog_inconsistency) do not trigger strict.
-    if args.strict && (decode_failed + infer_failed + derive_failed) > 0 {
+    let catalog_inconsistency = stats.catalog_inconsistency.load(Ordering::Relaxed);
+    // --strict exits non-zero when the inference pipeline itself fails or when DB writes fail.
+    // Transient / user-caused conditions (file_missing, content_changed)
+    // do not trigger strict.
+    if args.strict && (decode_failed + infer_failed + derive_failed + catalog_inconsistency) > 0 {
         return Ok(exit_code::EX_STRICT_FAIL);
     }
     // "Nothing useful happened" check: walked at least one photo but produced

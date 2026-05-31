@@ -584,9 +584,9 @@ impl Catalog {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| insert_error(photo_id, e))?;
         tx.execute(
-            "INSERT OR IGNORE INTO cull_scores \
+            "INSERT INTO cull_scores \
              (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) \
-             VALUES (?1, ?2, ?3, ?4)",
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT (photo_id, model_slug) DO NOTHING",
             rusqlite::params![&id_bytes, model_slug, score, scored_at_unix_seconds],
         )
         .map_err(|e| insert_error(photo_id, e))?;
@@ -696,9 +696,9 @@ impl Catalog {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| insert_error(photo_id, e))?;
         tx.execute(
-            "INSERT OR IGNORE INTO embeddings \
+            "INSERT INTO embeddings \
              (photo_id, model_slug, dim, quantization, embedding, embedded_at_unix_seconds) \
-             VALUES (?1, ?2, ?3, 'f32', ?4, ?5)",
+             VALUES (?1, ?2, ?3, 'f32', ?4, ?5) ON CONFLICT (photo_id, model_slug) DO NOTHING",
             rusqlite::params![
                 &id_bytes,
                 model_slug,
@@ -786,48 +786,69 @@ impl Catalog {
         Ok(out)
     }
 
-    /// Persist a cluster assignment for `photo_id` × `model_slug`.
+    /// Persist cluster assignments for a batch of photos.
     ///
     /// Uses `INSERT OR REPLACE` — re-clustering a photo replaces the old
-    /// assignment. Returns `()` (INSERT OR REPLACE always "inserts").
+    /// assignment. All inserts are wrapped in a single transaction for
+    /// performance.
     ///
     /// # Errors
     /// - `Error::CatalogPoisoned` if a prior worker panicked.
     /// - `Error::CatalogInsert` for SQLite failures (includes FK violations).
-    // TD-019: no per-dedup-run audit trail; similarity_threshold stored per-row as stop-gap.
-    // See TECH-DEBT.md § TD-019 for the dedup_runs upgrade plan.
-    pub fn insert_dup_cluster(
+    pub fn insert_dup_clusters(
         &self,
-        photo_id: PhotoId,
+        assignments: &[(PhotoId, i64)],
         model_slug: &str,
-        cluster_id: i64,
         similarity_threshold: f32,
         clustered_at_unix_seconds: i64,
     ) -> Result<(), Error> {
         let mut guard = self.conn.lock().map_err(|_| Error::CatalogPoisoned {
             path: self.canonical_path.clone(),
         })?;
-        let id_bytes = photo_id.as_bytes().to_vec();
+
         let tx = guard
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| insert_error(photo_id, e))?;
-        tx.execute(
-            "INSERT OR REPLACE INTO dup_clusters \
-             (photo_id, model_slug, cluster_id, similarity_threshold, clustered_at_unix_seconds) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                &id_bytes,
-                model_slug,
-                cluster_id,
-                f64::from(similarity_threshold),
-                clustered_at_unix_seconds
-            ],
-        )
-        .map_err(|e| insert_error(photo_id, e))?;
-        tx.commit().map_err(|e| insert_error(photo_id, e))?;
+            .map_err(|e| {
+                insert_error(
+                    assignments.first().map_or_else(
+                        || photohelper_core::catalog_glue::photo_id_from_row_bytes([0; 32]),
+                        |(id, _)| *id,
+                    ),
+                    e,
+                )
+            })?;
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO dup_clusters \
+                 (photo_id, model_slug, cluster_id, similarity_threshold, clustered_at_unix_seconds) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)"
+            ).map_err(|e| insert_error(assignments.first().map_or_else(|| photohelper_core::catalog_glue::photo_id_from_row_bytes([0;32]), |(id, _)| *id), e))?;
+
+            for (photo_id, cluster_id) in assignments {
+                let id_bytes = photo_id.as_bytes().to_vec();
+                stmt.execute(rusqlite::params![
+                    &id_bytes,
+                    model_slug,
+                    cluster_id,
+                    f64::from(similarity_threshold),
+                    clustered_at_unix_seconds
+                ])
+                .map_err(|e| insert_error(*photo_id, e))?;
+            }
+        }
+
+        tx.commit().map_err(|e| {
+            insert_error(
+                assignments.first().map_or_else(
+                    || photohelper_core::catalog_glue::photo_id_from_row_bytes([0; 32]),
+                    |(id, _)| *id,
+                ),
+                e,
+            )
+        })?;
         Ok(())
     }
-
     /// Borrow the canonical catalog path.
     #[must_use]
     pub fn canonical_path(&self) -> &Path {
@@ -1682,11 +1703,11 @@ mod tests {
             .unwrap();
 
         // First cluster assignment.
-        cat.insert_dup_cluster(p1.photo_id(), "clip-v1", 0, 0.95, 2000)
+        cat.insert_dup_clusters(&[(p1.photo_id(), 0)], "clip-v1", 0.95, 2000)
             .unwrap();
 
         // Re-cluster with different cluster_id (INSERT OR REPLACE).
-        cat.insert_dup_cluster(p1.photo_id(), "clip-v1", 7, 0.90, 3000)
+        cat.insert_dup_clusters(&[(p1.photo_id(), 7)], "clip-v1", 0.90, 3000)
             .unwrap();
 
         // Verify the second assignment replaced the first.
@@ -1793,7 +1814,7 @@ mod tests {
         cat.upsert(&photo, 0).unwrap();
         // No embedding inserted → FK violation in dup_clusters.
         let err = cat
-            .insert_dup_cluster(photo.photo_id(), "clip-v1", 0, 0.95, 1000)
+            .insert_dup_clusters(&[(photo.photo_id(), 0)], "clip-v1", 0.95, 1000)
             .unwrap_err();
         assert!(
             matches!(err, Error::CatalogInsert { .. }),
@@ -1921,7 +1942,7 @@ mod tests {
             .collect();
         cat.insert_embedding(p.photo_id(), "clip-vit-b32", &bytes, 512, 1000)
             .unwrap();
-        cat.insert_dup_cluster(p.photo_id(), "clip-vit-b32", 42, 0.95, 1000)
+        cat.insert_dup_clusters(&[(p.photo_id(), 42)], "clip-vit-b32", 0.95, 1000)
             .unwrap();
 
         let rows = cat

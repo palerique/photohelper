@@ -22,51 +22,51 @@ use crate::exit_code;
 use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
 
 /// Clap args for `photohelper develop`.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct DevelopArgs {
     /// Exit non-zero if any per-photo error occurs (file_missing or write errors).
     #[arg(long, default_value_t = false)]
-    strict: bool,
+    pub(crate) strict: bool,
     /// Always overwrite existing XMP sidecars (skip conflict check).
     #[arg(long, default_value_t = false)]
-    force: bool,
+    pub(crate) force: bool,
     /// Exposure compensation in stops (–5.0 to 5.0).
     #[arg(long)]
-    exposure: Option<f32>,
+    pub(crate) exposure: Option<f32>,
     /// White balance temperature in Kelvin (2000–50000).
     #[arg(long)]
-    temp: Option<i32>,
+    pub(crate) temp: Option<i32>,
     /// White balance tint (–150 to 150).
     #[arg(long)]
-    tint: Option<i32>,
+    pub(crate) tint: Option<i32>,
     /// Contrast (–100 to 100).
     #[arg(long)]
-    contrast: Option<i32>,
+    pub(crate) contrast: Option<i32>,
     /// Highlights (–100 to 100).
     #[arg(long)]
-    highlights: Option<i32>,
+    pub(crate) highlights: Option<i32>,
     /// Shadows (–100 to 100).
     #[arg(long)]
-    shadows: Option<i32>,
+    pub(crate) shadows: Option<i32>,
     /// Write Lightroom star ratings (1 to 5) based on NIMA score.
     #[arg(long, default_value_t = false)]
-    lr_rating: bool,
+    pub(crate) lr_rating: bool,
     /// Write Lightroom color labels (Red/Green) based on NIMA score.
     #[arg(long, default_value_t = false)]
-    lr_label: bool,
+    pub(crate) lr_label: bool,
     /// Write photohelper keywords (tier/cluster) based on NIMA score and duplicate cluster ID.
     #[arg(long, default_value_t = false)]
-    lr_keywords: bool,
+    pub(crate) lr_keywords: bool,
     /// Write rating, label, and keywords (convenience shorthand).
     #[arg(long, default_value_t = false)]
-    all_lr: bool,
+    pub(crate) all_lr: bool,
     /// Custom Lightroom color label for 'Red' (NIMA < 4.0)
     #[arg(long, env = "PHOTOHELPER_LR_LABEL_RED", default_value = "Red")]
-    lr_label_red: String,
+    pub(crate) lr_label_red: String,
     /// Custom Lightroom color label for 'Green' (NIMA >= 7.0)
     #[arg(long, env = "PHOTOHELPER_LR_LABEL_GREEN", default_value = "Green")]
-    lr_label_green: String,
+    pub(crate) lr_label_green: String,
 }
 
 /// AtomicU64 counters used for concurrent updates by Rayon parallel threads and safe cross-thread visibility for the heartbeat loop.
@@ -137,6 +137,7 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     let lr_rating = args.all_lr || args.lr_rating;
     let lr_label = args.all_lr || args.lr_label;
     let lr_keywords = args.all_lr || args.lr_keywords;
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
 
     let red_trimmed = args.lr_label_red.trim();
     let green_trimmed = args.lr_label_green.trim();
@@ -295,6 +296,10 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
 
     // Walk in parallel using Rayon (sidecar I/O is per-photo; heartbeat reads stats cross-thread).
     rows.par_iter().for_each(|row| {
+        if cancelled.load(Ordering::Relaxed) {
+            return;
+        }
+
         stats.walked.fetch_add(1, Ordering::Relaxed);
         let source_path = row.source_path();
 
@@ -330,18 +335,24 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
         }
 
         // Validate early that the NIMA score is finite
-        let valid_nima = row.nima_score().and_then(|score| {
-            if score.is_finite() {
+        let valid_nima = if let Some(score) = row.nima_score() {
+            if score.is_finite() && !score.is_nan() {
                 Some(score)
             } else {
                 tracing::warn!(
                     path = %source_path.display(),
                     value = score,
-                    "NIMA score is non-finite; ignoring score for develop"
+                    "NIMA score is non-finite; failing develop"
                 );
-                None
+                stats.errored.fetch_add(1, Ordering::Relaxed);
+                if args.strict {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+                return;
             }
-        });
+        } else {
+            None
+        };
 
         if let Some(score) = valid_nima {
             builder = builder.nima_score(score);
@@ -361,16 +372,13 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
         // Write Lightroom star ratings (1 to 5) based on NIMA score.
         if lr_rating {
             if let Some(score) = valid_nima {
-                let rating = if score < 4.0 {
-                    photohelper_sidecar::Rating::One
-                } else if score < 5.5 {
-                    photohelper_sidecar::Rating::Two
-                } else if score < 7.0 {
-                    photohelper_sidecar::Rating::Three
-                } else if score < 8.5 {
-                    photohelper_sidecar::Rating::Four
-                } else {
-                    photohelper_sidecar::Rating::Five
+                let (rating_num, _) = crate::commands::util::nima_score_to_rating_and_tier(score);
+                let rating = match rating_num {
+                    1 => photohelper_sidecar::Rating::One,
+                    2 => photohelper_sidecar::Rating::Two,
+                    3 => photohelper_sidecar::Rating::Three,
+                    4 => photohelper_sidecar::Rating::Four,
+                    _ => photohelper_sidecar::Rating::Five,
                 };
                 builder = builder.rating(rating);
             }
@@ -399,22 +407,12 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
             hierarchical.insert("photohelper".to_string());
 
             if let Some(score) = valid_nima {
-                let tier = if score < 4.0 {
-                    "discard"
-                } else if score < 5.5 {
-                    "poor"
-                } else if score < 7.0 {
-                    "fair"
-                } else if score < 8.5 {
-                    "good"
-                } else {
-                    "excellent"
-                };
+                let (_, tier) = crate::commands::util::nima_score_to_rating_and_tier(score);
                 flat.insert(format!("nima:{tier}"));
                 hierarchical.insert(format!("photohelper|nima:{tier}"));
             }
 
-            if let Some(cluster_id) = row.dedup_cluster_id().filter(|&id| id >= 0) {
+            if let Some(cluster_id) = row.dedup_cluster_id() {
                 flat.insert(format!("cluster:{cluster_id}"));
                 hierarchical.insert(format!("photohelper|cluster:{cluster_id}"));
             }

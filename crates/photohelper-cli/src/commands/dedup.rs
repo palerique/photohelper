@@ -23,11 +23,11 @@ use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
 use crate::{Cli, exit_code};
 
 /// Clap args for `photohelper dedup`.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone)]
 pub(crate) struct DedupeArgs {
     /// Exit non-zero if any per-photo error occurs during the embed phase.
     #[arg(long, default_value_t = false)]
-    strict: bool,
+    pub(crate) strict: bool,
 
     /// Cosine-similarity threshold: photos with sim >= this are considered duplicates.
     /// Valid range: (0.0, 1.0].
@@ -36,10 +36,10 @@ pub(crate) struct DedupeArgs {
         default_value_t = 0.95_f32,
         value_parser = parse_similarity_threshold
     )]
-    similarity_threshold: f32,
+    pub(crate) similarity_threshold: f32,
 }
 
-fn parse_similarity_threshold(s: &str) -> Result<f32, String> {
+pub fn parse_similarity_threshold(s: &str) -> Result<f32, String> {
     let v: f32 = s.parse().map_err(|_| format!("'{s}' is not a valid f32"))?;
     if !v.is_finite() || v <= 0.0 || v > 1.0 {
         return Err(format!(
@@ -252,7 +252,9 @@ pub fn run_dedup(cli: &Cli, args: &DedupeArgs, model: &VerifiedModelBytes) -> an
         );
     }
     stop.signal();
-    let _ = heartbeat_handle.join();
+    if let Err(e) = heartbeat_handle.join() {
+        tracing::error!("heartbeat thread panicked: {:?}", e);
+    }
 
     // ── Phase 2 — Cluster (sequential, after Phase 1 completes) ───────────────
     let all_embeddings = catalog
@@ -302,17 +304,16 @@ pub fn run_dedup(cli: &Cli, args: &DedupeArgs, model: &VerifiedModelBytes) -> an
             let singletons = result.singleton_count;
             let clustered_at = unix_now();
 
-            for (photo_id, cluster_id) in &result.assignments {
-                if let Err(e) = catalog.insert_dup_cluster(
-                    *photo_id,
-                    CLIP_MODEL_SLUG,
-                    *cluster_id,
-                    args.similarity_threshold,
-                    clustered_at,
-                ) {
-                    tracing::warn!(error = %e, "cluster write failed");
-                    stats.cluster_write_failed.fetch_add(1, Ordering::Relaxed);
-                }
+            if let Err(e) = catalog.insert_dup_clusters(
+                &result.assignments,
+                CLIP_MODEL_SLUG,
+                args.similarity_threshold,
+                clustered_at,
+            ) {
+                tracing::warn!(error = %e, "batch cluster write failed");
+                stats
+                    .cluster_write_failed
+                    .fetch_add(result.assignments.len() as u64, Ordering::Relaxed);
             }
             (clusters_found, singletons)
         }
@@ -321,21 +322,28 @@ pub fn run_dedup(cli: &Cli, args: &DedupeArgs, model: &VerifiedModelBytes) -> an
     eprintln!("{}", stats.summary_line(clusters_found, singletons));
 
     // Exit code logic.
-    // `already_embedded` is a benign race (excluded from strict); `catalog_insert_failed` and
-    // `cluster_write_failed` are real errors that prevent data from being persisted.
+    // Exit code logic.
+    // `already_embedded` is a benign race (excluded from strict); all Phase 1 per-photo failures
+    // (derive, decode, infer, file_missing, content_changed) AND Phase 2 cluster write failures
+    // are real errors that prevent data from being persisted, triggering strict mode.
     let all_errors = stats.derive_failed.load(Ordering::Relaxed)
         + stats.decode_failed.load(Ordering::Relaxed)
         + stats.infer_failed.load(Ordering::Relaxed)
         + stats.file_missing.load(Ordering::Relaxed)
         + stats.content_changed.load(Ordering::Relaxed)
         + stats.catalog_insert_failed.load(Ordering::Relaxed)
-        + stats.cluster_write_failed.load(Ordering::Relaxed);
+        + stats.cluster_write_failed.load(Ordering::Relaxed)
+        + stats.deserialize_failed.load(Ordering::Relaxed);
 
     if args.strict && all_errors > 0 {
         return Ok(exit_code::EX_STRICT_FAIL);
     }
     let walked = stats.walked.load(Ordering::Relaxed);
-    if walked > 0 && stats.embedded.load(Ordering::Relaxed) == 0 && all_errors == 0 {
+    if walked > 0
+        && (stats.embedded.load(Ordering::Relaxed) + stats.already_embedded.load(Ordering::Relaxed))
+            == 0
+        && all_errors == 0
+    {
         return Ok(exit_code::EX_USAGE);
     }
     Ok(0)
@@ -419,22 +427,23 @@ fn threshold_cluster(embeddings: &[(PhotoId, ImageEmbedding)], threshold: f32) -
     let mut next_id: i64 = 0;
     let mut id_counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
 
-    let assignments: Vec<(PhotoId, i64)> = embeddings
-        .iter()
-        .zip(roots.iter())
-        .map(|((photo_id, _), &root)| {
-            let cluster_id = *root_to_id.entry(root).or_insert_with(|| {
-                let id = next_id;
-                next_id += 1;
-                id
-            });
-            *id_counts.entry(cluster_id).or_insert(0) += 1;
-            (*photo_id, cluster_id)
-        })
-        .collect();
+    let mut assignments: Vec<(PhotoId, i64)> = Vec::with_capacity(embeddings.len());
+    for ((photo_id, _), &root) in embeddings.iter().zip(roots.iter()) {
+        let cluster_id = *root_to_id.entry(root).or_insert_with(|| {
+            let id = next_id;
+            next_id += 1;
+            id
+        });
+        *id_counts.entry(cluster_id).or_insert(0) += 1;
+        assignments.push((*photo_id, cluster_id));
+    }
 
-    let cluster_count = next_id as usize;
+    // Filter out singletons (size == 1)
+    assignments.retain(|(_, cluster_id)| id_counts.get(cluster_id).unwrap_or(&0) > &1);
+
     let singleton_count = id_counts.values().filter(|&&c| c == 1).count();
+    let cluster_count = id_counts.len();
+
     ClusteringResult {
         assignments,
         cluster_count,

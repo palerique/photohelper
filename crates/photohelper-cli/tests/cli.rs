@@ -323,8 +323,8 @@ fn ingest_lock_timeout_above_max_exits_2_clap_default() {
 #[test]
 fn stub_subcommands_exit_69_with_not_yet_implemented_message() {
     // "cull" removed after session 04 wired the real handler.
-    // "develop" removed after session 06 D4 wired the real handler.
-    for name in ["run", "models", "camera"] {
+    // "run" removed after session 10 wired the real handler.
+    for name in ["models", "camera"] {
         Command::cargo_bin("photohelper")
             .unwrap()
             .arg(name)
@@ -1004,8 +1004,8 @@ fn dedup_end_to_end_embeds_and_clusters_cc0_fixtures() {
         .query_row("SELECT COUNT(*) FROM dup_clusters", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        cluster_count, 2,
-        "both photos must have cluster assignments"
+        cluster_count, 0,
+        "singletons must be filtered out, leaving 0 cluster assignments"
     );
 }
 
@@ -1584,15 +1584,10 @@ fn develop_handles_nan_and_infinite_scores() {
         .assert()
         .code(0);
 
-    let xml = std::fs::read_to_string(&xmp).expect("sidecar must exist");
-    // Since infinity is non-finite, it is ignored early, so rating and labels should be completely omitted.
+    // Since infinity is non-finite, we now treat it as an error and skip writing the sidecar.
     assert!(
-        !xml.contains("xmp:Rating"),
-        "Infinity rating should be omitted"
-    );
-    assert!(
-        !xml.contains("xmp:Label"),
-        "Infinity label should be omitted"
+        !xmp.exists(),
+        "Sidecar should not be written for non-finite score"
     );
 }
 
@@ -2175,4 +2170,306 @@ fn develop_case_insensitive_path_deduplication() {
         .stderr(predicates::str::contains(
             "skipping duplicate photo row targeting the same sidecar path to prevent concurrent write race hazards",
         ));
+}
+
+// =====================================================================
+// Session 10: `photohelper run` integration tests
+// =====================================================================
+
+#[test]
+fn run_happy_path_pipeline_and_option_propagation() {
+    let fixtures = cr3_fixture_dir();
+    if !fixtures.join("RAW_FULL_FRAME.CR3").exists() {
+        return;
+    }
+    let model_dir = nima_model_dir();
+    if !model_dir.join("manifest.toml").exists() {
+        return;
+    }
+
+    let workspace = tempfile::tempdir().unwrap();
+    let input_dir = workspace.path().join("input");
+    let output_dir = workspace.path().join("output");
+    std::fs::create_dir(&input_dir).unwrap();
+
+    // Copy one fixture
+    std::fs::copy(
+        fixtures.join("RAW_FULL_FRAME.CR3"),
+        input_dir.join("RAW_FULL_FRAME.CR3"),
+    )
+    .unwrap();
+
+    let cat_path = workspace.path().join(".photohelper").join("catalog.db");
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "run",
+            input_dir.to_str().unwrap(),
+            "--output",
+            output_dir.to_str().unwrap(),
+            "--all-lr",
+            "--watermark",
+            "IntegrationTest",
+            "--quality",
+            "90",
+            "--long-edge",
+            "800",
+            "--lr-label-red",
+            "Vermelho",
+            "--min-rating",
+            "0",
+        ])
+        .assert()
+        .success()
+        .stderr(contains("walked: 1")) // ingest
+        .stderr(contains("scored: 1")) // cull
+        .stderr(contains("written: 1")) // develop
+        .stderr(contains("written: 1")); // export
+
+    // Verify sidecar exists
+    let sidecar_path = input_dir.join("RAW_FULL_FRAME.xmp");
+    assert!(sidecar_path.exists(), "Sidecar must be generated");
+    let sidecar_content = std::fs::read_to_string(&sidecar_path).unwrap();
+    assert!(
+        sidecar_content.contains("xmp:Rating="),
+        "Sidecar must have rating"
+    );
+    assert!(
+        sidecar_content.contains("lr:hierarchicalSubject>"),
+        "Sidecar must have keywords"
+    );
+
+    // Verify JPEG exists. Because it has a NIMA score, the filename will be like `RAW_FULL_FRAME_cull5.30.jpg`.
+    // Since the exact score varies slightly by architecture, we just look for any exported JPEG.
+    let exported_jpegs: Vec<_> = std::fs::read_dir(&output_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jpg"))
+        .collect();
+    assert!(
+        !exported_jpegs.is_empty(),
+        "JPEG must be exported, but found: {:?}",
+        std::fs::read_dir(&output_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn run_strict_mode_aborts_mid_pipeline() {
+    let fixtures = cr3_fixture_dir();
+    if !fixtures.join("RAW_FULL_FRAME.CR3").exists() {
+        return;
+    }
+    let model_dir = nima_model_dir();
+    if !model_dir.join("manifest.toml").exists() {
+        return;
+    }
+
+    let workspace = tempfile::tempdir().unwrap();
+    let input_dir = workspace.path().join("input");
+    let output_dir = workspace.path().join("output");
+    std::fs::create_dir(&input_dir).unwrap();
+
+    // 1. Valid fixture that ingests successfully
+    std::fs::copy(
+        fixtures.join("RAW_FULL_FRAME.CR3"),
+        input_dir.join("RAW_FULL_FRAME.CR3"),
+    )
+    .unwrap();
+
+    // 2. Corrupt fixture that fails ingest, triggering strict abort at end of Stage 1.
+    std::fs::write(input_dir.join("corrupt.cr3"), vec![0xCC; 100]).unwrap();
+
+    let cat_path = workspace.path().join(".photohelper").join("catalog.db");
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "run",
+            input_dir.to_str().unwrap(),
+            "--output",
+            output_dir.to_str().unwrap(),
+            "--strict",
+        ])
+        .assert()
+        .failure()
+        .code(1);
+
+    // Verify torn state prevention: the valid CR3 was ingested but NOT developed/exported.
+    assert!(cat_path.exists(), "Catalog should exist from stage 1");
+    let jpeg_path = output_dir.join("RAW_FULL_FRAME.jpg");
+    assert!(
+        !jpeg_path.exists(),
+        "JPEG must not be exported due to mid-pipeline abort"
+    );
+}
+
+#[test]
+fn run_pipeline_without_explicit_catalog() {
+    let fixtures = cr3_fixture_dir();
+    if !fixtures.join("RAW_FULL_FRAME.CR3").exists() {
+        return;
+    }
+    let model_dir = nima_model_dir();
+    if !model_dir.join("manifest.toml").exists() {
+        return;
+    }
+
+    let workspace = tempfile::tempdir().unwrap();
+    let input_dir = workspace.path().join("input");
+    let output_dir = workspace.path().join("output");
+    std::fs::create_dir(&input_dir).unwrap();
+
+    std::fs::copy(
+        fixtures.join("RAW_FULL_FRAME.CR3"),
+        input_dir.join("RAW_FULL_FRAME.CR3"),
+    )
+    .unwrap();
+
+    // No --catalog flag passed!
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .current_dir(workspace.path()) // Run from workspace root, not input dir
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "run",
+            input_dir.to_str().unwrap(),
+            "--output",
+            output_dir.to_str().unwrap(),
+            "--min-rating",
+            "0",
+        ])
+        .assert()
+        .success()
+        .stderr(contains("written: 1")); // ensure develop/export actually ran!
+
+    // Verify default catalog was created in the input dir
+    let default_cat_path = input_dir.join(".photohelper").join("catalog.db");
+    assert!(
+        default_cat_path.exists(),
+        "Catalog should be created in input dir by default"
+    );
+    let exported_jpegs: Vec<_> = std::fs::read_dir(&output_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jpg"))
+        .collect();
+    assert!(
+        !exported_jpegs.is_empty(),
+        "JPEG must be exported, but found: {:?}",
+        std::fs::read_dir(&output_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn run_input_output_collision_boundary() {
+    let workspace = tempfile::tempdir().unwrap();
+    let input_dir = workspace.path().join("input");
+    std::fs::create_dir(&input_dir).unwrap();
+
+    // Output is inside input
+    let output_dir = input_dir.join("output");
+
+    let model_dir = nima_model_dir();
+    if !model_dir.join("manifest.toml").exists() {
+        return;
+    }
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .args([
+            "run",
+            input_dir.to_str().unwrap(),
+            "--output", output_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("Output path cannot be a subdirectory of the input path to prevent recursive ingest loops"));
+
+    // Output is exact same as input
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .args([
+            "run",
+            input_dir.to_str().unwrap(),
+            "--output",
+            input_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(contains(
+            "Output path cannot be a subdirectory of the input path",
+        ));
+}
+
+#[test]
+fn run_negative_behavioral_min_rating_skip() {
+    let fixtures = cr3_fixture_dir();
+    if !fixtures.join("RAW_FULL_FRAME.CR3").exists() {
+        return;
+    }
+    let model_dir = nima_model_dir();
+    if !model_dir.join("manifest.toml").exists() {
+        return;
+    }
+
+    let workspace = tempfile::tempdir().unwrap();
+    let input_dir = workspace.path().join("input");
+    let output_dir = workspace.path().join("output");
+    std::fs::create_dir(&input_dir).unwrap();
+
+    std::fs::copy(
+        fixtures.join("RAW_FULL_FRAME.CR3"),
+        input_dir.join("RAW_FULL_FRAME.CR3"),
+    )
+    .unwrap();
+
+    let cat_path = workspace.path().join(".photohelper").join("catalog.db");
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "run",
+            input_dir.to_str().unwrap(),
+            "--output",
+            output_dir.to_str().unwrap(),
+            "--min-rating",
+            "5", // Force skip during export, as the fixture scores ~3.9
+        ])
+        .assert()
+        .success()
+        // verify export skipped it
+        .stderr(contains("skipped-rating: 1"));
+
+    // Verify JPEG does NOT exist
+    let exported_jpegs: Vec<_> = std::fs::read_dir(&output_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jpg"))
+        .collect();
+    assert!(
+        exported_jpegs.is_empty(),
+        "JPEG must not be exported due to rating threshold"
+    );
 }
