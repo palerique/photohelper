@@ -317,3 +317,11 @@
 - **Owner**: Session 08+ (or next export refinement session).
 - **Binding trigger**: Next session that touches the `export` pipeline or `export_photo` logic. Must implement image rendering over `tiny-skia` with dynamic scale factors and coordinate calculation logic that accommodates multiple simultaneous watermark templates, using a base harmonic margin (e.g. proportional equivalent of 25px).
 - **Status**: open (informational; current behavior is limited to simple text rendering).
+
+### DN-037 — Fail-open risk in file metadata operations (2026-05-31, session 11)
+
+- **Observed**: In `photohelper-sidecar/src/conflict.rs`, `std::fs::metadata()` failures were silently defaulted to `Ok(false)` (conflict-free). This meant that if the file existed but was unreadable due to strict permissions (e.g. `EACCES`), the tool assumed it was conflict-free and proceeded to overwrite it, potentially corrupting user data or failing midway.
+- **Why it matters**: Fallback to `false` creates a silent fail-open security/data-loss risk. Missing files should return `Ok(false)` via explicit `ErrorKind::NotFound` matching, but all other IO errors (like `PermissionDenied`) must escalate as `Err(Error::Io)`.
+- **Owner**: Any future code interacting with file attributes or existence checks.
+- **Binding trigger**: Next time filesystem interaction is added or reviewed.
+- **Status**: reconciled (2026-05-31, updated `conflict.rs` to propagate non-NotFound IO errors natively and `writer.rs` to explicitly match `NotFound` and escalate other errors).

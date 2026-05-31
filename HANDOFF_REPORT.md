@@ -1252,3 +1252,60 @@ cat SESSION-STATE.md
 
 **Final test count**: 248 tests (all 100% passing).
 `just ci` is completely green.
+
+### How to resume (session 10)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-10/run-pipeline
+just session-start
+cat SESSION-STATE.md
+```
+
+---
+
+## Checkpoint 20 — session 10 SHIPPED (2026-05-31; run pipeline orchestrated)
+
+**Status**: SHIPPED. PR #13 merged to main.
+**Author**: Antigravity session 10, session-end window
+
+### What landed since Checkpoint 19
+
+- Implemented the `run` orchestrating pipeline, connecting ingest → cull → develop → export into a single unified CLI subcommand.
+
+### How to resume (session 11)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-11/lightroom-metadata-sync-fixes
+just session-start
+cat SESSION-STATE.md
+```
+
+---
+
+## Checkpoint 21 — session 11 SHIPPED (2026-05-31; BUG-002, TOCTOU, XML safety)
+
+**Status**: SHIPPED. PR #14 merged to main.
+**Author**: Antigravity session 11, session-end window
+
+### What landed since Checkpoint 20
+
+- **XML Data Safety (Theme B & D)**: Replaced O(N) heap allocation XML filtering with in-place scalar validation (`is_valid_xml_char`) and explicit builder rejection (via `Err(Error::Validation)`).
+- **Strict Bounds (Theme E)**: Replaced silent masking `.clamp()` on `nima_score` with explicit validation at the builder boundary.
+- **Fail-Open Escalation (Theme F)**: Upgraded filesystem operations to explicitly match and ignore `ErrorKind::NotFound` while propagating and escalating other `Error::Io` issues like `PermissionDenied`, closing a vulnerability where locked sidecars were assumed conflict-free.
+- **Panic-Free Architecture (Theme I)**: Replaced `write!(...).expect(...)` calls in `writer.rs` with infallible `.push_str(&format!(...))` appending to comply with project policies.
+- **Deduplication Correctness (Theme A)**: Fixed the Unicode path deduplication case-folding bug in `develop.rs` to guarantee uniform casing across Linux and macOS filesystems to prevent write races.
+
+### What is not yet in place
+
+- TD-012 AHD demosaic, TD-017 O(n²) clustering, TD-018 f32 BLOB quantization.
+
+### How to resume (session 12)
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-12/to-be-determined
+just session-start
+cat SESSION-STATE.md
+```

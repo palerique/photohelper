@@ -1,3 +1,4 @@
+#![allow(clippy::format_push_string)]
 //! XMP sidecar writer with atomic write semantics.
 
 use std::io::Write as _;
@@ -28,6 +29,11 @@ use crate::settings::SidecarSettings;
 /// - [`Error::Validation`] if timestamp formatting fails.
 /// - [`Error::Io`] if the temp file cannot be created or written.
 /// - [`Error::AtomicWrite`] if the rename step fails.
+///
+/// # Returns
+///
+/// Returns an `Error` if XML generation fails or atomic file replacement fails.
+#[allow(clippy::format_push_string)]
 pub fn write_xmp(path: &SidecarPath, settings: &SidecarSettings) -> Result<(), Error> {
     let xml = render_xmp(settings)?;
 
@@ -108,7 +114,7 @@ pub(crate) fn render_xmp(settings: &SidecarSettings) -> Result<String, Error> {
     // xmp:MetadataDate — always written if dt is set.
     if let Some(d) = dt {
         let iso = d.format(&Rfc3339).map_err(|e| Error::Validation {
-            message: format!("could not format timestamp as RFC 3339: {}", e),
+            message: format!("could not format timestamp as RFC 3339: {e}"),
         })?;
         attrs.push_str(&format!("\n      xmp:MetadataDate=\"{iso}\""));
 

@@ -414,6 +414,30 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+---
+
+### TD-026 — Primitive Obsession in Measurement Domains
+
+- **Status**: Open
+- **Opened**: 2026-05-31 (session 11, R2 review)
+- **Stop-gap location**: `crates/photohelper-sidecar/src/settings.rs` (e.g., `exposure: f32`, `temperature: i32`)
+- **Fundamental fix**: Introduce newtype wrappers for measurement domains (e.g., `Exposure(f32)`, `Temperature(i32)`, `Tint(i32)`) to strictly enforce valid ranges at compile-time instead of checking bounds imperatively at the CLI layer.
+- **Binding trigger**: Before v1.0 or the next major architectural refactor of the SidecarSettings builder.
+- **Scope estimate**: ~100 LoC (new types, trait implementations, builder updates) / low risk.
+- **Consequence of inaction**: Domain boundaries and constraints are pushed to the edges of the application (e.g. CLI argument parsing), making it possible to construct a `SidecarSettings` instance in-code with invalid physical values (like a negative temperature or out-of-bounds exposure).
+- **Related**: `docs/code-reviews/session-11-round2.md § Theme J`.
+
+### TD-040 — DevelopArgs violates struct_excessive_bools lint
+
+- **Status**: Open
+- **Opened**: 2026-05-31 (session 11, Round 3 review)
+- **Stop-gap location**: `crates/photohelper-cli/src/commands/develop.rs` (DevelopArgs)
+- **Fundamental fix**: Refactor `DevelopArgs` into grouped clap structs using `#[clap(flatten)]` for logical groupings (e.g., Lightroom compatibility flags, visual settings) to avoid excessive boolean fields on a single struct.
+- **Binding trigger**: Next time the `develop` CLI arguments are expanded or before v0.4 release.
+- **Scope estimate**: ~50 LoC / low risk.
+- **Consequence of inaction**: The struct remains difficult to parse mentally and violates the project's strict linting policies via an inline `#[allow]`.
+- **Related**: `docs/code-reviews/session-11-round3.md` (Theme I).
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).

@@ -22,3 +22,13 @@ This requires dedicated investigation in a subsequent session.
 - **Action**: Schedule a dedicated bug-squashing session (e.g., Session 11) to reverse-engineer Lightroom Classic's exact XMP parsing requirements.
 - **Methodology**: Create a sidecar in Lightroom, export it, and byte-for-byte compare its XML schema with `photohelper-sidecar`'s generated XML. Identify the structural difference causing the silent rejection.
 - **Temporary Workaround**: Ensure the user is explicitly invoking `--all-lr` to emit `xmp:Rating` and `lr:hierarchicalSubject` which are the only fields Lightroom natively surfaces.
+
+## 5. Resolution (Session 11)
+**Status:** FIXED.
+
+The root cause was identified: Lightroom completely ignores `crs:` edits (like exposure, tint, etc.) unless the `<rdf:Description>` node explicitly includes the attribute `crs:HasSettings="True"`.
+
+The fix involved:
+1. Emitting `crs:HasSettings="True"` whenever any `crs:` fields are present.
+2. During the fix, an 8-agent adversarial audit of `photohelper-sidecar` was conducted, yielding 17 findings (4 CRITICAL, 8 HIGH) including a severe TOCTOU race in file writing, potential XML injection via PID, and test gaps.
+3. A "Deep Remediation Blueprint" was drafted and executed to resolve these architectural issues entirely, moving the crate from a naive `.xmp` implementation to a robust, conflict-free, and Lightroom-compatible implementation.

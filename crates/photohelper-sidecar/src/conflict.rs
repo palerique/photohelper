@@ -73,13 +73,11 @@ pub fn merge_and_write(
                     return Ok(WriteOutcome::Created);
                 }
             }
-            if strategy == ConflictStrategy::ForceOverwrite {
-                if matches!(e, Error::XmlParse { .. }) {
-                    tracing::warn!(path = %path.display(), error = %e, "force: failed to parse existing XMP; falling back to direct write");
-                    write_xmp(path, incoming)?;
-                    tracing::info!(path = %path.display(), "develop: XMP sidecar force-overwritten");
-                    return Ok(WriteOutcome::ForcedOverwrite);
-                }
+            if strategy == ConflictStrategy::ForceOverwrite && matches!(e, Error::XmlParse { .. }) {
+                tracing::warn!(path = %path.display(), error = %e, "force: failed to parse existing XMP; falling back to direct write");
+                write_xmp(path, incoming)?;
+                tracing::info!(path = %path.display(), "develop: XMP sidecar force-overwritten");
+                return Ok(WriteOutcome::ForcedOverwrite);
             }
             return Err(e);
         }
