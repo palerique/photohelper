@@ -79,15 +79,22 @@ photohelper develop --auto-tone
 
 ---
 
-## 6. Conflict Protection & Shielding
+## 6. Conflict Protection & Non-Destructive Preservation
 
-To protect your manual Lightroom Classic adjustments, `photohelper` features an automatic filesystem-based **Conflict Shield**:
+`photohelper` uses an advanced XML state-machine to ensure your existing edits are safe:
+
+### Non-Destructive Third-Party Fields
+When updating an existing XMP sidecar, `photohelper` safely injects its managed settings (ratings, labels, keywords) without deleting any third-party fields. Adjustments you made in Lightroom (e.g. `crs:ToneCurvePV2012`, `crs:CameraProfile`, local masks) are fully preserved.
+
+### Filesystem Conflict Shield
+To further protect your manual Lightroom Classic adjustments, `photohelper` features an automatic filesystem-based **Conflict Shield**:
 1. When you edit metadata or raw adjustments inside Lightroom Classic and save them to disk (using `Cmd+S` / `Ctrl+S`), Lightroom updates the sidecar file's physical modification time (`mtime`).
 2. If `photohelper develop` detects that the sidecar file's `mtime` is **newer** than `photohelper`'s last write time (with a 2-second safety margin), it will **skip** writing to that photo to prevent overwriting your edits.
 3. Skipped files are reported as `conflict-preserved` in the final summary.
 
 ### Overriding Conflicts
-If you want to unconditionally force `photohelper` to overwrite manual Lightroom edits and apply its own ratings/labels/keywords, pass the `--force` flag:
+If you want to unconditionally force `photohelper` to apply its own ratings/labels/keywords despite newer modification times, pass the `--force` flag:
 ```bash
-photohelper develop --all-lr --force --auto-tone --lr-label-score
+photohelper develop --all-lr --force
 ```
+*(Note: even when using `--force`, third-party Lightroom edits within the XML are preserved; only the `mtime` safety check is bypassed).*

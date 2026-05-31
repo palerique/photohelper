@@ -17,12 +17,23 @@ pub enum Error {
     },
 
     /// XML parse failure (malformed document structure, not just a bad field value).
-    #[error("XMP parse error in {path}: {message}")]
+    /// Required `rdf:Description` element was missing.
+    #[error("XMP file is missing rdf:Description: {path}")]
+    MissingRdfDescription {
+        /// Sidecar path.
+        path: PathBuf,
+    },
+
+    /// XML parse failure (malformed document structure, not just a bad field value).
+    #[error("XMP parse error in {path}: {message} (State: {state})")]
     XmlParse {
         /// Sidecar path that could not be parsed.
         path: PathBuf,
         /// Human-readable description of the parse error.
         message: String,
+        /// The state of the writer.
+        #[doc(hidden)]
+        state: String,
     },
 
     /// A `SidecarSettingsBuilder::build()` validation rule was violated.

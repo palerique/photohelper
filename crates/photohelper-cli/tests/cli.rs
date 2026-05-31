@@ -1254,7 +1254,7 @@ fn develop_cli_flags_written_to_sidecar() {
         "Temperature must be in sidecar"
     );
     assert!(
-        xml.contains("crs:Exposure2012=\"1.50\""),
+        xml.contains("crs:Exposure2012=\"1.5\""),
         "Exposure must be in sidecar"
     );
     assert!(

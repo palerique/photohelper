@@ -60,6 +60,7 @@ fn parse_description_attrs<B: std::io::BufRead>(
                 return Err(Error::XmlParse {
                     path: path.to_path_buf(),
                     message: format!("attribute parse error: {err}"),
+                    state: "Reading".to_string(),
                 });
             }
         };
@@ -195,6 +196,7 @@ pub(crate) fn parse_xmp_str(content: &str, path: &Path) -> Result<SidecarSetting
                     return Err(Error::XmlParse {
                         path: path.to_path_buf(),
                         message: "XML nesting depth exceeded safety ceiling limit (64)".to_string(),
+                        state: "Reading".to_string(),
                     });
                 }
                 tag_stack.push(qname_str.to_string());
@@ -345,6 +347,7 @@ pub(crate) fn parse_xmp_str(content: &str, path: &Path) -> Result<SidecarSetting
                         "XML parse error at position {}: {err}",
                         reader.error_position()
                     ),
+                    state: "Reading".to_string(),
                 });
             }
         }

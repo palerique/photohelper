@@ -9,9 +9,9 @@
 
 **Last session**: 12 (`export-enhancements` — 2026-05-31) — **SHIPPED**. Feature enhancements for export pipeline including linear 16-bit to sRGB ISP with ToneMappingLut, watermarking implementation with tiny_skia, O(N) badge preloading, and O(1) collision resolution.
 
-**Current session**: 13 (`develop-lightroom-sync` — 2026-05-31) — branch `main`. **IMPLEMENTATION** (remediating Round 1 feedback).
+**Current session**: 14 (`xmp-library-upgrade` — 2026-05-31) — branch `session-14/xmp-library-upgrade`. **IMPLEMENTATION** (remediating Round 1 feedback).
 
-**Goal**: Fix Lightroom sidecar synchronization bugs, resolve flag duplication, and clean up primitive obsession.
+**Goal**: Implement TD-022: Replace the hand-rolled `quick-xml` XMP writer template with a robust event-based pass-through writer that preserves third-party XMP fields.
 
 **Action**: Remediate the round 1 feedback.
 
@@ -100,7 +100,7 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 | `photohelper-core`    | **implemented (session 01+04)**         | model + RgbImage; error (13 variants); catalog_glue. |
 | `photohelper-raw`     | **implemented (session 02+04)**         | LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw_rgb. 4 integration tests + 3 CLIP D1c tests. |
 | `photohelper-ai`      | **implemented (session 04+05)**         | NIMA + CLIP ViT-B/32 int8 (MIT, 85.3 MB). ImageEmbedding, MobileClip, EmbeddingZeroVector+EmbeddingCorruptBytes errors. CLIP_MODEL_SLUG+CLIP_MODEL_MANIFEST_NAME. |
-| `photohelper-sidecar` | **implemented (session 06+07+11)**         | XMP sidecar I/O (crs:+ph: namespaces), atomic write, conflict resolution (DN-004), Lightroom namespace compatibility (DN-029). Robust error handling, strict XML validation, TOCTOU fix (session 11). |
+| `photohelper-sidecar` | **implemented (session 06+07+11+14)**      | XMP sidecar I/O, TD-022 strict pass-through event writer, atomic write, conflict resolution (DN-004), Lightroom namespace compatibility. Robust error handling, TOCTOU fix. |
 | `photohelper-export`  | **implemented (session 08)**            | Resize + watermark + MozJPEG encoding design fully implemented, integrated, and verified with 100% green tests. |
 | `photohelper-cameras` | **implemented (session 01)**            | CameraProfile trait + CanonR8 stub + CameraRegistry::for_exif with normalization.                             |
 | `photohelper-catalog` | **implemented (sessions 01+04+05)**     | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores + FK + SCHEMA_VERSION=2), CullRow, InsertScoreOutcome, unsuperseded_unscored_rows, insert_cull_score. Decision docs 0001+0002. Session 05 D2a+D2b: schema v3 (embeddings + dup_clusters + apply_v2_to_v3 + SCHEMA_VERSION=3), EmbeddingRow, InsertEmbeddingOutcome, unembedded_rows, insert_embedding (dim*4==bytes guard), all_embeddings_for_model (superseded excluded), insert_dup_cluster. Decision doc 0003. |

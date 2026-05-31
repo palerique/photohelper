@@ -13,13 +13,12 @@ workspace = true
 
 [dependencies]
 quick-xml.workspace = true
-time.workspace = true
+time = { workspace = true, features = ["formatting", "parsing", "macros"] }
 thiserror.workspace = true
 static_assertions.workspace = true
 tracing.workspace = true
 filetime.workspace = true
-uuid = { version = "1.23.2", features = ["v4"] }
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 filetime.workspace = true
