@@ -14,7 +14,8 @@ use anyhow::Context as _;
 use photohelper_ai::{CLIP_MODEL_SLUG, MODEL_SLUG};
 use photohelper_catalog::Catalog;
 use photohelper_sidecar::SidecarSettings;
-use photohelper_sidecar::conflict::{WriteOutcome, merge_and_write};
+use photohelper_sidecar::conflict::{ConflictStrategy, WriteOutcome, merge_and_write};
+use photohelper_sidecar::is_valid_xml_string;
 use rayon::prelude::*;
 
 use crate::Cli;
@@ -22,51 +23,52 @@ use crate::exit_code;
 use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
 
 /// Clap args for `photohelper develop`.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone)]
+// TD-040: Refactor into grouped clap structs
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct DevelopArgs {
     /// Exit non-zero if any per-photo error occurs (file_missing or write errors).
     #[arg(long, default_value_t = false)]
-    strict: bool,
+    pub(crate) strict: bool,
     /// Always overwrite existing XMP sidecars (skip conflict check).
     #[arg(long, default_value_t = false)]
-    force: bool,
+    pub(crate) force: bool,
     /// Exposure compensation in stops (–5.0 to 5.0).
     #[arg(long)]
-    exposure: Option<f32>,
+    pub(crate) exposure: Option<f32>,
     /// White balance temperature in Kelvin (2000–50000).
     #[arg(long)]
-    temp: Option<i32>,
+    pub(crate) temp: Option<i32>,
     /// White balance tint (–150 to 150).
     #[arg(long)]
-    tint: Option<i32>,
+    pub(crate) tint: Option<i32>,
     /// Contrast (–100 to 100).
     #[arg(long)]
-    contrast: Option<i32>,
+    pub(crate) contrast: Option<i32>,
     /// Highlights (–100 to 100).
     #[arg(long)]
-    highlights: Option<i32>,
+    pub(crate) highlights: Option<i32>,
     /// Shadows (–100 to 100).
     #[arg(long)]
-    shadows: Option<i32>,
+    pub(crate) shadows: Option<i32>,
     /// Write Lightroom star ratings (1 to 5) based on NIMA score.
     #[arg(long, default_value_t = false)]
-    lr_rating: bool,
+    pub(crate) lr_rating: bool,
     /// Write Lightroom color labels (Red/Green) based on NIMA score.
     #[arg(long, default_value_t = false)]
-    lr_label: bool,
+    pub(crate) lr_label: bool,
     /// Write photohelper keywords (tier/cluster) based on NIMA score and duplicate cluster ID.
     #[arg(long, default_value_t = false)]
-    lr_keywords: bool,
+    pub(crate) lr_keywords: bool,
     /// Write rating, label, and keywords (convenience shorthand).
     #[arg(long, default_value_t = false)]
-    all_lr: bool,
+    pub(crate) all_lr: bool,
     /// Custom Lightroom color label for 'Red' (NIMA < 4.0)
     #[arg(long, env = "PHOTOHELPER_LR_LABEL_RED", default_value = "Red")]
-    lr_label_red: String,
+    pub(crate) lr_label_red: String,
     /// Custom Lightroom color label for 'Green' (NIMA >= 7.0)
     #[arg(long, env = "PHOTOHELPER_LR_LABEL_GREEN", default_value = "Green")]
-    lr_label_green: String,
+    pub(crate) lr_label_green: String,
 }
 
 /// AtomicU64 counters used for concurrent updates by Rayon parallel threads and safe cross-thread visibility for the heartbeat loop.
@@ -112,31 +114,44 @@ impl DevelopStats {
             self.errored.load(Ordering::Relaxed),
         )
     }
-}
+    fn record_outcome(&self, result: Result<WriteOutcome, ()>) {
+        self.walked.fetch_add(1, Ordering::Relaxed);
+        match result {
+            Ok(WriteOutcome::Created) => {
+                self.written.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(WriteOutcome::Overwritten) => {
+                self.updated.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(WriteOutcome::ConflictPreserved) => {
+                self.conflict_preserved.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(WriteOutcome::ForcedOverwrite) => {
+                self.force_overwritten.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(()) => {
+                self.errored.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(_) => { /* forward-compatibility for unknown successful outcomes */ }
+        }
+    }
 
-fn is_valid_xml_string(s: &str) -> bool {
-    s.chars().all(|c| {
-        let val = c as u32;
-        let is_valid_xml_char = (0x20..=0xD7FF).contains(&val)
-            || val == 0x09
-            || val == 0x0A
-            || val == 0x0D
-            || (0xE000..=0xFFFD).contains(&val)
-            || (0x10000..=0x10_FFFF).contains(&val);
-        let is_noncharacter = (0xFDD0..=0xFDEF).contains(&val) || (val & 0xFFFE) == 0xFFFE;
-        is_valid_xml_char && !is_noncharacter
-    })
+    fn record_missing(&self) {
+        self.walked.fetch_add(1, Ordering::Relaxed);
+        self.file_missing.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Driver for `photohelper develop`.
 ///
 /// # Errors
 ///
-/// Returns `Err` only for fatal setup failures (catalog open, photo query, heartbeat spawn).
+/// Returns `Err` only for fatal setup failures (catalog open, photo query, heartbeat spawn, or parameter validation failures).
 pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     let lr_rating = args.all_lr || args.lr_rating;
     let lr_label = args.all_lr || args.lr_label;
     let lr_keywords = args.all_lr || args.lr_keywords;
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
 
     let red_trimmed = args.lr_label_red.trim();
     let green_trimmed = args.lr_label_green.trim();
@@ -170,28 +185,29 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     }
 
     // Validate command-line parameters up-front before doing database locks or starting workers.
-    {
-        let mut builder = SidecarSettings::builder();
-        if let Some(v) = args.exposure {
-            builder = builder.exposure(v);
-        }
-        if let Some(v) = args.temp {
-            builder = builder.temperature(v);
-        }
-        if let Some(v) = args.tint {
-            builder = builder.tint(v);
-        }
-        if let Some(v) = args.contrast {
-            builder = builder.contrast(v);
-        }
-        if let Some(v) = args.highlights {
-            builder = builder.highlights(v);
-        }
-        if let Some(v) = args.shadows {
-            builder = builder.shadows(v);
-        }
-        builder.build().context("invalid develop parameters")?;
+    let mut base_builder = SidecarSettings::builder();
+    if let Some(v) = args.exposure {
+        base_builder = base_builder.exposure(v);
     }
+    if let Some(v) = args.temp {
+        base_builder = base_builder.temperature(v);
+    }
+    if let Some(v) = args.tint {
+        base_builder = base_builder.tint(v);
+    }
+    if let Some(v) = args.contrast {
+        base_builder = base_builder.contrast(v);
+    }
+    if let Some(v) = args.highlights {
+        base_builder = base_builder.highlights(v);
+    }
+    if let Some(v) = args.shadows {
+        base_builder = base_builder.shadows(v);
+    }
+    base_builder
+        .clone()
+        .build()
+        .context("invalid develop parameters")?;
 
     let catalog_path = cli.catalog.clone().unwrap_or_else(|| {
         std::env::current_dir()
@@ -214,12 +230,9 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
     for row in rows {
         let sidecar_path = row.source_path().with_extension("xmp");
 
-        // On case-insensitive filesystems (macOS, Windows), normalize path casing for deduplication
+        // On case-insensitive filesystems (or FAT32/exFAT mounts on Linux), normalize path casing for deduplication
         // to prevent duplicate rows targeting the same sidecar from causing concurrent write races.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let dedup_key = PathBuf::from(sidecar_path.to_string_lossy().to_lowercase());
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let dedup_key = sidecar_path.clone();
+        let dedup_key: Vec<u8> = sidecar_path.to_string_lossy().to_lowercase().into_bytes();
 
         if seen_paths.insert(dedup_key) {
             unique_rows.push(row);
@@ -265,13 +278,13 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
 
     let stats = Arc::new(DevelopStats::new());
 
-    // Capture CLI flags by value so each iteration can build a fresh builder.
-    let cli_exposure = args.exposure;
-    let cli_temp = args.temp;
-    let cli_tint = args.tint;
-    let cli_contrast = args.contrast;
-    let cli_highlights = args.highlights;
-    let cli_shadows = args.shadows;
+    let strategy = if args.force {
+        ConflictStrategy::ForceOverwrite
+    } else {
+        ConflictStrategy::Safe
+    };
+
+    // base_builder initialized above
 
     // Spawn heartbeat thread (same pattern as ingest/cull/dedup).
     let stop = Arc::new(HeartbeatStop::new());
@@ -295,53 +308,55 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
 
     // Walk in parallel using Rayon (sidecar I/O is per-photo; heartbeat reads stats cross-thread).
     rows.par_iter().for_each(|row| {
-        stats.walked.fetch_add(1, Ordering::Relaxed);
+        if cancelled.load(Ordering::Relaxed) {
+            return;
+        }
+
         let source_path = row.source_path();
 
         // Step a: existence pre-check.
-        if !source_path.exists() {
-            tracing::warn!(path = %source_path.display(), "file missing since ingest; skipping");
-            stats.file_missing.fetch_add(1, Ordering::Relaxed);
-            return;
+        match std::fs::metadata(source_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(path = %source_path.display(), "file missing since ingest; skipping");
+                stats.record_missing();
+                if args.strict {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(path = %source_path.display(), error = %e, "failed to check file existence");
+                stats.record_outcome(Err(()));
+                if args.strict {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+                return;
+            }
         }
 
         // Step b: sidecar path (Lightroom convention: replace extension).
         let sidecar_path = source_path.with_extension("xmp");
 
         // Step c: build per-photo settings (fresh builder each photo).
-        let mut builder = SidecarSettings::builder();
-        if let Some(v) = cli_exposure {
-            builder = builder.exposure(v);
-        }
-        if let Some(v) = cli_temp {
-            builder = builder.temperature(v);
-        }
-        if let Some(v) = cli_tint {
-            builder = builder.tint(v);
-        }
-        if let Some(v) = cli_contrast {
-            builder = builder.contrast(v);
-        }
-        if let Some(v) = cli_highlights {
-            builder = builder.highlights(v);
-        }
-        if let Some(v) = cli_shadows {
-            builder = builder.shadows(v);
-        }
+        let mut builder = base_builder.clone();
 
         // Validate early that the NIMA score is finite
-        let valid_nima = row.nima_score().and_then(|score| {
-            if score.is_finite() {
-                Some(score)
-            } else {
+        let valid_nima = row.nima_score();
+        if let Some(score) = valid_nima {
+            if !score.is_finite() {
                 tracing::warn!(
                     path = %source_path.display(),
                     value = score,
-                    "NIMA score is non-finite; ignoring score for develop"
+                    "NIMA score is non-finite; failing develop"
                 );
-                None
+                stats.record_outcome(Err(()));
+                if args.strict {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+                return;
             }
-        });
+        }
 
         if let Some(score) = valid_nima {
             builder = builder.nima_score(score);
@@ -353,25 +368,17 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
 
         builder = builder.photohelper_id(row.photo_id().to_string());
 
-        // Retrieve the UTC timestamp per-photo immediately before writing
-        // to completely eliminate write-buffer delay and scheduling drift.
+        // Retrieve the UTC timestamp per-photo before conflict resolution
+        // and XMP generation.
         let now_utc = time::OffsetDateTime::now_utc();
         builder = builder.last_processed_at(now_utc);
 
         // Write Lightroom star ratings (1 to 5) based on NIMA score.
         if lr_rating {
             if let Some(score) = valid_nima {
-                let rating = if score < 4.0 {
-                    photohelper_sidecar::Rating::One
-                } else if score < 5.5 {
-                    photohelper_sidecar::Rating::Two
-                } else if score < 7.0 {
-                    photohelper_sidecar::Rating::Three
-                } else if score < 8.5 {
-                    photohelper_sidecar::Rating::Four
-                } else {
-                    photohelper_sidecar::Rating::Five
-                };
+                let (rating_num, _) = crate::commands::util::nima_score_to_rating_and_tier(score);
+                let rating = std::convert::TryFrom::try_from(rating_num)
+                    .unwrap_or(photohelper_sidecar::Rating::Unrated);
                 builder = builder.rating(rating);
             }
         }
@@ -399,17 +406,7 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
             hierarchical.insert("photohelper".to_string());
 
             if let Some(score) = valid_nima {
-                let tier = if score < 4.0 {
-                    "discard"
-                } else if score < 5.5 {
-                    "poor"
-                } else if score < 7.0 {
-                    "fair"
-                } else if score < 8.5 {
-                    "good"
-                } else {
-                    "excellent"
-                };
+                let (_, tier) = crate::commands::util::nima_score_to_rating_and_tier(score);
                 flat.insert(format!("nima:{tier}"));
                 hierarchical.insert(format!("photohelper|nima:{tier}"));
             }
@@ -427,37 +424,43 @@ pub fn run_develop(cli: &Cli, args: &DevelopArgs) -> anyhow::Result<u8> {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(path = %source_path.display(), error = %e, "invalid settings; skipping");
-                stats.errored.fetch_add(1, Ordering::Relaxed);
+                stats.record_outcome(Err(()));
+                if args.strict {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+                return;
+            }
+        };
+
+        let sidecar_path_typed = match photohelper_sidecar::SidecarPath::new(&sidecar_path) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(path = %sidecar_path.display(), error = %e, "invalid sidecar path");
+                stats.record_outcome(Err(()));
+                if args.strict {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
                 return;
             }
         };
 
         // Step d: write sidecar.
-        match merge_and_write(&sidecar_path, &settings, args.force) {
-            Ok(WriteOutcome::Created) => {
-                stats.written.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(WriteOutcome::Overwritten) => {
-                stats.updated.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(WriteOutcome::ConflictPreserved) => {
-                stats.conflict_preserved.fetch_add(1, Ordering::Relaxed);
-                // Log concisely at info/debug inside loop to prevent lock contention
-                tracing::info!(
-                    path = %sidecar_path.display(),
-                    "Preserved newer Lightroom Classic edits; skipped"
-                );
-            }
-            Ok(WriteOutcome::ForcedOverwrite) => {
-                stats.force_overwritten.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(other) => {
-                tracing::warn!("encountered unexpected XMP write outcome: {:?}", other);
-                stats.errored.fetch_add(1, Ordering::Relaxed);
+        match merge_and_write(&sidecar_path_typed, &settings, strategy) {
+            Ok(outcome) => {
+                stats.record_outcome(Ok(outcome));
+                if outcome == WriteOutcome::ConflictPreserved {
+                    tracing::info!(
+                        path = %sidecar_path.display(),
+                        "Preserved newer Lightroom Classic edits; skipped"
+                    );
+                }
             }
             Err(e) => {
-                tracing::warn!(path = %source_path.display(), error = %e, "XMP write failed");
-                stats.errored.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(path = %sidecar_path.display(), error = %e, "XMP write failed");
+                stats.record_outcome(Err(()));
+                if args.strict {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
             }
         }
     });

@@ -11,12 +11,9 @@
     )
 )]
 // Workspace `unused_crate_dependencies` lint produces false positives
-// here: this main.rs is the binary's top-level file; the transitive
-// crate users (tracing / walkdir / rayon / etc.) live inside the
-// `commands` module tree. The lint sees the bin compilation unit
-// "not directly using" those crates and flags them. Same for dev-deps
-// referenced only by tests/cli.rs. Per-target file-level allow is the
-// idiomatic mitigation.
+// here: `dev-dependencies` (like `assert_cmd`) are provided during `cargo test --bin photohelper`
+// but are strictly used in the separate `tests/cli.rs` integration crate. Per-target file-level
+// allow is the idiomatic mitigation.
 #![allow(unused_crate_dependencies)]
 
 use std::process::ExitCode;
@@ -33,9 +30,10 @@ use commands::dedup::{DedupeArgs, run_dedup};
 use commands::develop::{DevelopArgs, run_develop};
 use commands::export::{ExportArgs, run_export};
 use commands::ingest::run_ingest;
+use commands::run::{RunArgs, run_pipeline};
 
 /// Cross-platform CLI for AI-powered Canon RAW processing.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "photohelper", version, about)]
 struct Cli {
     /// Increase verbosity (repeat: -v INFO, -vv DEBUG, -vvv TRACE).
@@ -66,7 +64,7 @@ struct Cli {
     command: Command,
 }
 
-#[derive(clap::Subcommand, Debug)]
+#[derive(clap::Subcommand, Debug, Clone)]
 enum Command {
     /// Walk a directory + catalog RAW photos.
     Ingest(IngestArgs),
@@ -76,28 +74,29 @@ enum Command {
     Dedup(DedupeArgs),
     /// Apply develop settings via XMP sidecars (Lightroom-compatible).
     Develop(DevelopArgs),
-    /// Export to JPEG with resize + watermark (planned for v0.1).
+    /// Export to JPEG with resize + watermark.
     Export(ExportArgs),
-    /// Run ingest → cull → develop → export (planned for v0.1).
-    Run,
+    /// Run ingest → cull → dedup → develop → export.
+    Run(RunArgs),
     /// Manage AI model bundles (planned for v0.1).
     Models,
     /// Inspect / list known camera profiles (planned for v0.1).
     Camera,
 }
 
-#[derive(clap::Args, Debug)]
-struct IngestArgs {
+/// Arguments for the `ingest` subcommand.
+#[derive(clap::Args, Debug, Clone)]
+pub struct IngestArgs {
     /// Directory to walk.
-    path: std::path::PathBuf,
+    pub(crate) path: std::path::PathBuf,
 
     /// Recurse into subdirectories.
     #[arg(short, long, default_value_t = true)]
-    recursive: bool,
+    pub(crate) recursive: bool,
 
     /// Treat unknown cameras or any per-photo error as fatal at end-of-run.
     #[arg(long, default_value_t = false)]
-    strict: bool,
+    pub(crate) strict: bool,
 }
 
 /// `sysexits.h` codes used by this binary.
@@ -135,36 +134,16 @@ fn main() -> ExitCode {
     init_tracing(cli.verbose, cli.quiet, cli.no_color);
 
     match &cli.command {
-        Command::Ingest(args) => match run_ingest(&cli, args) {
-            Ok(code) => ExitCode::from(code),
-            Err(err) => {
-                tracing::error!("{err:#}");
-                ExitCode::from(exit_code_for_error(&err))
-            }
-        },
+        Command::Ingest(args) => handle_pipeline_result(run_ingest(&cli, args)),
         Command::Cull(args) => {
             // model_dir: PHOTOHELPER_MODEL_DIR env var if set, else binary-adjacent models/.
             // current_exe() failure silently falls back to relative "models/"; EX_IOERR
             // is returned later if from_manifest then fails at that path.
-            let model_dir = std::env::var("PHOTOHELPER_MODEL_DIR").map_or_else(
-                |_| {
-                    std::env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(|p| p.join("models")))
-                        .unwrap_or_else(|| std::path::PathBuf::from("models"))
-                },
-                std::path::PathBuf::from,
-            );
+            let model_dir = resolve_model_dir();
             match VerifiedModelBytes::from_manifest(&model_dir, MODEL_MANIFEST_NAME) {
                 Ok(model) => {
                     let model_path = model_dir.join(format!("{MODEL_MANIFEST_NAME}.onnx"));
-                    match run_cull(&cli, args, &model, model_path) {
-                        Ok(code) => ExitCode::from(code),
-                        Err(err) => {
-                            tracing::error!("{err:#}");
-                            ExitCode::from(exit_code_for_error(&err))
-                        }
-                    }
+                    handle_pipeline_result(run_cull(&cli, args, &model, model_path))
                 }
                 Err(e) => {
                     tracing::error!("{e:#}");
@@ -173,46 +152,73 @@ fn main() -> ExitCode {
             }
         }
         Command::Dedup(args) => {
-            let model_dir = std::env::var("PHOTOHELPER_MODEL_DIR").map_or_else(
-                |_| {
-                    std::env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(|p| p.join("models")))
-                        .unwrap_or_else(|| std::path::PathBuf::from("models"))
-                },
-                std::path::PathBuf::from,
-            );
+            let model_dir = resolve_model_dir();
             match VerifiedModelBytes::from_manifest(&model_dir, CLIP_MODEL_MANIFEST_NAME) {
-                Ok(model) => match run_dedup(&cli, args, &model) {
-                    Ok(code) => ExitCode::from(code),
-                    Err(err) => {
-                        tracing::error!("{err:#}");
-                        ExitCode::from(exit_code_for_error(&err))
-                    }
-                },
+                Ok(model) => handle_pipeline_result(run_dedup(&cli, args, &model)),
                 Err(e) => {
                     tracing::error!("{e:#}");
                     ExitCode::from(exit_code::EX_UNAVAILABLE)
                 }
             }
         }
-        Command::Develop(args) => match run_develop(&cli, args) {
-            Ok(code) => ExitCode::from(code),
-            Err(err) => {
-                tracing::error!("{err:#}");
-                ExitCode::from(exit_code_for_error(&err))
-            }
-        },
-        Command::Export(args) => match run_export(&cli, args) {
-            Ok(code) => ExitCode::from(code),
-            Err(err) => {
-                tracing::error!("{err:#}");
-                ExitCode::from(exit_code_for_error(&err))
-            }
-        },
-        Command::Run => stub("run"),
+        Command::Develop(args) => handle_pipeline_result(run_develop(&cli, args)),
+        Command::Export(args) => handle_pipeline_result(run_export(&cli, args)),
+        Command::Run(args) => {
+            let model_dir = resolve_model_dir();
+
+            // Try to load NIMA
+            let nima_model =
+                match VerifiedModelBytes::from_manifest(&model_dir, MODEL_MANIFEST_NAME) {
+                    Ok(model) => model,
+                    Err(e) => {
+                        tracing::error!("{e:#}");
+                        return ExitCode::from(exit_code::EX_UNAVAILABLE);
+                    }
+                };
+            let nima_model_path = model_dir.join(format!("{MODEL_MANIFEST_NAME}.onnx"));
+
+            // Try to load CLIP
+            let clip_model =
+                match VerifiedModelBytes::from_manifest(&model_dir, CLIP_MODEL_MANIFEST_NAME) {
+                    Ok(model) => model,
+                    Err(e) => {
+                        tracing::error!("{e:#}");
+                        return ExitCode::from(exit_code::EX_UNAVAILABLE);
+                    }
+                };
+
+            handle_pipeline_result(run_pipeline(
+                &cli,
+                args,
+                &nima_model,
+                nima_model_path,
+                &clip_model,
+            ))
+        }
         Command::Models => stub("models"),
         Command::Camera => stub("camera"),
+    }
+}
+
+fn resolve_model_dir() -> std::path::PathBuf {
+    std::env::var("PHOTOHELPER_MODEL_DIR").map_or_else(
+        |_| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.join("models")))
+                .unwrap_or_else(|| std::path::PathBuf::from("models"))
+        },
+        std::path::PathBuf::from,
+    )
+}
+
+fn handle_pipeline_result(res: anyhow::Result<u8>) -> ExitCode {
+    match res {
+        Ok(code) => ExitCode::from(code),
+        Err(err) => {
+            tracing::error!("{err:#}");
+            ExitCode::from(exit_code_for_error(&err))
+        }
     }
 }
 
@@ -237,8 +243,12 @@ fn init_tracing(verbose: u8, quiet: bool, no_color: bool) {
             _ => "trace",
         }
     };
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|e| {
+        if std::env::var("RUST_LOG").is_ok() {
+            eprintln!("Warning: invalid RUST_LOG filter: {e}");
+        }
+        EnvFilter::new(default_level)
+    });
 
     let builder = tracing_subscriber::fmt()
         .compact()

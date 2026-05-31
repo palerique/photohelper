@@ -1,0 +1,773 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index d11a1f7a..7c1130f3 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1037,6 +1037,7 @@ dependencies = [
+  "anyhow",
+  "assert_cmd",
+  "clap",
++ "dunce",
+  "filetime",
+  "fs4",
+  "num_cpus",
+diff --git a/crates/photohelper-cli/Cargo.toml b/crates/photohelper-cli/Cargo.toml
+index 7e2d4b2b..3aaf22a9 100644
+--- a/crates/photohelper-cli/Cargo.toml
++++ b/crates/photohelper-cli/Cargo.toml
+@@ -32,6 +32,7 @@ rayon.workspace = true
+ num_cpus.workspace = true
+ rusqlite.workspace = true
+ time.workspace = true
++dunce = "1.0.5"
+
+ [dev-dependencies]
+ assert_cmd.workspace = true
+diff --git a/crates/photohelper-cli/src/commands/cull.rs b/crates/photohelper-cli/src/commands/cull.rs
+index ff4ef91b..a72769d7 100644
+--- a/crates/photohelper-cli/src/commands/cull.rs
++++ b/crates/photohelper-cli/src/commands/cull.rs
+@@ -23,11 +23,11 @@ use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
+ use crate::{Cli, exit_code};
+
+ /// Clap args for `photohelper cull`.
+-#[derive(clap::Args, Debug)]
++#[derive(clap::Args, Debug, Clone)]
+ pub(crate) struct CullArgs {
+     /// Treat decode, inference, or derive failures as fatal at end-of-run.
+     #[arg(long, default_value_t = false)]
+-    strict: bool,
++    pub(crate) strict: bool,
+ }
+
+ /// Atomic counters for the `cull` summary line.
+diff --git a/crates/photohelper-cli/src/commands/dedup.rs b/crates/photohelper-cli/src/commands/dedup.rs
+index b76996ff..f960e199 100644
+--- a/crates/photohelper-cli/src/commands/dedup.rs
++++ b/crates/photohelper-cli/src/commands/dedup.rs
+@@ -23,11 +23,11 @@ use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
+ use crate::{Cli, exit_code};
+
+ /// Clap args for `photohelper dedup`.
+-#[derive(clap::Args, Debug)]
++#[derive(clap::Args, Debug, Clone)]
+ pub(crate) struct DedupeArgs {
+     /// Exit non-zero if any per-photo error occurs during the embed phase.
+     #[arg(long, default_value_t = false)]
+-    strict: bool,
++    pub(crate) strict: bool,
+
+     /// Cosine-similarity threshold: photos with sim >= this are considered duplicates.
+     /// Valid range: (0.0, 1.0].
+@@ -36,10 +36,10 @@ pub(crate) struct DedupeArgs {
+         default_value_t = 0.95_f32,
+         value_parser = parse_similarity_threshold
+     )]
+-    similarity_threshold: f32,
++    pub(crate) similarity_threshold: f32,
+ }
+
+-fn parse_similarity_threshold(s: &str) -> Result<f32, String> {
++pub fn parse_similarity_threshold(s: &str) -> Result<f32, String> {
+     let v: f32 = s.parse().map_err(|_| format!("'{s}' is not a valid f32"))?;
+     if !v.is_finite() || v <= 0.0 || v > 1.0 {
+         return Err(format!(
+diff --git a/crates/photohelper-cli/src/commands/develop.rs b/crates/photohelper-cli/src/commands/develop.rs
+index 57633bae..5226bba8 100644
+--- a/crates/photohelper-cli/src/commands/develop.rs
++++ b/crates/photohelper-cli/src/commands/develop.rs
+@@ -22,51 +22,51 @@ use crate::exit_code;
+ use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
+
+ /// Clap args for `photohelper develop`.
+-#[derive(clap::Args, Debug)]
++#[derive(clap::Args, Debug, Clone)]
+ #[allow(clippy::struct_excessive_bools)]
+ pub(crate) struct DevelopArgs {
+     /// Exit non-zero if any per-photo error occurs (file_missing or write errors).
+     #[arg(long, default_value_t = false)]
+-    strict: bool,
++    pub(crate) strict: bool,
+     /// Always overwrite existing XMP sidecars (skip conflict check).
+     #[arg(long, default_value_t = false)]
+-    force: bool,
++    pub(crate) force: bool,
+     /// Exposure compensation in stops (–5.0 to 5.0).
+     #[arg(long)]
+-    exposure: Option<f32>,
++    pub(crate) exposure: Option<f32>,
+     /// White balance temperature in Kelvin (2000–50000).
+     #[arg(long)]
+-    temp: Option<i32>,
++    pub(crate) temp: Option<i32>,
+     /// White balance tint (–150 to 150).
+     #[arg(long)]
+-    tint: Option<i32>,
++    pub(crate) tint: Option<i32>,
+     /// Contrast (–100 to 100).
+     #[arg(long)]
+-    contrast: Option<i32>,
++    pub(crate) contrast: Option<i32>,
+     /// Highlights (–100 to 100).
+     #[arg(long)]
+-    highlights: Option<i32>,
++    pub(crate) highlights: Option<i32>,
+     /// Shadows (–100 to 100).
+     #[arg(long)]
+-    shadows: Option<i32>,
++    pub(crate) shadows: Option<i32>,
+     /// Write Lightroom star ratings (1 to 5) based on NIMA score.
+     #[arg(long, default_value_t = false)]
+-    lr_rating: bool,
++    pub(crate) lr_rating: bool,
+     /// Write Lightroom color labels (Red/Green) based on NIMA score.
+     #[arg(long, default_value_t = false)]
+-    lr_label: bool,
++    pub(crate) lr_label: bool,
+     /// Write photohelper keywords (tier/cluster) based on NIMA score and duplicate cluster ID.
+     #[arg(long, default_value_t = false)]
+-    lr_keywords: bool,
++    pub(crate) lr_keywords: bool,
+     /// Write rating, label, and keywords (convenience shorthand).
+     #[arg(long, default_value_t = false)]
+-    all_lr: bool,
++    pub(crate) all_lr: bool,
+     /// Custom Lightroom color label for 'Red' (NIMA < 4.0)
+     #[arg(long, env = "PHOTOHELPER_LR_LABEL_RED", default_value = "Red")]
+-    lr_label_red: String,
++    pub(crate) lr_label_red: String,
+     /// Custom Lightroom color label for 'Green' (NIMA >= 7.0)
+     #[arg(long, env = "PHOTOHELPER_LR_LABEL_GREEN", default_value = "Green")]
+-    lr_label_green: String,
++    pub(crate) lr_label_green: String,
+ }
+
+ /// AtomicU64 counters used for concurrent updates by Rayon parallel threads and safe cross-thread visibility for the heartbeat loop.
+diff --git a/crates/photohelper-cli/src/commands/export.rs b/crates/photohelper-cli/src/commands/export.rs
+index 9a720154..92ed9506 100644
+--- a/crates/photohelper-cli/src/commands/export.rs
++++ b/crates/photohelper-cli/src/commands/export.rs
+@@ -44,40 +44,40 @@ impl From<CliWatermarkPosition> for WatermarkPosition {
+ }
+
+ /// Clap args for `photohelper export`.
+-#[derive(clap::Args, Debug)]
++#[derive(clap::Args, Debug, Clone)]
+ #[allow(clippy::struct_excessive_bools)]
+ pub(crate) struct ExportArgs {
+     /// Output directory for compiled JPEGs.
+     #[arg(long)]
+-    output: PathBuf,
++    pub(crate) output: PathBuf,
+
+     /// Long-edge resize limit in pixels (strictly >= 16).
+     #[arg(long, value_parser = validate_long_edge)]
+-    long_edge: Option<u32>,
++    pub(crate) long_edge: Option<u32>,
+
+     /// JPEG quality level (1..=100).
+     #[arg(long, default_value = "80", value_parser = clap::value_parser!(u8).range(1..=100))]
+-    quality: u8,
++    pub(crate) quality: u8,
+
+     /// Watermark text.
+     #[arg(long)]
+-    watermark: Option<String>,
++    pub(crate) watermark: Option<String>,
+
+     /// Position of watermark (bottom-left or top-right).
+     #[arg(long, default_value = "bottom-left")]
+-    watermark_position: CliWatermarkPosition,
++    pub(crate) watermark_position: CliWatermarkPosition,
+
+     /// Minimum rating to export (0..=5).
+     #[arg(long, default_value = "3", value_parser = clap::value_parser!(u8).range(0..=5))]
+-    min_rating: u8,
++    pub(crate) min_rating: u8,
+
+     /// Force overwriting of existing output JPEGs.
+     #[arg(long, default_value_t = false)]
+-    force: bool,
++    pub(crate) force: bool,
+
+     /// Treat any single-photo export failure as fatal, causing immediate pipeline cancellation.
+     #[arg(long, default_value_t = false)]
+-    strict: bool,
++    pub(crate) strict: bool,
+ }
+
+ fn validate_long_edge(s: &str) -> Result<u32, String> {
+@@ -212,7 +212,25 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
+         let stem = source_path
+             .file_stem()
+             .unwrap_or_else(|| std::ffi::OsStr::new("photo"));
+-        let base_name = format!("{}.jpg", stem.to_string_lossy());
++
++        let mut actual_score = -1.0;
++        if let Some(score) = row.nima_score() {
++            if score.is_finite() && !score.is_nan() {
++                actual_score = score;
++            }
++        }
++
++        let cluster_str = match row.dedup_cluster_id() {
++            Some(id) if id >= 0 => format!("_cluster{:03}", id),
++            _ => String::new(),
++        };
++
++        let base_name = if actual_score >= 0.0 {
++            format!("{}_cull{:.2}{}.jpg", stem.to_string_lossy(), actual_score, cluster_str)
++        } else {
++            format!("{}.jpg", stem.to_string_lossy())
++        };
++
+         let mut candidate = args.output.join(&base_name);
+
+         #[cfg(any(target_os = "macos", target_os = "windows"))]
+diff --git a/crates/photohelper-cli/src/commands/mod.rs b/crates/photohelper-cli/src/commands/mod.rs
+index 78ce9cce..b8cc44ae 100644
+--- a/crates/photohelper-cli/src/commands/mod.rs
++++ b/crates/photohelper-cli/src/commands/mod.rs
+@@ -5,3 +5,4 @@ pub mod dedup;
+ pub mod develop;
+ pub mod export;
+ pub mod ingest;
++pub mod run;
+diff --git a/crates/photohelper-cli/src/main.rs b/crates/photohelper-cli/src/main.rs
+index 7ae5314f..03e3e419 100644
+--- a/crates/photohelper-cli/src/main.rs
++++ b/crates/photohelper-cli/src/main.rs
+@@ -33,9 +33,10 @@ use commands::dedup::{DedupeArgs, run_dedup};
+ use commands::develop::{DevelopArgs, run_develop};
+ use commands::export::{ExportArgs, run_export};
+ use commands::ingest::run_ingest;
++use commands::run::{RunArgs, run_pipeline};
+
+ /// Cross-platform CLI for AI-powered Canon RAW processing.
+-#[derive(Parser, Debug)]
++#[derive(Parser, Debug, Clone)]
+ #[command(name = "photohelper", version, about)]
+ struct Cli {
+     /// Increase verbosity (repeat: -v INFO, -vv DEBUG, -vvv TRACE).
+@@ -66,7 +67,7 @@ struct Cli {
+     command: Command,
+ }
+
+-#[derive(clap::Subcommand, Debug)]
++#[derive(clap::Subcommand, Debug, Clone)]
+ enum Command {
+     /// Walk a directory + catalog RAW photos.
+     Ingest(IngestArgs),
+@@ -76,28 +77,29 @@ enum Command {
+     Dedup(DedupeArgs),
+     /// Apply develop settings via XMP sidecars (Lightroom-compatible).
+     Develop(DevelopArgs),
+-    /// Export to JPEG with resize + watermark (planned for v0.1).
++    /// Export to JPEG with resize + watermark.
+     Export(ExportArgs),
+-    /// Run ingest → cull → develop → export (planned for v0.1).
+-    Run,
++    /// Run ingest → cull → dedup → develop → export.
++    Run(RunArgs),
+     /// Manage AI model bundles (planned for v0.1).
+     Models,
+     /// Inspect / list known camera profiles (planned for v0.1).
+     Camera,
+ }
+
+-#[derive(clap::Args, Debug)]
+-struct IngestArgs {
++/// Arguments for the `ingest` subcommand.
++#[derive(clap::Args, Debug, Clone)]
++pub struct IngestArgs {
+     /// Directory to walk.
+-    path: std::path::PathBuf,
++    pub(crate) path: std::path::PathBuf,
+
+     /// Recurse into subdirectories.
+     #[arg(short, long, default_value_t = true)]
+-    recursive: bool,
++    pub(crate) recursive: bool,
+
+     /// Treat unknown cameras or any per-photo error as fatal at end-of-run.
+     #[arg(long, default_value_t = false)]
+-    strict: bool,
++    pub(crate) strict: bool,
+ }
+
+ /// `sysexits.h` codes used by this binary.
+@@ -135,36 +137,16 @@ fn main() -> ExitCode {
+     init_tracing(cli.verbose, cli.quiet, cli.no_color);
+
+     match &cli.command {
+-        Command::Ingest(args) => match run_ingest(&cli, args) {
+-            Ok(code) => ExitCode::from(code),
+-            Err(err) => {
+-                tracing::error!("{err:#}");
+-                ExitCode::from(exit_code_for_error(&err))
+-            }
+-        },
++        Command::Ingest(args) => handle_pipeline_result(run_ingest(&cli, args)),
+         Command::Cull(args) => {
+             // model_dir: PHOTOHELPER_MODEL_DIR env var if set, else binary-adjacent models/.
+             // current_exe() failure silently falls back to relative "models/"; EX_IOERR
+             // is returned later if from_manifest then fails at that path.
+-            let model_dir = std::env::var("PHOTOHELPER_MODEL_DIR").map_or_else(
+-                |_| {
+-                    std::env::current_exe()
+-                        .ok()
+-                        .and_then(|p| p.parent().map(|p| p.join("models")))
+-                        .unwrap_or_else(|| std::path::PathBuf::from("models"))
+-                },
+-                std::path::PathBuf::from,
+-            );
++            let model_dir = resolve_model_dir();
+             match VerifiedModelBytes::from_manifest(&model_dir, MODEL_MANIFEST_NAME) {
+                 Ok(model) => {
+                     let model_path = model_dir.join(format!("{MODEL_MANIFEST_NAME}.onnx"));
+-                    match run_cull(&cli, args, &model, model_path) {
+-                        Ok(code) => ExitCode::from(code),
+-                        Err(err) => {
+-                            tracing::error!("{err:#}");
+-                            ExitCode::from(exit_code_for_error(&err))
+-                        }
+-                    }
++                    handle_pipeline_result(run_cull(&cli, args, &model, model_path))
+                 }
+                 Err(e) => {
+                     tracing::error!("{e:#}");
+@@ -173,49 +155,70 @@ fn main() -> ExitCode {
+             }
+         }
+         Command::Dedup(args) => {
+-            let model_dir = std::env::var("PHOTOHELPER_MODEL_DIR").map_or_else(
+-                |_| {
+-                    std::env::current_exe()
+-                        .ok()
+-                        .and_then(|p| p.parent().map(|p| p.join("models")))
+-                        .unwrap_or_else(|| std::path::PathBuf::from("models"))
+-                },
+-                std::path::PathBuf::from,
+-            );
++            let model_dir = resolve_model_dir();
+             match VerifiedModelBytes::from_manifest(&model_dir, CLIP_MODEL_MANIFEST_NAME) {
+-                Ok(model) => match run_dedup(&cli, args, &model) {
+-                    Ok(code) => ExitCode::from(code),
+-                    Err(err) => {
+-                        tracing::error!("{err:#}");
+-                        ExitCode::from(exit_code_for_error(&err))
+-                    }
+-                },
++                Ok(model) => handle_pipeline_result(run_dedup(&cli, args, &model)),
+                 Err(e) => {
+                     tracing::error!("{e:#}");
+                     ExitCode::from(exit_code::EX_UNAVAILABLE)
+                 }
+             }
+         }
+-        Command::Develop(args) => match run_develop(&cli, args) {
+-            Ok(code) => ExitCode::from(code),
+-            Err(err) => {
+-                tracing::error!("{err:#}");
+-                ExitCode::from(exit_code_for_error(&err))
+-            }
+-        },
+-        Command::Export(args) => match run_export(&cli, args) {
+-            Ok(code) => ExitCode::from(code),
+-            Err(err) => {
+-                tracing::error!("{err:#}");
+-                ExitCode::from(exit_code_for_error(&err))
+-            }
+-        },
+-        Command::Run => stub("run"),
++        Command::Develop(args) => handle_pipeline_result(run_develop(&cli, args)),
++        Command::Export(args) => handle_pipeline_result(run_export(&cli, args)),
++        Command::Run(args) => {
++            let model_dir = resolve_model_dir();
++
++            // Try to load NIMA
++            let nima_model =
++                match VerifiedModelBytes::from_manifest(&model_dir, MODEL_MANIFEST_NAME) {
++                    Ok(model) => model,
++                    Err(e) => {
++                        tracing::error!("{e:#}");
++                        return ExitCode::from(exit_code::EX_UNAVAILABLE);
++                    }
++                };
++            let nima_model_path = model_dir.join(format!("{MODEL_MANIFEST_NAME}.onnx"));
++
++            // Try to load CLIP
++            let clip_model =
++                match VerifiedModelBytes::from_manifest(&model_dir, CLIP_MODEL_MANIFEST_NAME) {
++                    Ok(model) => model,
++                    Err(e) => {
++                        tracing::error!("{e:#}");
++                        return ExitCode::from(exit_code::EX_UNAVAILABLE);
++                    }
++                };
++
++            handle_pipeline_result(run_pipeline(&cli, args, &nima_model, nima_model_path, &clip_model))
++        }
+         Command::Models => stub("models"),
+         Command::Camera => stub("camera"),
+     }
+ }
+
++fn resolve_model_dir() -> std::path::PathBuf {
++    std::env::var("PHOTOHELPER_MODEL_DIR").map_or_else(
++        |_| {
++            std::env::current_exe()
++                .ok()
++                .and_then(|p| p.parent().map(|p| p.join("models")))
++                .unwrap_or_else(|| std::path::PathBuf::from("models"))
++        },
++        std::path::PathBuf::from,
++    )
++}
++
++fn handle_pipeline_result(res: anyhow::Result<u8>) -> ExitCode {
++    match res {
++        Ok(code) => ExitCode::from(code),
++        Err(err) => {
++            tracing::error!("{err:#}");
++            ExitCode::from(exit_code_for_error(&err))
++        }
++    }
++}
++
+ fn stub(name: &str) -> ExitCode {
+     eprintln!(
+         "photohelper {name}: not yet implemented in v0.1; \
+diff --git a/crates/photohelper-cli/tests/cli.rs b/crates/photohelper-cli/tests/cli.rs
+index ee247ec5..97c49fb6 100644
+--- a/crates/photohelper-cli/tests/cli.rs
++++ b/crates/photohelper-cli/tests/cli.rs
+@@ -323,8 +323,8 @@ fn ingest_lock_timeout_above_max_exits_2_clap_default() {
+ #[test]
+ fn stub_subcommands_exit_69_with_not_yet_implemented_message() {
+     // "cull" removed after session 04 wired the real handler.
+-    // "develop" removed after session 06 D4 wired the real handler.
+-    for name in ["run", "models", "camera"] {
++    // "run" removed after session 10 wired the real handler.
++    for name in ["models", "camera"] {
+         Command::cargo_bin("photohelper")
+             .unwrap()
+             .arg(name)
+@@ -2176,3 +2176,294 @@ fn develop_case_insensitive_path_deduplication() {
+             "skipping duplicate photo row targeting the same sidecar path to prevent concurrent write race hazards",
+         ));
+ }
++
++// =====================================================================
++// Session 10: `photohelper run` integration tests
++// =====================================================================
++
++#[test]
++fn run_happy_path_pipeline_and_option_propagation() {
++    let fixtures = cr3_fixture_dir();
++    if !fixtures.join("RAW_FULL_FRAME.CR3").exists() {
++        return;
++    }
++    let model_dir = nima_model_dir();
++    if !model_dir.join("manifest.toml").exists() {
++        return;
++    }
++
++    let workspace = tempfile::tempdir().unwrap();
++    let input_dir = workspace.path().join("input");
++    let output_dir = workspace.path().join("output");
++    std::fs::create_dir(&input_dir).unwrap();
++
++    // Copy one fixture
++    std::fs::copy(
++        fixtures.join("RAW_FULL_FRAME.CR3"),
++        input_dir.join("RAW_FULL_FRAME.CR3"),
++    )
++    .unwrap();
++
++    let cat_path = workspace.path().join(".photohelper").join("catalog.db");
++
++    Command::cargo_bin("photohelper")
++        .unwrap()
++        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
++        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
++        .args([
++            "--catalog",
++            cat_path.to_str().unwrap(),
++            "run",
++            input_dir.to_str().unwrap(),
++            "--output",
++            output_dir.to_str().unwrap(),
++            "--all-lr",
++            "--watermark",
++            "IntegrationTest",
++            "--quality",
++            "90",
++            "--long-edge",
++            "800",
++            "--lr-label-red",
++            "Vermelho",
++            "--min-rating",
++            "0",
++        ])
++        .assert()
++        .success()
++        .stderr(contains("walked: 1")) // ingest
++        .stderr(contains("scored: 1")) // cull
++        .stderr(contains("written: 1")) // develop
++        .stderr(contains("written: 1")); // export
++
++    // Verify sidecar exists
++    let sidecar_path = input_dir.join("RAW_FULL_FRAME.xmp");
++    assert!(sidecar_path.exists(), "Sidecar must be generated");
++    let sidecar_content = std::fs::read_to_string(&sidecar_path).unwrap();
++    assert!(
++        sidecar_content.contains("xmp:Rating="),
++        "Sidecar must have rating"
++    );
++    assert!(
++        sidecar_content.contains("lr:hierarchicalSubject>"),
++        "Sidecar must have keywords"
++    );
++
++    // Verify JPEG exists. Because it has a NIMA score, the filename will be like `RAW_FULL_FRAME_cull5.30.jpg`.
++    // Since the exact score varies slightly by architecture, we just look for any exported JPEG.
++    let exported_jpegs: Vec<_> = std::fs::read_dir(&output_dir)
++        .unwrap()
++        .filter_map(Result::ok)
++        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jpg"))
++        .collect();
++    assert!(!exported_jpegs.is_empty(), "JPEG must be exported, but found: {:?}", std::fs::read_dir(&output_dir).unwrap().map(|e| e.unwrap().path()).collect::<Vec<_>>());
++}
++
++#[test]
++fn run_strict_mode_aborts_mid_pipeline() {
++    let fixtures = cr3_fixture_dir();
++    if !fixtures.join("RAW_FULL_FRAME.CR3").exists() {
++        return;
++    }
++    let model_dir = nima_model_dir();
++    if !model_dir.join("manifest.toml").exists() {
++        return;
++    }
++
++    let workspace = tempfile::tempdir().unwrap();
++    let input_dir = workspace.path().join("input");
++    let output_dir = workspace.path().join("output");
++    std::fs::create_dir(&input_dir).unwrap();
++
++    // 1. Valid fixture that ingests successfully
++    std::fs::copy(
++        fixtures.join("RAW_FULL_FRAME.CR3"),
++        input_dir.join("RAW_FULL_FRAME.CR3"),
++    )
++    .unwrap();
++
++    // 2. Corrupt fixture that fails ingest, triggering strict abort at end of Stage 1.
++    std::fs::write(input_dir.join("corrupt.cr3"), vec![0xCC; 100]).unwrap();
++
++    let cat_path = workspace.path().join(".photohelper").join("catalog.db");
++
++    Command::cargo_bin("photohelper")
++        .unwrap()
++        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
++        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
++        .args([
++            "--catalog",
++            cat_path.to_str().unwrap(),
++            "run",
++            input_dir.to_str().unwrap(),
++            "--output",
++            output_dir.to_str().unwrap(),
++            "--strict",
++        ])
++        .assert()
++        .failure()
++        .code(1);
++
++    // Verify torn state prevention: the valid CR3 was ingested but NOT developed/exported.
++    assert!(
++        cat_path.exists(),
++        "Catalog should exist from stage 1"
++    );
++    let jpeg_path = output_dir.join("RAW_FULL_FRAME.jpg");
++    assert!(
++        !jpeg_path.exists(),
++        "JPEG must not be exported due to mid-pipeline abort"
++    );
++}
++
++#[test]
++fn run_pipeline_without_explicit_catalog() {
++    let fixtures = cr3_fixture_dir();
++    if !fixtures.join("RAW_FULL_FRAME.CR3").exists() {
++        return;
++    }
++    let model_dir = nima_model_dir();
++    if !model_dir.join("manifest.toml").exists() {
++        return;
++    }
++
++    let workspace = tempfile::tempdir().unwrap();
++    let input_dir = workspace.path().join("input");
++    let output_dir = workspace.path().join("output");
++    std::fs::create_dir(&input_dir).unwrap();
++
++    std::fs::copy(
++        fixtures.join("RAW_FULL_FRAME.CR3"),
++        input_dir.join("RAW_FULL_FRAME.CR3"),
++    )
++    .unwrap();
++
++    // No --catalog flag passed!
++    Command::cargo_bin("photohelper")
++        .unwrap()
++        .current_dir(workspace.path()) // Run from workspace root, not input dir
++        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
++        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
++        .args([
++            "run",
++            input_dir.to_str().unwrap(),
++            "--output",
++            output_dir.to_str().unwrap(),
++            "--min-rating",
++            "0",
++        ])
++        .assert()
++        .success()
++        .stderr(contains("written: 1")); // ensure develop/export actually ran!
++
++    // Verify default catalog was created in the input dir
++    let default_cat_path = input_dir.join(".photohelper").join("catalog.db");
++    assert!(
++        default_cat_path.exists(),
++        "Catalog should be created in input dir by default"
++    );
++    let exported_jpegs: Vec<_> = std::fs::read_dir(&output_dir)
++        .unwrap()
++        .filter_map(Result::ok)
++        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jpg"))
++        .collect();
++    assert!(!exported_jpegs.is_empty(), "JPEG must be exported, but found: {:?}", std::fs::read_dir(&output_dir).unwrap().map(|e| e.unwrap().path()).collect::<Vec<_>>());
++}
++
++#[test]
++fn run_input_output_collision_boundary() {
++    let workspace = tempfile::tempdir().unwrap();
++    let input_dir = workspace.path().join("input");
++    std::fs::create_dir(&input_dir).unwrap();
++
++    // Output is inside input
++    let output_dir = input_dir.join("output");
++
++    let model_dir = nima_model_dir();
++    if !model_dir.join("manifest.toml").exists() {
++        return;
++    }
++
++    Command::cargo_bin("photohelper")
++        .unwrap()
++        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
++        .args([
++            "run",
++            input_dir.to_str().unwrap(),
++            "--output", output_dir.to_str().unwrap(),
++        ])
++        .assert()
++        .failure()
++        .stderr(contains("Output path cannot be a subdirectory of the input path to prevent recursive ingest loops"));
++
++    // Output is exact same as input
++    Command::cargo_bin("photohelper")
++        .unwrap()
++        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
++        .args([
++            "run",
++            input_dir.to_str().unwrap(),
++            "--output",
++            input_dir.to_str().unwrap(),
++        ])
++        .assert()
++        .failure()
++        .stderr(contains(
++            "Output path cannot be a subdirectory of the input path",
++        ));
++}
++
++#[test]
++fn run_negative_behavioral_min_rating_skip() {
++    let fixtures = cr3_fixture_dir();
++    if !fixtures.join("RAW_FULL_FRAME.CR3").exists() {
++        return;
++    }
++    let model_dir = nima_model_dir();
++    if !model_dir.join("manifest.toml").exists() {
++        return;
++    }
++
++    let workspace = tempfile::tempdir().unwrap();
++    let input_dir = workspace.path().join("input");
++    let output_dir = workspace.path().join("output");
++    std::fs::create_dir(&input_dir).unwrap();
++
++    std::fs::copy(
++        fixtures.join("RAW_FULL_FRAME.CR3"),
++        input_dir.join("RAW_FULL_FRAME.CR3"),
++    )
++    .unwrap();
++
++    let cat_path = workspace.path().join(".photohelper").join("catalog.db");
++
++    Command::cargo_bin("photohelper")
++        .unwrap()
++        .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
++        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
++        .args([
++            "--catalog",
++            cat_path.to_str().unwrap(),
++            "run",
++            input_dir.to_str().unwrap(),
++            "--output",
++            output_dir.to_str().unwrap(),
++            "--min-rating",
++            "5", // Force skip during export, as the fixture scores ~3.9
++        ])
++        .assert()
++        .success()
++        // verify export skipped it
++        .stderr(contains("skipped-rating: 1"));
++
++    // Verify JPEG does NOT exist
++    let exported_jpegs: Vec<_> = std::fs::read_dir(&output_dir)
++        .unwrap()
++        .filter_map(Result::ok)
++        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jpg"))
++        .collect();
++    assert!(
++        exported_jpegs.is_empty(),
++        "JPEG must not be exported due to rating threshold"
++    );
++}
+diff --git a/docs/discovery-notes.md b/docs/discovery-notes.md
+index b74338cd..d75f74e3 100644
+--- a/docs/discovery-notes.md
++++ b/docs/discovery-notes.md
+@@ -301,3 +301,19 @@
+ - **Why it matters**: Unbounded tag stack growth leads to memory exhaustion (OOM) and panics under parallel environments.
+ - **Owner**: session 07 (this session, resolved in reader loop).
+ - **Status**: reconciled (2026-05-30, enforced a strict maximum depth limit of **64** on the qualified path stack inside `crates/photohelper-sidecar/src/reader.rs` and returns a parser error if exceeded).
++
++### DN-033 — photohelper export ignores develop sidecar edits (2026-05-31, session X)
++
++- **Observed**: The `photohelper export` command exports the base RAW image without applying any of the `crs:` (Lightroom) or `ph:` edits defined in the `.xmp` sidecars (e.g. exposure compensation, white balance, contrast). The pipeline currently decodes the RAW directly to RGB via `libraw`, performs scaling and watermarking, and then encodes to JPEG via `MozJPEG`.
++- **Why it matters**: `photohelper` functions as a pre-culling and proxy-export assistant for Lightroom, but cannot function as a standalone ISP (Image Signal Processor). If a user expects `photohelper export` to bake-in the AI-suggested exposure and color edits natively, they will see unedited images.
++- **Owner**: Any future session that aims to elevate `photohelper` from an "assistant" to a "standalone ISP / renderer".
++- **Binding trigger**: First session that aims to natively apply `.xmp` develop settings before JPEG compression. Will require integrating a mature FOSS image processing engine (like `imageproc`, Darktable's engine, or OpenImageIO) to apply complex adjustments (curves, denoise, white balance matrices) to the linear RAW data.
++- **Status**: open (informational; current behavior is proxy-export by design).
++
++### DN-036 — Image watermarks with dynamic positioning and scaling deferred (2026-05-31, session X)
++
++- **Observed**: The `photohelper export` command only supports single-position text watermarks via the `--watermark` flag. It lacks support for image-based badges, simultaneous placement in multiple locations (e.g., both bottom-left and top-right), and dynamic scaling/fitting of image badges to accommodate variable resolution and portrait/landscape orientations. It also currently uses a very tight dynamic padding for text (1.5% of the long edge).
++- **Why it matters**: Users needing to overlay logos, branding, or complex multi-badge arrangements cannot use the export pipeline for their final deliverables. Badges must be placed harmonically (e.g. starting at a baseline 25px offset from the edges, then dynamically scaling this offset to fit the resolution proportionally) so they look consistent on both small proxies and full 24MP exports.
++- **Owner**: Session 08+ (or next export refinement session).
++- **Binding trigger**: Next session that touches the `export` pipeline or `export_photo` logic. Must implement image rendering over `tiny-skia` with dynamic scale factors and coordinate calculation logic that accommodates multiple simultaneous watermark templates, using a base harmonic margin (e.g. proportional equivalent of 25px).
++- **Status**: open (informational; current behavior is limited to simple text rendering).

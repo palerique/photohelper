@@ -1037,6 +1037,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "clap",
+ "dunce",
  "filetime",
  "fs4",
  "num_cpus",

@@ -44,43 +44,43 @@ impl From<CliWatermarkPosition> for WatermarkPosition {
 }
 
 /// Clap args for `photohelper export`.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ExportArgs {
     /// Output directory for compiled JPEGs.
     #[arg(long)]
-    output: PathBuf,
+    pub(crate) output: PathBuf,
 
     /// Long-edge resize limit in pixels (strictly >= 16).
     #[arg(long, value_parser = validate_long_edge)]
-    long_edge: Option<u32>,
+    pub(crate) long_edge: Option<u32>,
 
     /// JPEG quality level (1..=100).
     #[arg(long, default_value = "80", value_parser = clap::value_parser!(u8).range(1..=100))]
-    quality: u8,
+    pub(crate) quality: u8,
 
     /// Watermark text.
     #[arg(long)]
-    watermark: Option<String>,
+    pub(crate) watermark: Option<String>,
 
     /// Position of watermark (bottom-left or top-right).
     #[arg(long, default_value = "bottom-left")]
-    watermark_position: CliWatermarkPosition,
+    pub(crate) watermark_position: CliWatermarkPosition,
 
     /// Minimum rating to export (0..=5).
     #[arg(long, default_value = "3", value_parser = clap::value_parser!(u8).range(0..=5))]
-    min_rating: u8,
+    pub(crate) min_rating: u8,
 
     /// Force overwriting of existing output JPEGs.
     #[arg(long, default_value_t = false)]
-    force: bool,
+    pub(crate) force: bool,
 
     /// Treat any single-photo export failure as fatal, causing immediate pipeline cancellation.
     #[arg(long, default_value_t = false)]
-    strict: bool,
+    pub(crate) strict: bool,
 }
 
-fn validate_long_edge(s: &str) -> Result<u32, String> {
+pub fn validate_long_edge(s: &str) -> Result<u32, String> {
     let val: u32 = s.parse().map_err(|e| format!("invalid number: {e}"))?;
     if val < 16 {
         return Err("long-edge limit must be at least 16 pixels".to_string());
@@ -179,6 +179,7 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             e
         )
     })?;
+    // Best-effort cleanup; ignore if not found or already deleted
     let _ = std::fs::remove_file(test_file);
 
     // 2. Open Catalog and fetch photos
@@ -212,7 +213,25 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
         let stem = source_path
             .file_stem()
             .unwrap_or_else(|| std::ffi::OsStr::new("photo"));
-        let base_name = format!("{}.jpg", stem.to_string_lossy());
+
+        let actual_score = row.nima_score().filter(|s| s.is_finite() && !s.is_nan());
+
+        let cluster_prefix = match row.dedup_cluster_id() {
+            Some(id) => format!("cluster-{id:03}-"),
+            _ => String::new(),
+        };
+
+        let base_name = if let Some(score) = actual_score {
+            format!(
+                "{}cull-{:05.2}-{}.jpg",
+                cluster_prefix,
+                score,
+                stem.to_string_lossy()
+            )
+        } else {
+            format!("{}{}.jpg", cluster_prefix, stem.to_string_lossy())
+        };
+
         let mut candidate = args.output.join(&base_name);
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -222,8 +241,9 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
 
         if seen_targets.contains(&target_key) {
             let mut suffix = 1;
+            let base_stem = base_name.strip_suffix(".jpg").unwrap_or(&base_name);
             loop {
-                let suffix_name = format!("{}_{}.jpg", stem.to_string_lossy(), suffix);
+                let suffix_name = format!("{base_stem}_{suffix}.jpg");
                 candidate = args.output.join(&suffix_name);
 
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -317,19 +337,19 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             None => {
                 if let Some(score) = row.nima_score() {
                     if score.is_finite() && !score.is_nan() {
-                        if score < 4.0 {
-                            1
-                        } else if score < 5.5 {
-                            2
-                        } else if score < 7.0 {
-                            3
-                        } else if score < 8.5 {
-                            4
-                        } else {
-                            5
-                        }
+                        let (rating, _) = crate::commands::util::nima_score_to_rating_and_tier(score);
+                        rating
                     } else {
-                        0
+                        tracing::warn!(
+                            path = %source_path.display(),
+                            value = score,
+                            "NIMA score is non-finite; failing export"
+                        );
+                        stats.errored.fetch_add(1, Ordering::Relaxed);
+                        if args.strict {
+                            cancelled.store(true, Ordering::Relaxed);
+                        }
+                        return;
                     }
                 } else {
                     0
@@ -352,7 +372,6 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             return;
         };
 
-        // Skip if target exists and --force is not specified
         if final_target_path.exists() && !args.force {
             tracing::info!(path = %final_target_path.display(), "output JPEG already exists; skipping");
             stats.skipped_existing.fetch_add(1, Ordering::Relaxed);
@@ -390,6 +409,7 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
                         "failed to rename temporary file to final target"
                     );
                     stats.errored.fetch_add(1, Ordering::Relaxed);
+                    // Best-effort cleanup; ignore if not found or already deleted
                     let _ = std::fs::remove_file(&tmp_path);
                     if args.strict {
                         cancelled.store(true, Ordering::Relaxed);
@@ -428,11 +448,6 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
         stats.file_missing.load(Ordering::Relaxed) + stats.errored.load(Ordering::Relaxed);
 
     if args.strict && total_failures > 0 {
-        return Ok(exit_code::EX_STRICT_FAIL);
-    }
-
-    if total_failures > 0 && stats.written.load(Ordering::Relaxed) == 0 {
-        // All photos failed to export
         return Ok(exit_code::EX_STRICT_FAIL);
     }
 

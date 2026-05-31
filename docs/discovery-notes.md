@@ -301,3 +301,27 @@
 - **Why it matters**: Unbounded tag stack growth leads to memory exhaustion (OOM) and panics under parallel environments.
 - **Owner**: session 07 (this session, resolved in reader loop).
 - **Status**: reconciled (2026-05-30, enforced a strict maximum depth limit of **64** on the qualified path stack inside `crates/photohelper-sidecar/src/reader.rs` and returns a parser error if exceeded).
+
+### DN-033 — photohelper export ignores develop sidecar edits (2026-05-31, session X)
+
+- **Observed**: The `photohelper export` command exports the base RAW image without applying any of the `crs:` (Lightroom) or `ph:` edits defined in the `.xmp` sidecars (e.g. exposure compensation, white balance, contrast). The pipeline currently decodes the RAW directly to RGB via `libraw`, performs scaling and watermarking, and then encodes to JPEG via `MozJPEG`.
+- **Why it matters**: `photohelper` functions as a pre-culling and proxy-export assistant for Lightroom, but cannot function as a standalone ISP (Image Signal Processor). If a user expects `photohelper export` to bake-in the AI-suggested exposure and color edits natively, they will see unedited images.
+- **Owner**: Any future session that aims to elevate `photohelper` from an "assistant" to a "standalone ISP / renderer".
+- **Binding trigger**: First session that aims to natively apply `.xmp` develop settings before JPEG compression. Will require integrating a mature FOSS image processing engine (like `imageproc`, Darktable's engine, or OpenImageIO) to apply complex adjustments (curves, denoise, white balance matrices) to the linear RAW data.
+- **Status**: open (informational; current behavior is proxy-export by design).
+
+### DN-036 — Image watermarks with dynamic positioning and scaling deferred (2026-05-31, session X)
+
+- **Observed**: The `photohelper export` command only supports single-position text watermarks via the `--watermark` flag. It lacks support for image-based badges, simultaneous placement in multiple locations (e.g., both bottom-left and top-right), and dynamic scaling/fitting of image badges to accommodate variable resolution and portrait/landscape orientations. It also currently uses a very tight dynamic padding for text (1.5% of the long edge).
+- **Why it matters**: Users needing to overlay logos, branding, or complex multi-badge arrangements cannot use the export pipeline for their final deliverables. Badges must be placed harmonically (e.g. starting at a baseline 25px offset from the edges, then dynamically scaling this offset to fit the resolution proportionally) so they look consistent on both small proxies and full 24MP exports.
+- **Owner**: Session 08+ (or next export refinement session).
+- **Binding trigger**: Next session that touches the `export` pipeline or `export_photo` logic. Must implement image rendering over `tiny-skia` with dynamic scale factors and coordinate calculation logic that accommodates multiple simultaneous watermark templates, using a base harmonic margin (e.g. proportional equivalent of 25px).
+- **Status**: open (informational; current behavior is limited to simple text rendering).
+
+### DN-037 — Fail-open risk in file metadata operations (2026-05-31, session 11)
+
+- **Observed**: In `photohelper-sidecar/src/conflict.rs`, `std::fs::metadata()` failures were silently defaulted to `Ok(false)` (conflict-free). This meant that if the file existed but was unreadable due to strict permissions (e.g. `EACCES`), the tool assumed it was conflict-free and proceeded to overwrite it, potentially corrupting user data or failing midway.
+- **Why it matters**: Fallback to `false` creates a silent fail-open security/data-loss risk. Missing files should return `Ok(false)` via explicit `ErrorKind::NotFound` matching, but all other IO errors (like `PermissionDenied`) must escalate as `Err(Error::Io)`.
+- **Owner**: Any future code interacting with file attributes or existence checks.
+- **Binding trigger**: Next time filesystem interaction is added or reviewed.
+- **Status**: reconciled (2026-05-31, updated `conflict.rs` to propagate non-NotFound IO errors natively and `writer.rs` to explicitly match `NotFound` and escalate other errors).

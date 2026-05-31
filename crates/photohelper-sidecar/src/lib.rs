@@ -10,12 +10,14 @@
 //!
 //! ```rust,no_run
 //! use photohelper_sidecar::SidecarSettings;
-//! use photohelper_sidecar::conflict::{merge_and_write, WriteOutcome};
+//! use photohelper_sidecar::conflict::{ConflictStrategy, merge_and_write, WriteOutcome};
+//! use photohelper_sidecar::SidecarPath;
 //! use std::path::Path;
 //!
 //! # fn main() -> Result<(), photohelper_sidecar::Error> {
 //! let raw_path = Path::new("/photos/IMG_0001.CR3");
-//! let sidecar_path = raw_path.with_extension("xmp");
+//! let sidecar_raw = raw_path.with_extension("xmp");
+//! let sidecar_path = SidecarPath::new(&sidecar_raw)?;
 //!
 //! let settings = SidecarSettings::builder()
 //!     .exposure(0.5)
@@ -23,7 +25,7 @@
 //!     .nima_score(7.25)
 //!     .build()?;
 //!
-//! let outcome = merge_and_write(&sidecar_path, &settings, false)?;
+//! let outcome = merge_and_write(&sidecar_path, &settings, ConflictStrategy::Safe)?;
 //! match outcome {
 //!     WriteOutcome::Created => println!("sidecar created"),
 //!     WriteOutcome::Overwritten => println!("sidecar updated"),
@@ -37,15 +39,17 @@
 
 pub mod conflict;
 mod error;
+mod path;
 mod reader;
 mod settings;
 mod writer;
 
-pub use conflict::{WriteOutcome, merge_and_write};
+pub use crate::conflict::{ConflictStrategy, WriteOutcome, merge_and_write};
 pub use error::Error;
+pub use path::SidecarPath;
 pub use reader::read_xmp;
 pub use settings::{Rating, SidecarSettings, SidecarSettingsBuilder};
-pub use writer::write_xmp;
+pub use writer::{is_valid_xml_string, write_xmp};
 
 use static_assertions::assert_impl_all;
 assert_impl_all!(SidecarSettings: Send, Sync);
@@ -142,7 +146,8 @@ mod tests {
     #[test]
     fn write_and_read_roundtrip_all_fields() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
         let dt = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
 
         let original = SidecarSettings::builder()
@@ -182,31 +187,36 @@ mod tests {
     #[test]
     fn write_with_only_ph_namespace() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
         let s = SidecarSettings::builder().nima_score(5.5).build().unwrap();
         write_xmp(&p, &s).unwrap();
-        let xml = std::fs::read_to_string(&p).unwrap();
+        let xml = std::fs::read_to_string(&raw_p).unwrap();
         assert!(xml.contains("ph:NimaScore"));
         assert!(!xml.contains("crs:Temperature"));
         assert!(!xml.contains("crs:ProcessVersion"));
+        assert!(!xml.contains("crs:HasSettings"));
     }
 
     #[test]
     fn write_with_only_crs_namespace() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
         let s = SidecarSettings::builder().exposure(1.0).build().unwrap();
         write_xmp(&p, &s).unwrap();
         let xml = std::fs::read_to_string(&p).unwrap();
         assert!(xml.contains("crs:Exposure2012"));
         assert!(xml.contains("crs:ProcessVersion=\"11.0\""));
+        assert!(xml.contains("crs:HasSettings=\"True\""));
         assert!(!xml.contains("ph:NimaScore"));
     }
 
     #[test]
     fn lightroom_compatible_output() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
         let s = SidecarSettings::builder()
             .temperature(5000)
             .build()
@@ -258,7 +268,8 @@ mod tests {
     #[test]
     fn read_malformed_xml_returns_parse_error() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("bad.xmp");
+        let raw_p = dir.path().join("bad.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
         std::fs::write(&p, b"<this></that>").unwrap();
         let result = read_xmp(&p);
         assert!(result.is_err(), "malformed XML must return Err");
@@ -372,7 +383,8 @@ mod tests {
         // edited and updated xmp:MetadataDate to future (but left ph:LastProcessedAt).
         // Correct detection: xmp:MetadataDate(future) > ph:LastProcessedAt(past) → ConflictPreserved.
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
 
         // Write an existing sidecar with our timestamps (past write).
         let existing = SidecarSettings::builder()
@@ -410,7 +422,7 @@ mod tests {
             .last_processed_at(now())
             .build()
             .unwrap();
-        let outcome = merge_and_write(&p, &incoming, false).unwrap();
+        let outcome = merge_and_write(&p, &incoming, ConflictStrategy::Safe).unwrap();
         assert_eq!(outcome, WriteOutcome::ConflictPreserved);
         // Existing value preserved.
         let check = read_xmp(&p).unwrap();
@@ -418,9 +430,33 @@ mod tests {
     }
 
     #[test]
+    fn conflict_force_overwrite_malformed_xml() {
+        let dir = tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        // Write a completely broken XML file
+        std::fs::write(&raw_p, "This is not valid XML <broken").unwrap();
+
+        let incoming = SidecarSettings::builder().exposure(2.0).build().unwrap();
+
+        // Safe mode should fail with XmlParse error
+        let err = merge_and_write(&p, &incoming, ConflictStrategy::Safe).unwrap_err();
+        assert!(matches!(err, Error::XmlParse { .. }));
+
+        // ForceOverwrite should catch the parse error and overwrite
+        let outcome = merge_and_write(&p, &incoming, ConflictStrategy::ForceOverwrite).unwrap();
+        assert_eq!(outcome, WriteOutcome::ForcedOverwrite);
+
+        let check = read_xmp(&p).unwrap();
+        assert!((check.exposure().unwrap() - 2.0).abs() < 0.01);
+    }
+
+    #[test]
     fn conflict_preserve_mtime_conflict_shield() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
 
         let our_past = past();
         let existing = SidecarSettings::builder()
@@ -440,7 +476,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let outcome = merge_and_write(&p, &incoming, false).unwrap();
+        let outcome = merge_and_write(&p, &incoming, ConflictStrategy::Safe).unwrap();
         assert_eq!(outcome, WriteOutcome::ConflictPreserved);
 
         // Verify existing value is preserved
@@ -451,7 +487,8 @@ mod tests {
     #[test]
     fn conflict_overwrite_older_lightroom_edit() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
 
         let existing = SidecarSettings::builder()
             .exposure(1.0)
@@ -465,7 +502,7 @@ mod tests {
             .last_processed_at(now())
             .build()
             .unwrap();
-        let outcome = merge_and_write(&p, &incoming, false).unwrap();
+        let outcome = merge_and_write(&p, &incoming, ConflictStrategy::Safe).unwrap();
         assert_eq!(outcome, WriteOutcome::Overwritten);
         let check = read_xmp(&p).unwrap();
         assert!((check.exposure().unwrap() - 0.5).abs() < 0.01);
@@ -474,7 +511,8 @@ mod tests {
     #[test]
     fn conflict_force_overwrite() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
 
         let existing = SidecarSettings::builder()
             .exposure(1.0)
@@ -488,7 +526,7 @@ mod tests {
             .last_processed_at(past())
             .build()
             .unwrap();
-        let outcome = merge_and_write(&p, &incoming, true).unwrap();
+        let outcome = merge_and_write(&p, &incoming, ConflictStrategy::ForceOverwrite).unwrap();
         assert_eq!(outcome, WriteOutcome::ForcedOverwrite);
         let check = read_xmp(&p).unwrap();
         assert!((check.exposure().unwrap() - 0.0).abs() < 0.01);
@@ -497,7 +535,8 @@ mod tests {
     #[test]
     fn conflict_missing_metadata_date_preserves() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
         // Write existing sidecar with no timestamp but with crs: fields.
         let existing = SidecarSettings::builder().exposure(1.0).build().unwrap();
         write_xmp(&p, &existing).unwrap();
@@ -508,14 +547,15 @@ mod tests {
             .build()
             .unwrap();
         // Existing has no timestamp (MetadataDate absent); conservative: preserve.
-        let outcome = merge_and_write(&p, &incoming, false).unwrap();
+        let outcome = merge_and_write(&p, &incoming, ConflictStrategy::Safe).unwrap();
         assert_eq!(outcome, WriteOutcome::ConflictPreserved);
     }
 
     #[test]
     fn conflict_missing_last_processed_merges() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
         // Existing has a MetadataDate (simulating Lightroom-written sidecar).
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
@@ -532,13 +572,82 @@ mod tests {
 
         // Incoming has no ph:LastProcessedAt → Overwritten (merged on first run).
         let incoming = SidecarSettings::builder().exposure(0.0).build().unwrap();
-        let outcome = merge_and_write(&p, &incoming, false).unwrap();
+        let outcome = merge_and_write(&p, &incoming, ConflictStrategy::Safe).unwrap();
         assert_eq!(outcome, WriteOutcome::Overwritten);
 
         // Verify that existing and incoming settings are successfully merged
         let read_back = read_xmp(&p).unwrap();
         assert_eq!(read_back.exposure(), Some(0.0));
         assert_eq!(read_back.temperature(), Some(6000));
+    }
+
+    #[test]
+    fn conflict_missing_metadata_date_with_last_processed_at() {
+        let dir = tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
+
+        // 1. Existing sidecar has ph:LastProcessedAt, NO xmp:MetadataDate, and IS ours.
+        let xml_ours = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+      xmlns:ph="http://photohelper.app/ns/1.0/"
+      ph:LastProcessedAt="2026-01-01T12:00:00Z"
+      ph:PhotohelperId="my-id"
+      crs:Exposure2012="1.0"
+    />
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        std::fs::write(&p, xml_ours).unwrap();
+        filetime::set_file_mtime(
+            &raw_p,
+            filetime::FileTime::from_unix_time(
+                time::macros::datetime!(2026-01-01 12:00:00 UTC).unix_timestamp(),
+                0,
+            ),
+        )
+        .unwrap();
+        let incoming_ours = SidecarSettings::builder()
+            .photohelper_id("my-id".to_string())
+            .exposure(2.0)
+            .build()
+            .unwrap();
+        let outcome1 = merge_and_write(&p, &incoming_ours, ConflictStrategy::Safe).unwrap();
+        assert_eq!(outcome1, WriteOutcome::Overwritten);
+        assert_eq!(read_xmp(&p).unwrap().exposure(), Some(2.0));
+
+        // 2. Existing sidecar has ph:LastProcessedAt, NO xmp:MetadataDate, and IS NOT ours.
+        let xml_theirs = r#"<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+      xmlns:ph="http://photohelper.app/ns/1.0/"
+      ph:LastProcessedAt="2026-01-01T12:00:00Z"
+      ph:PhotohelperId="their-id"
+      crs:Exposure2012="1.0"
+    />
+  </rdf:RDF>
+</x:xmpmeta>"#;
+        std::fs::write(&p, xml_theirs).unwrap();
+        filetime::set_file_mtime(
+            &raw_p,
+            filetime::FileTime::from_unix_time(
+                time::macros::datetime!(2026-01-01 12:00:00 UTC).unix_timestamp(),
+                0,
+            ),
+        )
+        .unwrap();
+        let incoming_different = SidecarSettings::builder()
+            .photohelper_id("my-id".to_string())
+            .exposure(3.0)
+            .build()
+            .unwrap();
+        let outcome2 = merge_and_write(&p, &incoming_different, ConflictStrategy::Safe).unwrap();
+        assert_eq!(outcome2, WriteOutcome::ConflictPreserved);
+        assert_eq!(read_xmp(&p).unwrap().exposure(), Some(1.0));
     }
 
     // ── Atomic write ──────────────────────────────────────────────────────
@@ -551,7 +660,8 @@ mod tests {
         let readonly_dir = dir.path().join("ro");
         std::fs::create_dir(&readonly_dir).unwrap();
         std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let p = readonly_dir.join("photo.xmp");
+        let raw_p = readonly_dir.join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
         let s = SidecarSettings::builder().exposure(1.0).build().unwrap();
         let result = write_xmp(&p, &s);
         assert!(result.is_err(), "write to read-only dir must fail");
@@ -570,11 +680,12 @@ mod tests {
     }
 
     #[test]
-    fn write_xmp_atomic_no_partial_on_io_error() {
+    fn write_xmp_atomic_no_partial_on_path_resolution_error() {
         // Use a path in a non-existent directory — will fail at File::create.
-        let p = Path::new("/nonexistent/path/photo.xmp");
+        let raw_p = Path::new("/nonexistent/path/photo.xmp");
+        let p = SidecarPath::new(raw_p).unwrap();
         let s = SidecarSettings::builder().exposure(1.0).build().unwrap();
-        let result = write_xmp(p, &s);
+        let result = write_xmp(&p, &s);
         assert!(result.is_err(), "write to nonexistent dir must fail");
     }
 
@@ -620,7 +731,8 @@ mod tests {
     #[test]
     fn test_merge_and_write_empty_color_label_retention() {
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
 
         // Existing sidecar has a label "Red"
         let existing = SidecarSettings::builder().label("Red").build().unwrap();
@@ -629,7 +741,7 @@ mod tests {
         // Incoming is empty color label
         let incoming = SidecarSettings::builder().label("").build().unwrap();
 
-        let outcome = merge_and_write(&p, &incoming, false).unwrap();
+        let outcome = merge_and_write(&p, &incoming, ConflictStrategy::Safe).unwrap();
         assert_eq!(outcome, WriteOutcome::Overwritten);
 
         let read_back = read_xmp(&p).unwrap();
@@ -726,22 +838,18 @@ mod tests {
     }
 
     #[test]
-    fn test_xml_illegal_control_character_sanitization() {
+    fn test_xml_illegal_control_character_rejection() {
         let raw = "Hello\x00World\x1F!\tGood\nMorning";
-        let s = SidecarSettings::builder().label(raw).build().unwrap();
-        let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
-        write_xmp(&p, &s).unwrap();
-
-        let read_back = read_xmp(&p).unwrap();
-        assert_eq!(read_back.label().unwrap(), "HelloWorld!\tGood\nMorning");
+        let err = SidecarSettings::builder().label(raw).build().unwrap_err();
+        assert!(matches!(err, Error::Validation { .. }));
     }
 
     #[test]
     fn test_write_no_keywords_omits_elements() {
         let s = SidecarSettings::builder().exposure(1.0).build().unwrap();
         let dir = tempdir().unwrap();
-        let p = dir.path().join("photo.xmp");
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
         write_xmp(&p, &s).unwrap();
         let xml = std::fs::read_to_string(&p).unwrap();
         assert!(!xml.contains("subject"));
@@ -796,5 +904,49 @@ mod tests {
 </x:xmpmeta>"#;
         let s = reader::parse_xmp_str(xml, Path::new("test.xmp")).expect("must parse nested crs");
         assert_eq!(s.temperature(), Some(4800));
+    }
+
+    #[test]
+    fn test_write_xmp_aligns_physical_mtime() {
+        let dir = tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
+        let dt = OffsetDateTime::from_unix_timestamp(1_600_000_000).unwrap();
+        let s = SidecarSettings::builder()
+            .exposure(1.0)
+            .last_processed_at(dt)
+            .build()
+            .unwrap();
+        write_xmp(&p, &s).unwrap();
+
+        let mdata = std::fs::metadata(&raw_p).unwrap();
+        let mtime = mdata.modified().unwrap();
+        let expected =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        assert_eq!(
+            mtime, expected,
+            "physical mtime must exactly match last_processed_at"
+        );
+    }
+
+    #[test]
+    fn test_xmp_injection_escaping() {
+        let raw = "<Hack & \"Test\">";
+        let s = SidecarSettings::builder()
+            .label(raw)
+            .photohelper_id(raw)
+            .build()
+            .unwrap();
+        let dir = tempdir().unwrap();
+        let raw_p = dir.path().join("photo.xmp");
+        let p = SidecarPath::new(&raw_p).unwrap();
+        write_xmp(&p, &s).unwrap();
+
+        let read_back = read_xmp(&raw_p).unwrap();
+        assert_eq!(read_back.label().unwrap(), raw);
+        assert_eq!(read_back.photohelper_id().unwrap(), raw);
+
+        let xml = std::fs::read_to_string(&raw_p).unwrap();
+        assert!(xml.contains("&lt;Hack &amp; &quot;Test&quot;&gt;"));
     }
 }

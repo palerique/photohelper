@@ -7,13 +7,17 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 9 (`lightroom-sync-fixes` — 2026-05-31) — **SHIPPED** via PR #12. Implemented BUG-001 fixes including smart CLI warnings/shorthands (`--all-lr`), upfront validation for distinct and XML-safe custom color labels, high-performance granular conflict logging, `mtime`-based conflict shield, and precision `mtime` alignment. Session-end R1 (0C+1H+2M+2L; 5 resolved) → R2 CLEAN (0 findings).
+**Last session**: 11 (`lightroom-metadata-sync-fixes` — 2026-05-31) — **SHIPPED** via PR #14. Bug fixes for BUG-002, TOCTOU vulnerability, XML character sanitization, and strictly typed metadata properties.
 
-**Current session**: 10 (`run-pipeline` — 2026-05-31) — branch `session-10/run-pipeline`. **PLANNED** (Implementing the orchestrating `run` subcommand).
+**Current session**: 12 (`<to-be-determined>` — <date>) — branch `main`. **READY** (waiting for next prompt).
 
-**Goal**: Orchestrate ingest → cull → develop → export pipelines via the `run` subcommand.
+**Goal**: To be determined.
 
-**Action**: Create the session plan `docs/plans/session-10.md` and run plan-review on it.
+**Action**: Read session state and await user prompt.
+
+**Session-end review (session 11 — COMPLETE)**:
+- Round 3 → 15 total findings (TOCTOU, silent XML sanitization fail-open, missing test coverage, strict nima_score boundaries, deduplication logic bug) → remediated.
+- Round 4 → CLEAN.
 
 **Session-end review (session 09 — COMPLETE)**:
 - R1 → 0C+1H+2M+2L (5 total; integration test drift, XML validation error specialization, CData type mismatch, README outdated roadmap, warnings path context) → resolved.
@@ -96,7 +100,7 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 | `photohelper-core`    | **implemented (session 01+04)**         | model + RgbImage; error (13 variants); catalog_glue. |
 | `photohelper-raw`     | **implemented (session 02+04)**         | LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw_rgb. 4 integration tests + 3 CLIP D1c tests. |
 | `photohelper-ai`      | **implemented (session 04+05)**         | NIMA + CLIP ViT-B/32 int8 (MIT, 85.3 MB). ImageEmbedding, MobileClip, EmbeddingZeroVector+EmbeddingCorruptBytes errors. CLIP_MODEL_SLUG+CLIP_MODEL_MANIFEST_NAME. |
-| `photohelper-sidecar` | **implemented (session 06+07)**         | XMP sidecar I/O (crs:+ph: namespaces), atomic write, conflict resolution (DN-004), Lightroom namespace compatibility (DN-029). 35+ unit tests. |
+| `photohelper-sidecar` | **implemented (session 06+07+11)**         | XMP sidecar I/O (crs:+ph: namespaces), atomic write, conflict resolution (DN-004), Lightroom namespace compatibility (DN-029). Robust error handling, strict XML validation, TOCTOU fix (session 11). |
 | `photohelper-export`  | **implemented (session 08)**            | Resize + watermark + MozJPEG encoding design fully implemented, integrated, and verified with 100% green tests. |
 | `photohelper-cameras` | **implemented (session 01)**            | CameraProfile trait + CanonR8 stub + CameraRegistry::for_exif with normalization.                             |
 | `photohelper-catalog` | **implemented (sessions 01+04+05)**     | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores + FK + SCHEMA_VERSION=2), CullRow, InsertScoreOutcome, unsuperseded_unscored_rows, insert_cull_score. Decision docs 0001+0002. Session 05 D2a+D2b: schema v3 (embeddings + dup_clusters + apply_v2_to_v3 + SCHEMA_VERSION=3), EmbeddingRow, InsertEmbeddingOutcome, unembedded_rows, insert_embedding (dim*4==bytes guard), all_embeddings_for_model (superseded excluded), insert_dup_cluster. Decision doc 0003. |
@@ -198,21 +202,21 @@ closed inline above or filed as DN/TD with binding triggers.
 
 ## Continuation-session bootstrap (verbatim)
 
-Session 08 is in flight on branch `session-08/export-integration`.
+Session 11 is in flight on branch `session-11/lightroom-metadata-sync-fixes`.
 Resume from a fresh context by staying on the branch:
 
 ```bash
-git switch session-08/export-integration && just session-start
+git switch session-11/lightroom-metadata-sync-fixes && just session-start
 ```
 
 Then read this file (re-orientation), the latest
 `HANDOFF_REPORT.md` checkpoint, `docs/discovery-notes.md`, the
-session-08 plan at `docs/plans/session-08.md`, and the in-flight
+session-11 plan at `docs/plans/session-11.md`, and the in-flight
 plan-review artifact at
-`docs/code-reviews/session-08-plan-round2.md`. Proceed to the **Action**
+`docs/code-reviews/session-11-plan-round2.md`. Proceed to the **Action**
 above (begin implementation phase).
 
-After session 08 merges, the next session's bootstrap is the canonical:
+After session 11 merges, the next session's bootstrap is the canonical:
 
 ```bash
 git switch main && git pull --ff-only origin main && git switch -c session-09/<kebab-slug> && just session-start
