@@ -9,16 +9,16 @@ Elevate `photohelper export` from a proxy-renderer to a true standalone Image Si
   - Remove the dangling `mod pixmap_test;` declaration from `crates/photohelper-export/src/lib.rs`.
 
 - **DN-036: Dynamic Image Watermarks**
-  - **CLI Updates**: Add `--badge path=<PATH>,pos=<POSITION>[,scale=<PERCENT>]` key-value argument to prevent Windows path collisions and CLI arity desyncs.
-  - **Auto-Scaling**: Automatically calculate a default scale (e.g., 5% of target long edge) if omitted, strictly clamped to `max(computed, 1.0)` and bounded by a maximum threshold to prevent OOM/overflows.
-  - **O(1) Validation**: Parse directly into a `HashMap<WatermarkPosition, Badge>`. Use the `Entry` API to explicitly trigger `ExportError::DuplicateWatermarkPosition` if any collision (image vs image, or text vs image) occurs.
-  - **Error Propagation**: Return explicit `ExportError::BadgeLoadFailed { path, reason }` upon IO/Decode failures, mapped from underlying `std::io::Error` or `png` errors. Ensure the export function is wrapped in `#[instrument(skip(options))]` for tracing.
+  - **CLI Updates**: Add `--badge path=<PATH>,pos=<POSITION>[,scale=<PERCENT>]` key-value argument. Introduce a strong newtype `struct Scale(f32)` enforcing `0.0 < scale <= 1.0` (or `100.0`) at construction to guarantee affine bounds safety.
+  - **Auto-Scaling**: Automatically calculate a default `Scale` (e.g., 5% of target long edge) if omitted, tightly bounding the geometry mathematics.
+  - **O(1) Validation via Sum Type**: Parse directly into a `HashMap<WatermarkPosition, Watermark>`, where `enum Watermark { Text(String), Image(BadgeConfig) }`. Use the `Entry` API to trigger `ExportError::DuplicateWatermarkPosition` if any collision occurs, strictly enforcing the one-watermark-per-position invariant structurally.
+  - **Error Propagation**: Return explicit `ExportError::BadgeLoadFailed { path, reason }` upon IO/Decode failures. Ensure the export function is wrapped in `#[instrument(skip(options))]` for tracing.
   - **Rendering**: Leverage `tiny-skia` to render the badge into a small, temporary RGBA buffer (affine transform). Use a trivial, fast 1:1 pixel premultiplied-over blending loop (`dst = src + dst * (1 - src_alpha)`) to composite it directly onto the massive RGB background array. Ignore EXIF orientation in Rust since LibRaw pre-rotates the buffer.
 
 - **DN-033: Standalone ISP Pipeline (Phase 1)**
   - **Data Boundary**: Expand `ExportOptions` with `ToneMappingOptions` carrying XMP edits.
   - **C-Shim Updates**: Replace individual setters with a declarative C-shim struct/function (`photohelper_decode_with_options(ctx, options)`) handling 16-bit, linear gamma, and no-auto-bright flags.
-  - **Unified Extraction**: Replace separate methods with a single `read_raw(options)` FFI wrapper returning `Result<Vec<u16>, LibRawError>`, mapping native error codes securely. Use strict `// SAFETY:` justifications.
+  - **Unified Extraction**: Replace separate methods with a single `read_raw(options)` FFI wrapper returning `Result<ImageBuffer, LibRawError>`, where `ImageBuffer { data: Vec<T>, width, height, channels }`. This encapsulates the buffer with its spatial bounds, preventing dimensional mismatch bugs. Use strict `// SAFETY:` justifications.
   - **Rust ISP Engine (LUT-accelerated)**:
     - Normalization: **Do not manually subtract black**. Treat the `u16` buffer from LibRaw as a clean, normalized linear array spanning `0..=65535`.
     - LUT Generation: Precalculate Exposure, S-Curve, and OETF into a 1D Lookup Table mapping `0..=65535` to `u8`. This delivers `O(1)` cache-coherent evaluation per pixel.
