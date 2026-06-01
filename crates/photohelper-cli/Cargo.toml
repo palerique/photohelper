@@ -42,3 +42,4 @@ predicates.workspace = true
 tempfile.workspace = true
 filetime.workspace = true
 rusqlite.workspace = true
+image = "0.25.10"

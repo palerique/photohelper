@@ -989,7 +989,13 @@ fn dedup_end_to_end_embeds_and_clusters_cc0_fixtures() {
         .unwrap()
         .env("PHOTOHELPER_MODEL_DIR", model_dir.to_str().unwrap())
         .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
-        .args(["--catalog", cat_path.to_str().unwrap(), "dedup"])
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "dedup",
+            "--similarity-threshold",
+            "0.95",
+        ])
         .assert()
         .code(0)
         .stderr(contains("embedded: 2"));

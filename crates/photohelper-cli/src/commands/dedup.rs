@@ -33,7 +33,7 @@ pub(crate) struct DedupeArgs {
     /// Valid range: (0.0, 1.0].
     #[arg(
         long,
-        default_value_t = 0.95_f32,
+        default_value_t = 0.85_f32,
         value_parser = parse_similarity_threshold
     )]
     pub(crate) similarity_threshold: f32,
