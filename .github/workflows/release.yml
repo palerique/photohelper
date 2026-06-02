@@ -154,10 +154,128 @@ jobs:
           name: linux-x86_64
           path: photohelper-*.tar.gz*
 
+  # ── Windows x86_64 (MSVC) ──────────────────────────────────────────────────
+  # ORT is statically linked via Pyke CDN prebuilt (ANL-004: static=onnxruntime).
+  # No onnxruntime.dll needed. LibRaw via vcpkg x64-windows-static-md triplet.
+  build-windows-x86_64:
+    name: Build Windows x86_64
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          lfs: true
+
+      - name: Set version from tag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          (Get-Content Cargo.toml) -replace '^version = "0.0.0"', "version = `"$version`"" |
+            Set-Content Cargo.toml
+          # Add-Content writes UTF-8 NoBOM (correct for GITHUB_ENV) on PowerShell 7.
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_VERSION=$version"
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          key: release-windows-x86_64-v1
+
+      - name: Install LibRaw via vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            throw "VCPKG_INSTALLATION_ROOT is not set. Expected on GHA windows-latest runners. " +
+                  "If the runner image changed, file a runner-images issue."
+          }
+          # x64-windows-static-md: static lib + DLL-linked CRT (UCRT ships with Win10+).
+          # Matches the Rust vcpkg crate's default triplet for x86_64-pc-windows-msvc.
+          vcpkg install libraw:x64-windows-static-md
+
+      - name: Build release binary
+        shell: pwsh
+        run: cargo build --release -p photohelper-cli --target ${{ env.TARGET }}
+        env:
+          # Use the GHA-provided canonical vcpkg location (robust across runner updates).
+          VCPKG_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT }}
+
+      - name: Smoke test binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PHOTOHELPER_MODEL_DIR = "crates/photohelper-ai/models"
+          & "target/${{ env.TARGET }}/release/photohelper.exe" --help
+
+      - name: Bundle archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VERSION = $env:RELEASE_VERSION
+          $TARGET = "${{ env.TARGET }}"
+          $DIR = "photohelper-${VERSION}-${TARGET}"
+          New-Item -ItemType Directory -Path "$DIR/models" -Force
+
+          # Binary (ORT is statically linked — no onnxruntime.dll needed)
+          Copy-Item "target/${TARGET}/release/photohelper.exe" "$DIR/"
+
+          # Models — use Get-ChildItem for explicit count validation
+          Copy-Item "crates/photohelper-ai/models/manifest.toml" "$DIR/models/"
+          $onnxFiles = Get-ChildItem "crates/photohelper-ai/models/*.onnx"
+          if ($onnxFiles.Count -eq 0) {
+            throw "No .onnx model files found — verify ``lfs: true`` in checkout step"
+          }
+          $onnxFiles | Copy-Item -Destination "$DIR/models/"
+
+          # Install README
+          Copy-Item "scripts/README-install-windows.md" "$DIR/README-install.md"
+
+          # Create zip (Windows convention; PowerShell Compress-Archive is built-in)
+          Compress-Archive -Path "$DIR" -DestinationPath "${DIR}.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "${DIR}.zip").Hash.ToLower()
+          "${hash}  ${DIR}.zip" | Set-Content "${DIR}.zip.sha256"
+
+      - name: Verify and log archive contents
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -Assembly System.IO.Compression.FileSystem
+          # Reconstruct deterministic path ($DIR is not in scope in a separate run: block).
+          $VERSION = $env:RELEASE_VERSION
+          $TARGET = "${{ env.TARGET }}"
+          $zipPath = "photohelper-${VERSION}-${TARGET}.zip"
+          if (-not (Test-Path $zipPath)) { throw "Expected archive not found: $zipPath" }
+          $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
+          $entries = $zip.Entries | Select-Object -ExpandProperty FullName
+          $zip.Dispose()
+          Write-Output "Archive contents:"
+          $entries | ForEach-Object { Write-Output "  $_" }
+          # Assert required files
+          $required = @("photohelper.exe", "models/manifest.toml", "README-install.md")
+          foreach ($f in $required) {
+            $found = $entries | Where-Object { $_ -like "*/$f" -or $_ -eq $f }
+            if (-not $found) { throw "Required file missing from archive: $f" }
+          }
+          $onnxCount = ($entries | Where-Object { $_ -like "*.onnx" }).Count
+          if ($onnxCount -eq 0) { throw "No .onnx model files in archive" }
+          $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+          Write-Output "Archive verified: ${onnxCount} ONNX model(s), ${sizeMB}MB total"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # HEAD
+        with:
+          name: windows-x86_64
+          path: photohelper-*.zip*
+
   # ── GitHub Release ──────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release (draft)
-    needs: [build-macos-arm64, build-linux-x86_64]
+    needs: [build-macos-arm64, build-linux-x86_64, build-windows-x86_64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
