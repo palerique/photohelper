@@ -1,0 +1,8 @@
+[advisories]
+# TD-024: `paste` crate (RUSTSEC-2024-0436) is unmaintained; pulled transitively
+# via `rav1e 0.8.1 -> ravif 0.13.0 -> image 0.25.10` which is a dev-dep of
+# photohelper-cli (test fixtures only — not in the production binary). The
+# `image` crate must release or switch away from `rav1e` for this to clear
+# without pinning. Binding trigger: next `image` release that drops `rav1e` or
+# next session that bumps `image`. Acknowledged 2026-06-02.
+ignore = ["RUSTSEC-2024-0436"]

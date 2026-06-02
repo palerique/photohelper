@@ -29,6 +29,19 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ## Open
 
+### TD-024 — `paste` crate (RUSTSEC-2024-0436) unmaintained; ignored transitively via `image` dev-dep
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 15, surfaced by fresh advisory DB fetch during session-pause CI gate)
+- **Stop-gap location**: `.cargo/audit.toml` — `ignore = ["RUSTSEC-2024-0436"]` — TD-024
+- **Fundamental fix**: when `image` releases a version that drops `rav1e` (or `rav1e` releases a version that drops `paste`), bump `image` in `crates/photohelper-cli/Cargo.toml`. Alternatively, consider replacing the `image` dev-dep with a lighter raster fixture generator that avoids the `rav1e` chain entirely (e.g. build test PNGs byte-by-byte via `png` crate, avoiding `image`'s codec ecosystem). Note: `image` is a dev-dep only — it is NOT in the production binary.
+- **Binding trigger**: `cargo audit` flags this advisory again (ignore removed) OR next session that bumps `image` OR by 2026-12-01, whichever first. Remove the ignore from `.cargo/audit.toml` and re-run `just audit`; if the advisory is gone, close this TD.
+- **Scope estimate**: ~1–5 LoC (dep bump or fixture change) / low risk (dev-dep only, not in production binary)
+- **Consequence of inaction**: `paste` (unmaintained) remains a transitive dep of the test fixture toolchain; risk is low (dev-dep only, unmaintained ≠ actively insecure) but the advisory will keep re-appearing until the chain is resolved.
+- **Related**: advisory at https://rustsec.org/advisories/RUSTSEC-2024-0436; session-15 plan-review context (D4 ledger).
+
+---
+
 ### TD-001 — GitHub Actions action versions use `@vN` floating tags, not pinned SHAs
 
 - **Status**: CLOSED (2026-05-30, session 06 D0). Pinned all GitHub Actions in `.github/workflows/ci.yml` to full commit SHAs, and documented the chosen SHAs in `docs/decisions/0001-action-version-pinning.md` along with the periodic upgrade protocol and cadence.
