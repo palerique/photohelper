@@ -502,7 +502,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Status**: Open
 - **Opened**: 2026-06-02 (session 15, Round 3 review, Theme R3-C)
 - **Stop-gap location**: `crates/photohelper-export/src/lib.rs:239` (`pub margin_y: f32`) and `:1205` (Height branch ignores `margin_y`)
-- **Stop-gap commit**: session-15 R3 remediation — docstrings updated but field kept as-is to avoid churn
+- **Stop-gap commit**: `bda7c38d` (session-15 R3 remediation — docstrings updated but field kept as-is to avoid churn)
 - **Fundamental fix**: Move margin fields into `BadgeSizeBasis` variants: `Height { frac: f32, margin_frac: f32 }` (single equal-margin fraction applied to short edge) and `LongEdge { scale: Scale, margin_x: f32, margin_y: f32 }`. This makes the dead-field state structurally unrepresentable. Update `composite_mark_on_pixmap`, `MarkSpec` construction in `export.rs` and `watermark.rs`, and all unit tests referencing margin fields.
 - **Binding trigger**: Next session that adds a new `BadgeSizeBasis` variant or modifies `MarkSpec` construction.
 - **Scope estimate**: ~60 LoC / low risk.

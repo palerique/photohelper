@@ -244,7 +244,7 @@ pub struct MarkSpec {
     /// Top/bottom margin as a fraction of post-resize image **height** (LongEdge path only).
     ///
     /// **Not used** in the `Height` compositing path — `margin_x` controls both axes there.
-    pub margin_y: f32,
+    pub margin_y: f32, // TD-041: dead in Height path — see TECH-DEBT.md
 }
 
 /// Shadow gradient specification.
@@ -2341,6 +2341,10 @@ mod tests {
 
     /// Helper: create a 1×1 tiny_skia Pixmap with the given premultiplied RGBA bytes.
     fn make_1x1_pixmap(r: u8, g: u8, b: u8, a: u8) -> tiny_skia::Pixmap {
+        debug_assert!(
+            r <= a && g <= a && b <= a,
+            "violates premultiplied invariant: r={r} g={g} b={b} must all be <= a={a}"
+        );
         let mut p = tiny_skia::Pixmap::new(1, 1).unwrap();
         let d = p.data_mut();
         d[0] = r;
@@ -2462,6 +2466,20 @@ mod tests {
         assert!(
             bot_lum < top_lum,
             "bottom lum={bot_lum} must be < top lum={top_lum} (shadow applied)"
+        );
+
+        // Mark compositing: Mark1 (top-right) at Height(0.25) on 32×32.
+        // margin_px = round(32 × 0.046) = 1; mark_h = round(32 × 0.25) = 8.
+        // scale = 8/4 = 2; mark_w = round(4 × 2) = 8; x = 32 - 1 - 8 = 23; y = 1.
+        // Pixel (25, 4) is well inside the mark region [23..30] × [1..8].
+        // The badge is solid white (255, 255, 255), the background is gray (160).
+        let mark_pixel = decoded.get_pixel(25, 4).0;
+        let mark_lum: u32 = mark_pixel[0] as u32 + mark_pixel[1] as u32 + mark_pixel[2] as u32;
+        let bg_lum: u32 = 160 * 3; // original background luminance
+        assert!(
+            mark_lum > bg_lum,
+            "pixel (25,4) inside mark region must be brighter than background: \
+             mark_lum={mark_lum} vs bg_lum={bg_lum} (mark compositing not applied)"
         );
     }
 }

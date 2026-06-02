@@ -16,12 +16,16 @@
 #       [--force]              Overwrite existing output files
 #
 # For RAW (CR3) sources the full pipeline runs:
-#   Ingest → Cull (AI) → Cluster (dedup) → Develop (XMP) → Export → Watermark
+#   Ingest → Cull (AI) → Cluster (dedup) → Develop (XMP) → Export+Watermark (single-pass)
+#   (co-located JPEG/PNG files are watermarked separately via the watermark subcommand)
 #
 # For raster-only sources (JPEG/PNG only) the catalog steps are skipped:
 #   Watermark directly at the requested long-edge
 
 set -euo pipefail
+
+cleanup() { [[ -n "${RASTER_TEMP:-}" ]] && rm -rf "$RASTER_TEMP"; }
+trap cleanup EXIT
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -165,6 +169,8 @@ if [[ $RAW_PIPELINE -eq 1 ]]; then
     # eliminating a second JPEG decode/encode cycle versus separate watermark.
     step "Export+Watermark → JPEG (q=$QUALITY, ${MAX_LONG_EDGE}px, min-rating≥$MIN_RATING, single-pass)"
     T=$(ts)
+    # Allow exit 2 (partial failure / mark-doesnt-fit for narrow images); abort on other codes.
+    EX_EXIT=0
     "$BINARY" export \
         --catalog    "$CATALOG_DB" \
         --output     "$WATERMARK_DIR" \
@@ -174,9 +180,19 @@ if [[ $RAW_PIPELINE -eq 1 ]]; then
         --mark1-png  "$MARK1" \
         --mark2-png  "$MARK2" \
         --with-shadow \
-        ${FORCE}
+        ${FORCE} || EX_EXIT=$?
+    if [[ $EX_EXIT -ne 0 && $EX_EXIT -ne 2 ]]; then
+        echo "Export failed (exit $EX_EXIT). Aborting." >&2
+        exit $EX_EXIT
+    fi
+    if [[ $EX_EXIT -eq 2 ]]; then
+        warn "Some images could not be watermarked during export (mark-doesnt-fit for narrow images)."
+    fi
     WATERMARKED=$(find "$WATERMARK_DIR" -name "*.jpg" | wc -l | tr -d ' ')
     WM_SIZE=$(du -sh "$WATERMARK_DIR" 2>/dev/null | awk '{print $1}')
+    if [[ "$WATERMARKED" -eq 0 ]]; then
+        warn "Export produced 0 JPEGs. Check that the source directory contains CR3 files rated ≥$MIN_RATING."
+    fi
     ok "Done in $(hms $(elapsed $T)) — $WATERMARKED JPEG(s) exported+watermarked ($WM_SIZE)"
 
     # ── watermark raster files from source (JPEG/PNG alongside the CR3s) ─────────
@@ -249,6 +265,9 @@ else
     fi
     WATERMARKED=$(find "$WATERMARK_DIR" -name "*.jpg" | wc -l | tr -d ' ')
     WM_SIZE=$(du -sh "$WATERMARK_DIR" 2>/dev/null | awk '{print $1}')
+    if [[ "$WATERMARKED" -eq 0 ]]; then
+        warn "No files were watermarked. Check that the source directory contains JPEG/PNG images."
+    fi
     ok "Done in $(hms $(elapsed $T)) — $WATERMARKED JPEG(s) watermarked ($WM_SIZE)"
 
     FINAL_DIR="$WATERMARK_DIR"
