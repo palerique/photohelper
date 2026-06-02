@@ -14,6 +14,51 @@ and Windows.
 > discipline (see `CLAUDE.md` and `docs/quality-assurance.md`). Changes land
 > in bounded sessions via reviewed PRs to `main`.
 
+## Installation (pre-built binaries)
+
+Download the latest release archive for your platform from the
+[Releases page](https://github.com/palerique/photohelper/releases).
+
+### macOS (Apple Silicon — arm64)
+
+```bash
+tar xzf photohelper-VERSION-aarch64-apple-darwin.tar.gz
+cd photohelper-VERSION-aarch64-apple-darwin
+xattr -dr com.apple.quarantine photohelper  # bypass Gatekeeper (v0.1: unsigned)
+sudo cp photohelper /usr/local/bin/
+sudo cp libonnxruntime.dylib /usr/local/lib/
+mkdir -p ~/photohelper/models && cp models/* ~/photohelper/models/
+echo 'export PHOTOHELPER_MODEL_DIR="$HOME/photohelper/models"' >> ~/.zshrc && source ~/.zshrc
+photohelper --help
+```
+
+### macOS (Intel — x86_64)
+
+Same steps as above but use `photohelper-VERSION-x86_64-apple-darwin.tar.gz`.
+
+### Linux (x86_64)
+
+```bash
+tar xzf photohelper-VERSION-x86_64-unknown-linux-gnu.tar.gz
+cd photohelper-VERSION-x86_64-unknown-linux-gnu
+sudo cp photohelper /usr/local/bin/
+sudo cp libonnxruntime.so* /usr/local/lib/ && sudo ldconfig
+mkdir -p ~/photohelper/models && cp models/* ~/photohelper/models/
+echo 'export PHOTOHELPER_MODEL_DIR="$HOME/photohelper/models"' >> ~/.bashrc && source ~/.bashrc
+photohelper --help
+```
+
+### Windows
+
+Windows builds are planned for v0.2. In the meantime, Windows users can build
+from source using WSL2 (Ubuntu) or wait for v0.2.
+
+> **Note on models**: `PHOTOHELPER_MODEL_DIR` only needs to be set if you use
+> the `cull` or `dedup` subcommands (AI features). All other subcommands work
+> without it.
+
+---
+
 ## Quickstart (contributors)
 
 ```bash

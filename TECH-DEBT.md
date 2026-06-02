@@ -464,6 +464,18 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-029 — Windows x86_64 binary distribution deferred to v0.2 (2026-06-02, session 15)
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 15, release-CI implementation)
+- **Stop-gap location**: `.github/workflows/release.yml` — Windows target absent; Windows users must build from source.
+- **Fundamental fix**: Add a `build-windows-x86_64` job to `.github/workflows/release.yml` using the `windows-latest` runner and either: (A) `msys2/setup-msys2@v2` to provide autoconf/automake/g++ so the existing `build.rs` runs unchanged, OR (B) extend `crates/photohelper-raw/build.rs` to detect Windows and use a cmake-based LibRaw build (LibRaw ships `CMakeLists.txt`). ORT ships a pre-built Windows `.dll`; MozJPEG must compile against the MSVC C runtime.
+- **Binding trigger**: First Windows user request OR v0.2 milestone.
+- **Scope estimate**: ~100 LoC (build.rs cmake path + GHA job + test validation) / medium risk (MSVC C runtime ABI differences with MozJPEG and LibRaw).
+- **Consequence of inaction**: Windows users cannot install pre-built binaries; they must have a Rust toolchain + MSYS2 or WSL to build from source.
+
+---
+
 ### TD-040 — DevelopArgs violates struct_excessive_bools lint
 
 - **Status**: Open
