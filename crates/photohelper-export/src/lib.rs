@@ -196,6 +196,12 @@ pub struct ExportOptions {
     pub force: bool,
     /// Tone-mapping settings.
     pub tone_mapping: ToneMappingOptions,
+    /// Height-based corner marks applied via render_to_jpeg (single-pass with filmic ISP).
+    /// When non-empty, these are composited AFTER the filmic tone-map, saving a second
+    /// JPEG encode/decode cycle compared to running the `watermark` subcommand separately.
+    pub render_marks: Vec<MarkSpec>,
+    /// Shadow gradient to apply when `render_marks` is non-empty.
+    pub render_shadow: Option<ShadowSpec>,
 }
 
 // ===== D1b — Geometry types =====
@@ -1627,12 +1633,17 @@ pub fn export_photo(
         })
         .collect();
 
+    // Combine legacy badge marks (LongEdge-based) with new height-based marks
+    // so the export+watermark pipeline can run in a single filmic-ISP pass.
+    let mut combined_marks = marks;
+    combined_marks.extend(options.render_marks.iter().cloned());
+
     let render_opts = RenderOptions {
         long_edge: options.long_edge,
         downscale_only: false,
         quality: options.quality,
-        shadow: None,
-        marks,
+        shadow: options.render_shadow,
+        marks: combined_marks,
     };
 
     let jpeg_bytes = render_to_jpeg(&rgb_pixels, width, height, &render_opts)?;

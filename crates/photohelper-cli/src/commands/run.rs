@@ -216,6 +216,9 @@ pub fn run_pipeline(
         min_rating: args.min_rating,
         force: args.force,
         strict: args.strict,
+        mark1_png: None,
+        mark2_png: None,
+        with_shadow: false,
     };
 
     tracing::info!("Starting pipeline...");

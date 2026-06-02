@@ -160,32 +160,24 @@ if [[ $RAW_PIPELINE -eq 1 ]]; then
         --catalog "$CATALOG_DB" --lr-rating --lr-keywords --force
     ok "Done in $(hms $(elapsed $T))"
 
-    # ── export ────────────────────────────────────────────────────────────────
-    step "Export → JPEG (q=$QUALITY, ${MAX_LONG_EDGE}px, min-rating≥$MIN_RATING)"
+    # ── export + marks in one filmic-ISP pass (saves ~30% wall-clock) ─────────
+    # --mark1-png/--mark2-png apply shadow+marks inside the same encode step,
+    # eliminating a second JPEG decode/encode cycle versus separate watermark.
+    step "Export+Watermark → JPEG (q=$QUALITY, ${MAX_LONG_EDGE}px, min-rating≥$MIN_RATING, single-pass)"
     T=$(ts)
     "$BINARY" export \
         --catalog    "$CATALOG_DB" \
-        --output     "$EXPORT_DIR" \
+        --output     "$WATERMARK_DIR" \
         --quality    "$QUALITY" \
         --long-edge  "$MAX_LONG_EDGE" \
         --min-rating "$MIN_RATING" \
-        ${FORCE}
-    EXPORTED=$(find "$EXPORT_DIR" -name "*.jpg" | wc -l | tr -d ' ')
-    ok "Done in $(hms $(elapsed $T)) — $EXPORTED JPEG(s) exported"
-
-    # ── watermark (on the exported JPEGs) ─────────────────────────────────────
-    step "Watermark ($EXPORTED JPEGs — shadow + marks at ${MAX_LONG_EDGE}px)"
-    T=$(ts)
-    "$BINARY" watermark \
-        --source "$EXPORT_DIR" \
-        --mark1  "$MARK1" \
-        --mark2  "$MARK2" \
-        --output "$WATERMARK_DIR" \
-        --max-long-edge "$MAX_LONG_EDGE" \
+        --mark1-png  "$MARK1" \
+        --mark2-png  "$MARK2" \
+        --with-shadow \
         ${FORCE}
     WATERMARKED=$(find "$WATERMARK_DIR" -name "*.jpg" | wc -l | tr -d ' ')
     WM_SIZE=$(du -sh "$WATERMARK_DIR" 2>/dev/null | awk '{print $1}')
-    ok "Done in $(hms $(elapsed $T)) — $WATERMARKED JPEG(s) watermarked ($WM_SIZE)"
+    ok "Done in $(hms $(elapsed $T)) — $WATERMARKED JPEG(s) exported+watermarked ($WM_SIZE)"
 
     # ── watermark raster files from source (JPEG/PNG alongside the CR3s) ─────────
     RASTER_SOURCE_COUNT=$(find "$SOURCE_DIR" -maxdepth 1 \

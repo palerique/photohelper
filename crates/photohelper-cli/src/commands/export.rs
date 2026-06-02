@@ -16,7 +16,9 @@ use anyhow::Context as _;
 use photohelper_ai::{CLIP_MODEL_SLUG, MODEL_SLUG};
 use photohelper_catalog::Catalog;
 use photohelper_export::{
-    ExportMetadata, ExportOptions, NimaScore, Rating, WatermarkPosition, export_photo,
+    BadgeSizeBasis, ExportMetadata, ExportOptions, MARK_MARGIN_FRAC, MARK1_HEIGHT_FRAC,
+    MARK2_HEIGHT_FRAC, MarkSlot, MarkSpec, NimaScore, PreloadedBadge, Rating, SHADOW_BAND_FRAC,
+    ShadowSpec, WatermarkPosition, export_photo,
 };
 use photohelper_sidecar::read_xmp;
 use rayon::prelude::*;
@@ -140,6 +142,19 @@ pub(crate) struct ExportArgs {
     /// Treat any single-photo export failure as fatal, causing immediate pipeline cancellation.
     #[arg(long, default_value_t = false)]
     pub(crate) strict: bool,
+
+    /// Top-right corner PNG mark applied in the same filmic-ISP pass (avoids a second
+    /// JPEG encode/decode cycle versus running the `watermark` subcommand separately).
+    #[arg(long)]
+    pub(crate) mark1_png: Option<std::path::PathBuf>,
+
+    /// Bottom-left corner PNG mark (same single-pass approach as --mark1-png).
+    #[arg(long)]
+    pub(crate) mark2_png: Option<std::path::PathBuf>,
+
+    /// Apply shadow gradient when --mark1-png/--mark2-png are provided.
+    #[arg(long, default_value_t = false)]
+    pub(crate) with_shadow: bool,
 }
 
 pub fn validate_long_edge(s: &str) -> Result<u32, String> {
@@ -263,7 +278,7 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
     let stats = Arc::new(ExportStats::new());
     let cancelled = Arc::new(AtomicBool::new(false));
 
-    // 4. Preload badges
+    // 4. Preload badges (legacy --badge flags)
     let mut preloaded_badges = HashMap::new();
     for badge in &args.badges {
         let preloaded = photohelper_export::PreloadedBadge::load(
@@ -276,6 +291,42 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             anyhow::bail!("Duplicate watermark position detected: {:?}", badge.pos);
         }
     }
+
+    // 4b. Preload single-pass marks (--mark1-png / --mark2-png).
+    // These use height-based sizing + equal margins and run inside the filmic-ISP
+    // encode step, eliminating a second JPEG decode/encode cycle.
+    let mut single_pass_marks: Vec<MarkSpec> = vec![];
+    let render_shadow =
+        if args.with_shadow && (args.mark1_png.is_some() || args.mark2_png.is_some()) {
+            Some(ShadowSpec {
+                band_frac: SHADOW_BAND_FRAC,
+            })
+        } else {
+            None
+        };
+    if let Some(ref p) = args.mark1_png {
+        let badge = PreloadedBadge::load(p, None)
+            .with_context(|| format!("failed to load --mark1-png at {}", p.display()))?;
+        single_pass_marks.push(MarkSpec {
+            badge: badge.pixmap,
+            basis: BadgeSizeBasis::Height(MARK1_HEIGHT_FRAC),
+            slot: MarkSlot::Mark1,
+            margin_x: MARK_MARGIN_FRAC,
+            margin_y: MARK_MARGIN_FRAC,
+        });
+    }
+    if let Some(ref p) = args.mark2_png {
+        let badge = PreloadedBadge::load(p, None)
+            .with_context(|| format!("failed to load --mark2-png at {}", p.display()))?;
+        single_pass_marks.push(MarkSpec {
+            badge: badge.pixmap,
+            basis: BadgeSizeBasis::Height(MARK2_HEIGHT_FRAC),
+            slot: MarkSlot::Mark2,
+            margin_x: MARK_MARGIN_FRAC,
+            margin_y: MARK_MARGIN_FRAC,
+        });
+    }
+    let single_pass_marks = Arc::new(single_pass_marks);
 
     // 4. Spawn Heartbeat progress thread
     let stop = Arc::new(HeartbeatStop::new());
@@ -412,6 +463,8 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             watermarks,
             force: args.force,
             tone_mapping,
+            render_marks: single_pass_marks.as_ref().clone(),
+            render_shadow,
         };
 
         let rating = Rating::new(rating_val);
