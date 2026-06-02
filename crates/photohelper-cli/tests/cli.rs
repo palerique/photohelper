@@ -2597,3 +2597,320 @@ fn develop_auto_tone_and_lr_label_score() {
     // Score should be 8.25 (rounded) and zero-padded to 08.25
     assert!(xmp_content.contains("xmp:Label=\"08.25\""));
 }
+
+// =====================================================================
+// D2 — watermark subcommand integration tests
+// =====================================================================
+
+/// Create a minimal valid JPEG at `path` with dimensions `w`×`h`.
+fn write_synthetic_jpeg(path: &std::path::Path, w: u32, h: u32) {
+    let img = image::RgbImage::from_pixel(w, h, image::Rgb([180u8, 100u8, 60u8]));
+    let dyn_img = image::DynamicImage::ImageRgb8(img);
+    let mut buf = std::io::Cursor::new(Vec::new());
+    dyn_img
+        .write_to(&mut buf, image::ImageFormat::Jpeg)
+        .unwrap();
+    std::fs::write(path, buf.into_inner()).unwrap();
+}
+
+/// Create a minimal valid PNG at `path` with dimensions `w`×`h`.
+fn write_synthetic_png(path: &std::path::Path, w: u32, h: u32) {
+    let img = image::RgbImage::from_pixel(w, h, image::Rgb([200u8, 200u8, 200u8]));
+    let dyn_img = image::DynamicImage::ImageRgb8(img);
+    let mut buf = std::io::Cursor::new(Vec::new());
+    dyn_img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+    std::fs::write(path, buf.into_inner()).unwrap();
+}
+
+/// D2 — empty source → summary line with walked: 0.
+#[test]
+fn watermark_empty_source_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("source");
+    let out = tmp.path().join("out");
+    let mark = tmp.path().join("mark.png");
+    std::fs::create_dir_all(&src).unwrap();
+    write_synthetic_png(&mark, 50, 50);
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "watermark",
+            "--source",
+            src.to_str().unwrap(),
+            "--mark1",
+            mark.to_str().unwrap(),
+            "--mark2",
+            mark.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0)
+        .stderr(contains("walked: 0"));
+}
+
+/// D2 — happy path: JPEG + PNG source → two output JPEGs, exit 0.
+#[test]
+fn watermark_happy_path_writes_jpeg_and_png() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("source");
+    let out = tmp.path().join("out");
+    let mark = tmp.path().join("mark.png");
+    std::fs::create_dir_all(&src).unwrap();
+
+    // Source files: one JPEG, one PNG (both large enough for marks to fit).
+    write_synthetic_jpeg(&src.join("photo.jpg"), 800, 600);
+    write_synthetic_png(&src.join("image.png"), 800, 600);
+    // Mark: square 60×60
+    write_synthetic_png(&mark, 60, 60);
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "watermark",
+            "--source",
+            src.to_str().unwrap(),
+            "--mark1",
+            mark.to_str().unwrap(),
+            "--mark2",
+            mark.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0)
+        .stderr(contains("written: 2"));
+
+    // Both output JPEGs must exist and be non-empty.
+    let j1 = out.join("photo.jpg");
+    let j2 = out.join("image.jpg");
+    assert!(j1.exists(), "output JPEG for source JPEG must exist");
+    assert!(j2.exists(), "output JPEG for source PNG must exist");
+    assert!(std::fs::metadata(&j1).unwrap().len() > 0);
+    assert!(std::fs::metadata(&j2).unwrap().len() > 0);
+}
+
+/// D2 — mark-fit contract: oversized mark + tiny image → exit 2, mark-doesnt-fit: 1, no output.
+#[test]
+fn watermark_mark_doesnt_fit_exits_2_no_output_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("source");
+    let out = tmp.path().join("out");
+    // Very wide mark (500×20) that won't fit at height-14% of a 100×80 image.
+    // mark_h = round(80 * 0.14) = 11; scale = 11/20 = 0.55; mark_w = round(500*0.55) = 275
+    // image width = 100; 275 >> 100 → MarkDoesNotFit
+    let mark_wide = tmp.path().join("wide.png");
+    std::fs::create_dir_all(&src).unwrap();
+    write_synthetic_jpeg(&src.join("photo.jpg"), 100, 80);
+    write_synthetic_png(&mark_wide, 500, 20);
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "watermark",
+            "--source",
+            src.to_str().unwrap(),
+            "--mark1",
+            mark_wide.to_str().unwrap(),
+            "--mark2",
+            mark_wide.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .code(2)
+        .stderr(contains("mark-doesnt-fit: 1"))
+        .stderr(contains("written: 0"));
+
+    // No output JPEG should have been written.
+    let out_jpg = out.join("photo.jpg");
+    assert!(
+        !out_jpg.exists(),
+        "no output JPEG should be written when mark doesn't fit"
+    );
+}
+
+/// D2 — strict mode: mark-doesnt-fit → exit 1.
+#[test]
+fn watermark_mark_doesnt_fit_strict_exits_1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("source");
+    let out = tmp.path().join("out");
+    let mark_wide = tmp.path().join("wide.png");
+    std::fs::create_dir_all(&src).unwrap();
+    write_synthetic_jpeg(&src.join("photo.jpg"), 100, 80);
+    write_synthetic_png(&mark_wide, 500, 20);
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "watermark",
+            "--source",
+            src.to_str().unwrap(),
+            "--mark1",
+            mark_wide.to_str().unwrap(),
+            "--mark2",
+            mark_wide.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+            "--strict",
+        ])
+        .assert()
+        .code(1);
+}
+
+/// D2 — idempotency: second run skips existing outputs.
+#[test]
+fn watermark_idempotent_second_run_skips_existing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("source");
+    let out = tmp.path().join("out");
+    let mark = tmp.path().join("mark.png");
+    std::fs::create_dir_all(&src).unwrap();
+    write_synthetic_jpeg(&src.join("photo.jpg"), 400, 300);
+    write_synthetic_png(&mark, 40, 40);
+
+    let args = [
+        "watermark",
+        "--source",
+        src.to_str().unwrap(),
+        "--mark1",
+        mark.to_str().unwrap(),
+        "--mark2",
+        mark.to_str().unwrap(),
+        "--output",
+        out.to_str().unwrap(),
+    ];
+
+    // First run: written: 1
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(args)
+        .assert()
+        .code(0)
+        .stderr(contains("written: 1"));
+
+    // Second run: skipped-existing: 1
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args(args)
+        .assert()
+        .code(0)
+        .stderr(contains("skipped-existing: 1"));
+}
+
+/// D2 — non-destructive: source bytes unchanged after watermark run.
+#[test]
+fn watermark_source_files_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("source");
+    let out = tmp.path().join("out");
+    let mark = tmp.path().join("mark.png");
+    std::fs::create_dir_all(&src).unwrap();
+
+    let src_jpg = src.join("photo.jpg");
+    write_synthetic_jpeg(&src_jpg, 400, 300);
+    write_synthetic_png(&mark, 40, 40);
+
+    let before_bytes = std::fs::read(&src_jpg).unwrap();
+    let before_mtime = std::fs::metadata(&src_jpg).unwrap().modified().unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "watermark",
+            "--source",
+            src.to_str().unwrap(),
+            "--mark1",
+            mark.to_str().unwrap(),
+            "--mark2",
+            mark.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
+
+    let after_bytes = std::fs::read(&src_jpg).unwrap();
+    let after_mtime = std::fs::metadata(&src_jpg).unwrap().modified().unwrap();
+    assert_eq!(before_bytes, after_bytes, "source bytes must be unchanged");
+    assert_eq!(before_mtime, after_mtime, "source mtime must be unchanged");
+}
+
+/// D2 — non-PNG mark → fatal error, no output files.
+#[test]
+fn watermark_non_png_mark_is_fatal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("source");
+    let out = tmp.path().join("out");
+    let jpeg_mark = tmp.path().join("mark.jpg"); // not PNG
+    std::fs::create_dir_all(&src).unwrap();
+    write_synthetic_jpeg(&src.join("photo.jpg"), 400, 300);
+    write_synthetic_jpeg(&jpeg_mark, 40, 40);
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "watermark",
+            "--source",
+            src.to_str().unwrap(),
+            "--mark1",
+            jpeg_mark.to_str().unwrap(),
+            "--mark2",
+            jpeg_mark.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+
+    // Output directory may not even have been created or should be empty.
+    if out.exists() {
+        let entries: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "no output files should be written when mark is non-PNG"
+        );
+    }
+}
+
+/// D2 — output nested in source → rejected up-front.
+#[test]
+fn watermark_output_nested_in_source_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("source");
+    let out = src.join("output"); // nested inside source
+    let mark = tmp.path().join("mark.png");
+    std::fs::create_dir_all(&src).unwrap();
+    write_synthetic_jpeg(&src.join("photo.jpg"), 400, 300);
+    write_synthetic_png(&mark, 40, 40);
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "watermark",
+            "--source",
+            src.to_str().unwrap(),
+            "--mark1",
+            mark.to_str().unwrap(),
+            "--mark2",
+            mark.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+}

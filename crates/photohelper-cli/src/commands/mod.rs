@@ -7,3 +7,4 @@ pub mod export;
 pub mod ingest;
 pub mod run;
 pub mod util;
+pub mod watermark;
