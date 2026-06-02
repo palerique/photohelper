@@ -342,3 +342,23 @@ Lightroom native sorting by "Label Text" works lexicographically rather than num
 - **Binding trigger**: First CI fixture commit for a non-CR3 RAW format (e.g. NEF or ARW under `tests/fixtures/`), or first user report of colour corruption on a gated format, or before v0.2 if any gated format is promoted to non-gated.
 - **Scope estimate**: ~50 LoC per format (fixture + integration test + decode verification) / low risk.
 - **Consequence of inaction**: Users of gated RAW formats receive unverified JPEG output; colour corruption is silent.
+
+### DN-041 — ORT runtime architecture on release targets (2026-06-02, session 15)
+
+- **Observed**: Session 15 release CI debugging revealed that `ort` crate v2.0.0-rc.12 with `download-binaries` feature uses fundamentally different ORT backends per platform:
+  - **macOS arm64**: ORT inference runs through Apple CoreML.framework (always present as a system framework on macOS 13+). Binary has NO external ORT dependency; `otool -L` shows `CoreML.framework` but no `libonnxruntime.dylib`. The binary is completely self-contained.
+  - **Linux x86_64**: ORT is statically linked via `libonnxruntime.a` downloaded to `~/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/<sha>/libonnxruntime.a`. Binary is self-contained; `ldd` shows only standard system libraries.
+  - **Windows**: No `x86_64-pc-windows-gnu` prebuilt on pyke CDN (TD-029). Only `x86_64-pc-windows-msvc` exists; requires separate handling.
+- **Why it matters**: Release archives only need to include the binary + ONNX model files. No ORT shared library bundling is required for macOS or Linux.
+- **Owner**: Resolved for v0.1 release. Relevant if ort crate is upgraded to stable 2.0.0 (TD-014).
+- **Status**: Resolved — v0.1.0 draft release ships 2 archives (macOS arm64, Linux x86_64) at ~80MB each.
+
+### DN-042 — Lightroom virtual copies + XMP crops gap (2026-06-02, session 15)
+
+- **Observed**: User added `_MG_9703-1.cr3` through `_MG_9703-8.cr3` — 8 byte-identical copies of `_MG_9703.CR3` (same content, same mtime = same PhotoId) with DIFFERENT Lightroom crop settings in each XMP sidecar (`crs:HasCrop=True`, `crs:CropTop/Left/Bottom/Right`). The catalog deduplicates all 9 to ONE entry. Export doesn't apply XMP crop settings. All 8 crop variants are invisible to the pipeline.
+- **Why it matters**: Lightroom "virtual copy" workflow (one RAW, multiple crops/aspect ratios via XMP) is a common pattern for producing crops for different social media formats. photohelper silently ignores this workflow.
+- **Owner**: Session 16 (virtual copy + XMP crop support).
+- **Binding trigger**: First user request for multiple-crop-per-RAW export OR session 16 planning.
+- **Scope estimate**: ~200 LoC (sidecar crop reader + pixel crop application + catalog virtual-copy support).
+- **Consequence of inaction**: Users who create Lightroom virtual copies get only 1 export per RAW regardless of how many XMP crops they define.
+- **Crop fields found in XMP**: `crs:HasCrop`, `crs:CropTop`, `crs:CropLeft`, `crs:CropBottom`, `crs:CropRight`, `crs:CropAngle`.

@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# scripts/photohelper-produce.sh
+#
+# All-in-one production script: ingest → cull → cluster → develop → export → watermark.
+# Output is a single folder of final watermarked JPEGs, resized and AI-selected.
+#
+# Usage:
+#   ./scripts/photohelper-produce.sh \
+#       --source   <dir>       Source directory (CR3 RAW and/or JPEG/PNG)
+#       --mark1    <png>       Top-right corner mark (PNG)
+#       --mark2    <png>       Bottom-left corner mark (PNG)
+#       --max-long-edge <N>    Long-edge limit in pixels (≥16)
+#       [--output  <dir>]      Output directory (default: ~/Pictures/produce-<timestamp>)
+#       [--min-rating <0-5>]   Minimum AI star rating to export (default: 3)
+#       [--quality <1-100>]    JPEG quality for exports (default: 90)
+#       [--force]              Overwrite existing output files
+#
+# For RAW (CR3) sources the full pipeline runs:
+#   Ingest → Cull (AI) → Cluster (dedup) → Develop (XMP) → Export → Watermark
+#
+# For raster-only sources (JPEG/PNG only) the catalog steps are skipped:
+#   Watermark directly at the requested long-edge
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+export PHOTOHELPER_MODEL_DIR="$ROOT_DIR/crates/photohelper-ai/models"
+BINARY="$ROOT_DIR/target/release/photohelper"
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+SOURCE_DIR=""
+MARK1=""
+MARK2=""
+MAX_LONG_EDGE=""
+OUTPUT_DIR="$HOME/Pictures/produce-${TIMESTAMP}"
+MIN_RATING=3
+QUALITY=90
+FORCE=""
+
+# ── parse args ────────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --source)        SOURCE_DIR="${2%/}"; shift 2;;
+        --mark1)         MARK1="$2";          shift 2;;
+        --mark2)         MARK2="$2";          shift 2;;
+        --max-long-edge) MAX_LONG_EDGE="$2";  shift 2;;
+        --output)        OUTPUT_DIR="${2%/}";  shift 2;;
+        --min-rating)    MIN_RATING="$2";     shift 2;;
+        --quality)       QUALITY="$2";        shift 2;;
+        --force)         FORCE="--force";     shift;;
+        -h|--help)
+            grep '^#' "$0" | sed 's/^# \?//'
+            exit 0;;
+        *) echo "Unknown argument: $1" >&2; exit 64;;
+    esac
+done
+
+# ── validate required args ────────────────────────────────────────────────────
+MISSING=0
+for arg in SOURCE_DIR MARK1 MARK2 MAX_LONG_EDGE; do
+    [[ -n "${!arg}" ]] || { echo "Missing required: --${arg//_/-}" | tr '[:upper:]' '[:lower:]' | sed 's/_/-/g' >&2; MISSING=1; }
+done
+[[ $MISSING -eq 0 ]] || { echo "Run with --help for usage." >&2; exit 64; }
+
+[[ -d "$SOURCE_DIR" ]] || { echo "Source directory not found: $SOURCE_DIR" >&2; exit 1; }
+[[ -f "$MARK1" ]]      || { echo "Mark1 not found: $MARK1" >&2; exit 1; }
+[[ -f "$MARK2" ]]      || { echo "Mark2 not found: $MARK2" >&2; exit 1; }
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+ts()      { date +%s; }
+elapsed() { echo $(( $(ts) - $1 )); }
+hms()     { local s=$1; printf "%02d:%02d:%02d" $(( s/3600 )) $(( (s%3600)/60 )) $(( s%60 )); }
+bold()    { printf '\033[1m%s\033[0m\n' "$*"; }
+ok()      { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+step()    { echo; printf '\033[1;36m>>> %s\033[0m\n' "$*"; }
+sep()     { echo; printf '%0.s─' {1..72}; echo; }
+info()    { printf '  %-28s %s\n' "$1" "$2"; }
+
+# ── detect source type ────────────────────────────────────────────────────────
+CR3_COUNT=$(find "$SOURCE_DIR" -maxdepth 1 -name "*.CR3" | wc -l | tr -d ' ')
+RAW_PIPELINE=0
+[[ "$CR3_COUNT" -gt 0 ]] && RAW_PIPELINE=1
+
+# ── banner ────────────────────────────────────────────────────────────────────
+sep
+bold "Photohelper Produce — $TIMESTAMP"
+sep
+info "Source:"         "$SOURCE_DIR"
+info "Mark1 (top-right):" "$(basename "$MARK1")"
+info "Mark2 (bot-left):"  "$(basename "$MARK2")"
+info "Max long-edge:"  "${MAX_LONG_EDGE}px"
+info "Quality:"        "$QUALITY / 100"
+info "Output:"         "$OUTPUT_DIR"
+RASTER_BANNER_COUNT=$(find "$SOURCE_DIR" -maxdepth 1 \
+    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | wc -l | tr -d ' ')
+if [[ $RAW_PIPELINE -eq 1 ]]; then
+    if [[ "$RASTER_BANNER_COUNT" -gt 0 ]]; then
+        info "Pipeline:"   "RAW + raster — $CR3_COUNT CR3s (catalog) + $RASTER_BANNER_COUNT JPEG/PNG (direct)"
+    else
+        info "Pipeline:"   "RAW — ingest→cull→cluster→develop→export→watermark ($CR3_COUNT CR3s)"
+    fi
+    info "Min rating:" "$MIN_RATING / 5 (AI curation threshold)"
+else
+    info "Pipeline:"   "raster-only — watermark directly (no catalog)"
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+# ── build ─────────────────────────────────────────────────────────────────────
+step "Build (release)"
+T0=$(ts)
+cargo build --release -p photohelper-cli -q
+ok "Done in $(hms $(elapsed $T0))"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RAW PIPELINE
+# ═══════════════════════════════════════════════════════════════════════════════
+if [[ $RAW_PIPELINE -eq 1 ]]; then
+
+    CATALOG_DB="$SOURCE_DIR/.photohelper/catalog.db"
+    EXPORT_DIR="$OUTPUT_DIR/export"
+    WATERMARK_DIR="$OUTPUT_DIR/watermarked"
+    mkdir -p "$EXPORT_DIR" "$WATERMARK_DIR"
+
+    # ── ingest ────────────────────────────────────────────────────────────────
+    step "Ingest ($CR3_COUNT CR3 files → catalog)"
+    T=$(ts)
+    "$ROOT_DIR/scripts/photohelper-ingest.sh" "$SOURCE_DIR"
+    ok "Done in $(hms $(elapsed $T))"
+
+    # ── cull ──────────────────────────────────────────────────────────────────
+    step "Cull (NIMA aesthetic scoring)"
+    T=$(ts)
+    "$ROOT_DIR/scripts/photohelper-cull.sh" --catalog "$CATALOG_DB"
+    ok "Done in $(hms $(elapsed $T))"
+
+    # ── cluster ───────────────────────────────────────────────────────────────
+    step "Cluster (CLIP dedup — cosine-similarity)"
+    T=$(ts)
+    "$ROOT_DIR/scripts/photohelper-dedup.sh" --catalog "$CATALOG_DB"
+    ok "Done in $(hms $(elapsed $T))"
+
+    # ── develop ───────────────────────────────────────────────────────────────
+    step "Develop (write Lightroom XMP sidecars)"
+    T=$(ts)
+    "$ROOT_DIR/scripts/photohelper-develop.sh" \
+        --catalog "$CATALOG_DB" --lr-rating --lr-keywords --force
+    ok "Done in $(hms $(elapsed $T))"
+
+    # ── export ────────────────────────────────────────────────────────────────
+    step "Export → JPEG (q=$QUALITY, ${MAX_LONG_EDGE}px, min-rating≥$MIN_RATING)"
+    T=$(ts)
+    "$BINARY" export \
+        --catalog    "$CATALOG_DB" \
+        --output     "$EXPORT_DIR" \
+        --quality    "$QUALITY" \
+        --long-edge  "$MAX_LONG_EDGE" \
+        --min-rating "$MIN_RATING" \
+        ${FORCE}
+    EXPORTED=$(find "$EXPORT_DIR" -name "*.jpg" | wc -l | tr -d ' ')
+    ok "Done in $(hms $(elapsed $T)) — $EXPORTED JPEG(s) exported"
+
+    # ── watermark (on the exported JPEGs) ─────────────────────────────────────
+    step "Watermark ($EXPORTED JPEGs — shadow + marks at ${MAX_LONG_EDGE}px)"
+    T=$(ts)
+    "$BINARY" watermark \
+        --source "$EXPORT_DIR" \
+        --mark1  "$MARK1" \
+        --mark2  "$MARK2" \
+        --output "$WATERMARK_DIR" \
+        --max-long-edge "$MAX_LONG_EDGE" \
+        ${FORCE}
+    WATERMARKED=$(find "$WATERMARK_DIR" -name "*.jpg" | wc -l | tr -d ' ')
+    WM_SIZE=$(du -sh "$WATERMARK_DIR" 2>/dev/null | awk '{print $1}')
+    ok "Done in $(hms $(elapsed $T)) — $WATERMARKED JPEG(s) watermarked ($WM_SIZE)"
+
+    # ── watermark raster files from source (JPEG/PNG alongside the CR3s) ─────────
+    RASTER_SOURCE_COUNT=$(find "$SOURCE_DIR" -maxdepth 1 \
+        \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | wc -l | tr -d ' ')
+    if [[ "$RASTER_SOURCE_COUNT" -gt 0 ]]; then
+        # Isolate raster files in a temp dir so watermark doesn't re-process CR3s.
+        RASTER_TEMP="$OUTPUT_DIR/.raster-sources"
+        mkdir -p "$RASTER_TEMP"
+        find "$SOURCE_DIR" -maxdepth 1 \
+            \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | while IFS= read -r f; do
+            ln -f "$f" "$RASTER_TEMP/$(basename "$f")" 2>/dev/null \
+                || cp "$f" "$RASTER_TEMP/$(basename "$f")"
+        done
+        step "Watermark raster sources ($RASTER_SOURCE_COUNT JPEG/PNG from source — ${MAX_LONG_EDGE}px)"
+        T=$(ts)
+        "$BINARY" watermark \
+            --source "$RASTER_TEMP" \
+            --mark1  "$MARK1" \
+            --mark2  "$MARK2" \
+            --output "$WATERMARK_DIR" \
+            --max-long-edge "$MAX_LONG_EDGE" \
+            ${FORCE}
+        rm -rf "$RASTER_TEMP"
+        WATERMARKED=$(find "$WATERMARK_DIR" -name "*.jpg" | wc -l | tr -d ' ')
+        WM_SIZE=$(du -sh "$WATERMARK_DIR" 2>/dev/null | awk '{print $1}')
+        ok "Done in $(hms $(elapsed $T)) — $WATERMARKED total JPEG(s) in output ($WM_SIZE)"
+    fi
+
+    FINAL_DIR="$WATERMARK_DIR"
+    FINAL_COUNT=$(find "$WATERMARK_DIR" -name "*.jpg" | wc -l | tr -d ' ')
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RASTER-ONLY PIPELINE
+# ═══════════════════════════════════════════════════════════════════════════════
+else
+
+    WATERMARK_DIR="$OUTPUT_DIR/watermarked"
+    mkdir -p "$WATERMARK_DIR"
+
+    RASTER_COUNT=$(find "$SOURCE_DIR" -maxdepth 2 \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | wc -l | tr -d ' ')
+    step "Watermark ($RASTER_COUNT raster files — shadow + marks at ${MAX_LONG_EDGE}px)"
+    T=$(ts)
+    "$BINARY" watermark \
+        --source "$SOURCE_DIR" \
+        --mark1  "$MARK1" \
+        --mark2  "$MARK2" \
+        --output "$WATERMARK_DIR" \
+        --max-long-edge "$MAX_LONG_EDGE" \
+        ${FORCE}
+    WATERMARKED=$(find "$WATERMARK_DIR" -name "*.jpg" | wc -l | tr -d ' ')
+    WM_SIZE=$(du -sh "$WATERMARK_DIR" 2>/dev/null | awk '{print $1}')
+    ok "Done in $(hms $(elapsed $T)) — $WATERMARKED JPEG(s) watermarked ($WM_SIZE)"
+
+    FINAL_DIR="$WATERMARK_DIR"
+    FINAL_COUNT="$WATERMARKED"
+
+fi
+
+# ── summary ───────────────────────────────────────────────────────────────────
+sep
+bold "=== Done ==="
+echo ""
+info "Final output:" "$FINAL_DIR"
+info "Files:"        "$FINAL_COUNT watermarked JPEG(s)"
+echo ""
+echo "  open '$FINAL_DIR'"
+sep

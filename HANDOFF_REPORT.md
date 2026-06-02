@@ -1411,3 +1411,52 @@ just session-start
 ```
 
 Then read `SESSION-STATE.md` (top), this checkpoint, and `docs/plans/session-15.md` (v4, the final plan). Begin with **D0** (the untracked scratch files are still present — `rg`-confirm they're unreferenced, then `rm`), then **D1.0** (extraction + export re-point + green CI), then D1 → D2 → D3 → D4.
+
+---
+
+## Checkpoint — session 15 PAUSED for context refresh (2026-06-02, post-ship discoveries)
+
+**Status**: PAUSED. Branch: `session-15/watermark-and-rename`. `just ci` GREEN. All implementation work complete; all implementation reviews (R1 + R2) clean. Release CI for v0.1.0 green (2 archives: macOS arm64 + Linux x86_64). **Next action: run `/session-end` to ship the PR to main.**
+
+### What is done (complete list)
+
+**Core session-15 deliverables (from previous checkpoint):**
+- D0–D4 all shipped and committed
+- Implementation review R1 (11 HIGH/MEDIUM themes) and R2 (7 HIGH/MEDIUM themes) — all closed
+- `just ci` GREEN throughout
+
+**Post-ship discoveries resolved in this window:**
+
+| Fix | Commit | Detail |
+|---|---|---|
+| Mark quality — Lanczos3 | `fix(export): Lanczos3 for badge...` | Replaced tiny-skia Pattern (interpolation) with `image::imageops::Lanczos3` for badge downscaling. Root cause: Marca-1.png is 1100×1540px and Marca-2.png is 8120×1920px — at 1080px output these scale 15-20× and bicubic aliased badly. Lanczos3 is anti-aliased area-averaging. |
+| Mark margins — equal sides | (earlier R2 fix) | `MarkPlacement::fit` now takes `margin_x_frac` + `margin_y_frac` separately; `fit_equal_margin` added for uniform pixel margin from short edge. Fixes: mark1 had 88px from right but 50px from top on 1920×1080. |
+| Readability warning | (same R2 fix) | `MARK_MIN_READABLE_PX = 80`; warns on stderr when mark_h < 80px. |
+| `photohelper-produce.sh` raster fix | `scripts/photohelper-produce.sh` | When source has BOTH CR3 and JPEG/PNG files, script now watermarks raster files directly (in a temp dir) alongside the catalog-exported RAWs. Addresses the case where user adds JPEG/PNG crops alongside CR3 originals. |
+| Release CI v0.1.0 | `.github/workflows/release.yml` | After extensive debugging: ORT uses Apple CoreML on macOS arm64 (no bundling needed) and links statically on Linux (libonnxruntime.a). Archives: binary + models only. 79-81MB each. Windows deferred (TD-029). |
+| Mark quality test | `just ci GREEN` | Additional tests: Lanczos3 quality is verified by visual output (not unit-testable without golden images). |
+
+**Key architectural findings:**
+
+1. **ORT on macOS arm64 = Apple CoreML** — ort-sys 2.0.0-rc.12 uses CoreML.framework (system) as the inference backend on Apple Silicon. No `libonnxruntime.dylib` to bundle. Binary is self-contained.
+
+2. **ORT on Linux = static link** — ORT 1.24.2 for Linux is a static archive at `~/.cache/ort.pyke.io/.../libonnxruntime.a`. Binary is self-contained.
+
+3. **Virtual copy gap discovered** — User added `_MG_9703-1.cr3` through `_MG_9703-8.cr3` as identical-bytes copies (same mtime!) of `_MG_9703.CR3` with different Lightroom crops in XMP (`crs:CropTop/Left/Bottom/Right`). The catalog deduplicates them all to ONE PhotoId (same hash). Export doesn't apply XMP crops. This is a scope for **session 16** (virtual copy + XMP crop support). See next steps.
+
+### XMP crop data discovered (session-16 scope)
+
+`_MG_9703-1.xmp` through `-8.xmp` each contain different `crs:CropTop/Left/Bottom/Right` values defining 8 different aspect ratio crops of the same RAW. Currently only 1 of the 9 is in the catalog (all share same PhotoId). Session 16 would need:
+1. Sidecar: read crop rect from `crs:HasCrop=True` + Top/Left/Bottom/Right
+2. Export: apply crop to decoded pixel buffer before resize
+3. Catalog: support virtual copies (same-content files with different paths → separate entries)
+
+### Restart prompt (fresh context)
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-15/watermark-and-rename
+just session-start
+```
+
+Then read `SESSION-STATE.md` and this checkpoint. **Next action**: run `/session-end` to fire the final review gate and open the PR to main.
