@@ -1,4 +1,4 @@
-# Session 16 — `windows-release` — plan v2
+# Session 16 — `windows-release` — plan v3
 
 > **Branch**: `session-16/windows-release`
 > **Goal**: Produce a self-contained `x86_64-pc-windows-msvc` binary release archive
@@ -273,7 +273,8 @@ build-windows-x86_64:
         $version = $env:GITHUB_REF_NAME -replace '^v', ''
         (Get-Content Cargo.toml) -replace '^version = "0.0.0"', "version = `"$version`"" |
           Set-Content Cargo.toml
-        "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+        # Add-Content writes UTF-8 NoBOM (correct for GITHUB_ENV) on PowerShell 7.
+        Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_VERSION=$version"
 
     - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
       with:
@@ -288,6 +289,10 @@ build-windows-x86_64:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
+        if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            throw "VCPKG_INSTALLATION_ROOT is not set. Expected on GHA windows-latest runners. " +
+                  "If the runner image changed, file a runner-images issue."
+        }
         # x64-windows-static-md: static lib + DLL-linked CRT (UCRT ships with Win10+).
         # Matches the Rust vcpkg crate's default triplet for x86_64-pc-windows-msvc.
         vcpkg install libraw:x64-windows-static-md
@@ -339,7 +344,11 @@ build-windows-x86_64:
       run: |
         $ErrorActionPreference = 'Stop'
         Add-Type -Assembly System.IO.Compression.FileSystem
-        $zipPath = (Resolve-Path "photohelper-*.zip").Path
+        # Reconstruct deterministic path (Resolve-Path wildcard is ambiguous across steps).
+        $VERSION = $env:RELEASE_VERSION
+        $TARGET = "${{ env.TARGET }}"
+        $zipPath = "photohelper-${VERSION}-${TARGET}.zip"
+        if (-not (Test-Path $zipPath)) { throw "Expected archive not found: $zipPath" }
         $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
         $entries = $zip.Entries | Select-Object -ExpandProperty FullName
         $zip.Dispose()
