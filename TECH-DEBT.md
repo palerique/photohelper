@@ -466,21 +466,13 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ### TD-029 — Windows x86_64 binary distribution deferred to v0.2 (2026-06-02, session 15)
 
-- **Status**: Open
-- **Opened**: 2026-06-02 (session 15, release-CI implementation)
-- **Investigation findings** (session 15): ort-sys 2.0.0-rc.12's pyke CDN has no
-  `x86_64-pc-windows-gnu` prebuilt (only `x86_64-pc-windows-msvc`). The MSVC prebuilt
-  is a `.dll` (dynamic), requiring bundling. The raw lzma2 archive format used by pyke
-  CDN can't be decompressed by MSYS2's standard tools without Python scripting.
-  Switching to `x86_64-pc-windows-msvc` target requires cmake-based LibRaw compilation
-  (the existing `build.rs` uses sh+autoconf which isn't available in MSVC builds).
-  `build.rs` was updated to use `sh ./configure` (not `./configure`) for compatibility.
-- **Fundamental fix**: Either (A) switch to `x86_64-pc-windows-msvc` + cmake for
-  LibRaw + Python to decompress ORT archive, OR (B) build a static ORT for
-  `windows-gnu` from source. Option A is lower risk.
-- **Binding trigger**: First Windows user request OR v0.2 milestone.
-- **Scope estimate**: ~150 LoC (build.rs cmake path + GHA job + Python ORT download).
-- **Consequence of inaction**: Windows users must use WSL2 + Linux build.
+- **Status**: **CLOSED** — 2026-06-02 (session 16, PR #17).
+- **Closure note**: Implemented via `x86_64-pc-windows-msvc` + vcpkg LibRaw
+  (`x64-windows-static-md`) + static ORT. Python was NOT needed — ort-sys uses
+  the `lzma-rust2` pure-Rust crate for archive extraction. ORT is statically linked
+  (ANL-004 confirmed: `ort-sys/build/main.rs:160` emits `static=onnxruntime`);
+  no `onnxruntime.dll` bundling required. Archive: `photohelper.exe + models/` only.
+  Residual items filed as TD-042 (vcpkg stop-gap) and TD-043 (long-path).
 
 ---
 
@@ -507,6 +499,45 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Binding trigger**: Next session that adds a new `BadgeSizeBasis` variant or modifies `MarkSpec` construction.
 - **Scope estimate**: ~60 LoC / low risk.
 - **Consequence of inaction**: Future callers who set `margin_y` on a `Height`-based `MarkSpec` observe no visual change — a silent logic error.
+
+---
+
+### TD-042 — vcpkg stop-gap for LibRaw on Windows MSVC (2026-06-02, session 16)
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 16, D1 vcpkg path)
+- **Stop-gap location**: `crates/photohelper-raw/build.rs::run_windows_msvc`
+  (added in session-16 commit `d80f9abf`). In-source label: `// TD-042 (stop-gap)`.
+- **Fundamental fix**: Remove the vcpkg dependency. Enumerate LibRaw 0.22.1 source
+  files in `build.rs` (`lib/libraw_c_api.cpp`, `lib/libraw_cxx.cpp`,
+  `lib/libraw_datastream.cpp`) and compile them via `cc::Build` directly with
+  Windows-specific defines (`LIBRAW_NODLL`, `WIN32`, `/EHsc`). This eliminates
+  the `VCPKG_ROOT` requirement for local Windows development.
+- **Binding trigger**: First contributor issue reporting "vcpkg not found" OR first
+  session that modifies `run_windows_msvc` for any other reason.
+- **Scope estimate**: ~80 LoC (source file enumeration + Windows defines + test) /
+  medium risk (needs verification on Windows hardware or CI runner).
+- **Consequence of inaction**: Windows developers must install vcpkg and set
+  `VCPKG_ROOT` to build from source — a non-standard Rust build requirement.
+
+---
+
+### TD-043 — Windows long-path (`\\?\` prefix) for LibRaw path calls (2026-06-02, session 16)
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 16, from DN-013 audit item (c))
+- **Stop-gap location**: `crates/photohelper-raw/src/ffi.rs` — all path-passing
+  functions use `CString::new(path.to_str()?)` which silently fails for Windows
+  paths > 260 chars without the `\\?\` prefix.
+  Stop-gap commit: session-16 ships Windows binary without this fix.
+- **Fundamental fix**: Add a `windows_long_path(p: &Path) -> Result<CString, ...>`
+  helper that prepends `\\?\` for paths > 260 chars on Windows targets. Apply to
+  all `CString` conversions in `ffi.rs` that accept user-supplied paths.
+- **Binding trigger**: First user report of a path-length error on Windows OR
+  by 2026-09-01, whichever comes first.
+- **Scope estimate**: ~30 LoC (helper + conditional application) / low risk.
+- **Consequence of inaction**: Users with photos in deep directory trees (> 260
+  chars total path) cannot ingest/process files on Windows; error is non-obvious.
 
 ## Closed
 
