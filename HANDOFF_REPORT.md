@@ -1505,3 +1505,51 @@ just session-start
 ```
 
 Then read `SESSION-STATE.md` and this checkpoint. **Next action: run `/session-end`** to fire the final review gate and open the PR to main.
+
+---
+
+## Checkpoint — session 15 SHIPPED (2026-06-02, final)
+
+**Status**: SHIPPED. Session-end reviews R3 (13 themes) and R4 (8 themes) both CLEAN. `just ci` GREEN. PR pushed to main.
+
+### Session-end review summary
+
+**Round 3** (post-R2 code changes — blit_badge_at, produce.sh, JXL warning, single-pass perf):
+- 1 CRITICAL + 5 HIGH + 3 MEDIUM + 4 LOW (13 themes)
+- Key findings: Lanczos3 on straight-alpha (dark halo risk), no test for single-pass export, produce.sh raster-only pipeline aborting on exit 2, RAW pipeline swallowing fatal exit codes, readability warning referencing wrong flag name.
+- All remediated; tests grew 330 → 342 (+12).
+
+**Round 4** (verify R3 remediation):
+- 0 CRITICAL + 3 HIGH + 2 MEDIUM + 4 LOW (8 themes)
+- Key findings: export call in produce.sh still lacked WM_EXIT guard, header line 19 still said "Export → Watermark" separately, render_to_jpeg test didn't verify mark compositing.
+- All remediated; 342 tests passing.
+
+### Final feature list (session 15 scope — complete)
+
+| Feature | Status |
+|---|---|
+| `watermark` subcommand (shadow + dual corner marks + fit_equal_margin) | ✓ |
+| `rename` subcommand (Cluster-X_Cull-Y-filename) | ✓ |
+| Single-pass export+watermark (--mark1-png/--mark2-png/--with-shadow) | ✓ |
+| Lanczos3 premultiplied badge scaling | ✓ |
+| JXL/HEIC unsupported-format warning | ✓ |
+| produce.sh all-in-one pipeline + partial-failure tolerance | ✓ |
+| Release CI (macOS arm64 + Linux x86_64) | ✓ |
+
+### Open debt (filed; not in scope)
+
+- **TD-022**: Event-based pass-through XMP writer (session-14 deferral)
+- **TD-029**: Windows x86_64 binary distribution
+- **TD-041**: MarkSpec.margin_y structural fix (move into BadgeSizeBasis variants)
+- **Session-14 sidecar R3 findings**: 2 CRITICAL + 9 HIGH open in photohelper-sidecar (no R4 CLEAN artifact)
+- **DN-042**: Virtual copy + XMP crop support (session-16 scope)
+
+### Next session
+
+Session 16: virtual copy + XMP crop support. When same-content files (`_MG_9703-1.cr3` through `-8.cr3`) share a PhotoId, the catalog deduplicates to one entry but each has different `crs:CropTop/Left/Bottom/Right` values in their XMP. Session 16 would: (1) read crop rect from `crs:HasCrop=True`, (2) apply crop in export pipeline, (3) support virtual copies (same-content files → separate catalog entries by path).
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-16/<kebab-slug>
+just session-start
+```
