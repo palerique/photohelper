@@ -9,7 +9,7 @@
 
 **Last session**: 14 (`xmp-library-upgrade` — 2026-05-31) — **SHIPPED** via PR #15. TD-022: event-based pass-through XMP writer preserving third-party fields. (Session 13 `auto-tone-and-sortable-labels` shipped via PR #14.) **NOTE**: the session-14 session-end review left Round-3 findings open (2 CRITICAL + 9 HIGH in `photohelper-sidecar`) with no Round-4 CLEAN artifact, yet the PR merged — see `docs/plans/session-15.md § Unresolved prior-session item`.
 
-**Current session**: 15 (`watermark-and-rename` — 2026-06-01) — branch `session-15/watermark-and-rename`. **PAUSED for context refresh (2026-06-02).** Implementation COMPLETE (D0–D4, impl-review R1+R2 CLEAN, release CI v0.1.0 GREEN). **Post-ship discoveries addressed**: mark quality fix (Lanczos3), equal-margin fix, readability warning, `photohelper-produce.sh` raster+RAW mix fix. **Next action**: /session-end + PR to main.
+**Current session**: 15 (`watermark-and-rename` — 2026-06-01) — branch `session-15/watermark-and-rename`. **PAUSED for context refresh (2026-06-02, second pause).** All implementation + post-ship work committed. **Next action**: /session-end + PR to main.
 
 **Plan-review history (session 15 — COMPLETE)**:
 - R1 → 7 CRITICAL + 10 HIGH + 3 MEDIUM + 2 LOW (19 themes) → plan v2.
@@ -18,7 +18,7 @@
 
 **Goal**: Two non-destructive, source-read-only batch features. (1) `watermark` subcommand: standardize a mixed raster+RAW directory to `--max-long-edge` (aspect-locked), apply a full-width bottom black shadow gradient (100%→0% over bottom 30% height), then composite dual corner image marks (`--mark1` top-right @14% height, `--mark2` bottom-left @13% height, 4.6% margins), exporting high-quality JPEGs. (2) `rename` subcommand: copy RAW + matching `.xmp` sidecars into `--output` as `Cluster-{X}_Cull-{Y}-OriginalFilename.ext` (X = zero-padded cluster id, Y = zero-padded NIMA score). See `docs/plans/session-15.md`.
 
-**Action**: **PAUSED for context refresh.** On fresh context: run `/session-end` to ship the PR to main. All implementation reviews are done (impl-review R1 + R2 CLEAN). Post-ship work (Lanczos3 quality, equal margins, produce-script raster fix, release CI) is committed. Next session can optionally add XMP virtual-copy / crop support (session 16 scope).
+**Action**: **PAUSED for context refresh (second window).** On fresh context: run `/session-end` to ship the PR to main. All post-ship bugfixes are committed: Lanczos3 quality, equal margins, readability warning, produce-script raster+RAW mix, JXL unsupported-format warning, partial-failure tolerance, 54% performance optimization (single-pass export+watermark via --mark1-png/--mark2-png/--with-shadow eliminating second JPEG encode/decode cycle).
 
 **Session-end review (session 12 — COMPLETE)**:
 - R1 → 5 items remediated (O(N) badge preloading, O(N^2) collision, EX_PARTIAL_FAIL strictness, decoupling DevelopRow, watermark fail-open).

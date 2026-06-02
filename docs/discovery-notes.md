@@ -362,3 +362,17 @@ Lightroom native sorting by "Label Text" works lexicographically rather than num
 - **Scope estimate**: ~200 LoC (sidecar crop reader + pixel crop application + catalog virtual-copy support).
 - **Consequence of inaction**: Users who create Lightroom virtual copies get only 1 export per RAW regardless of how many XMP crops they define.
 - **Crop fields found in XMP**: `crs:HasCrop`, `crs:CropTop`, `crs:CropLeft`, `crs:CropBottom`, `crs:CropRight`, `crs:CropAngle`.
+
+### DN-043 — Single-pass export+watermark optimization (2026-06-02, session 15)
+
+- **Observed**: The `photohelper-produce.sh` pipeline ran export → watermark as two sequential steps. At 4000px/370 photos this took 4:16 (export) + 1:54 (watermark) = 6:10 total. The watermark step was pure overhead: decode each 4000px JPEG, apply marks, re-encode to JPEG.
+- **Why it matters**: For large batches at high output resolutions, the double encode/decode adds ~30-50% wall-clock time.
+- **Resolution**: Added `--mark1-png`/`--mark2-png`/`--with-shadow` flags to the `export` subcommand. Marks are applied inside the filmic-ISP pipeline via `ExportOptions.render_marks` + `render_shadow`, combining with `render_to_jpeg`'s existing mark/shadow compositing. Result: 6:10 → 2:50 (54% faster). Updated `produce.sh` to use single-pass.
+- **Status**: Resolved 2026-06-02 (session 15).
+
+### DN-044 — JPEG XL (.jxl) silently skipped by watermark (2026-06-02, session 15)
+
+- **Observed**: User exported Lightroom virtual copies as JPEG XL (`.jxl`). These returned `None` from `SourceKind::classify` → `skipped_unsupported` with no explanation. The `image` crate in our configuration does not support JXL decode. The `produce.sh` raster detection also only looked for `*.jpg/*.jpeg/*.png`.
+- **Why it matters**: Users see `skipped_unsupported: 8` in the summary with no indication of WHY. They assume the pipeline worked and are confused when files are missing.
+- **Resolution**: `watermark.rs` now logs `tracing::warn!` with the extension and "Convert to JPEG first" message when `SourceKind::classify` returns `None`. `produce.sh` detects JXL/HEIC/TIFF/WebP at startup and warns with filenames.
+- **Status**: Resolved 2026-06-02 (session 15). JXL decode not planned (would require `jxl-oxide` or similar crate).

@@ -1460,3 +1460,48 @@ just session-start
 ```
 
 Then read `SESSION-STATE.md` and this checkpoint. **Next action**: run `/session-end` to fire the final review gate and open the PR to main.
+
+---
+
+## Checkpoint — session 15 PAUSED for context refresh (2026-06-02, second window)
+
+**Status**: PAUSED. Branch: `session-15/watermark-and-rename`. `just ci` GREEN. All post-ship bugfixes committed. **Next action: run `/session-end` to ship the PR to main.**
+
+### What landed since previous checkpoint
+
+| Fix/Feature | Commit | Detail |
+|---|---|---|
+| JXL unsupported-format warning | `fix(watermark)` | `watermark` now logs actionable `tracing::warn!` when file extension is unsupported (e.g. `.jxl`), instructing user to export as JPEG first. |
+| `produce.sh` JXL/HEIC detection | `fix(watermark)` | Script now detects JXL/HEIC/TIFF/WebP at startup and warns with filenames before pipeline runs. |
+| `produce.sh` partial-failure tolerance | `fix(produce)` | Raster watermark step no longer kills the script on exit code 2 (mark-doesnt-fit). Shows warning and continues. Fixed by capturing `WM_EXIT` and checking for EX_PARTIAL_FAIL. |
+| 54% performance optimization | `perf(export)` | Added `--mark1-png`/`--mark2-png`/`--with-shadow` to the `export` subcommand. Marks are now composited INSIDE the filmic-ISP encode step — eliminating the separate `watermark` pass (no second JPEG decode/encode cycle). `produce.sh` updated to use single-pass. Benchmark: 6:10 → 2:50 for 370 photos at 4000px. |
+
+### Architecture added: single-pass export+watermark
+
+`ExportOptions` gained two new fields:
+- `render_marks: Vec<MarkSpec>` — height-based corner marks applied via `render_to_jpeg` after filmic ISP
+- `render_shadow: Option<ShadowSpec>` — shadow gradient alongside the marks
+
+`export_photo` combines legacy badge marks (LongEdge-based) with new height-based marks in `RenderOptions` before the final `render_to_jpeg` call. This means the filmic tone-mapped pixel data gets marks applied WITHOUT a second JPEG encode/decode cycle.
+
+### Bug found: mark-doesnt-fit on narrow portrait images
+
+`_MG_9703-6.jpg` (3000×5333px) at 4000px output scales to 2300×4000. Marca-2 (8120×1920 = 4.23:1 wide) sized at 13% height = 520px tall → 2244px wide. With 184px margin: 2244+184 = 2428 > 2300 → MarkDoesNotFit. This is correct behavior (can't fit). Script now shows warning and continues.
+
+### Bug found: JXL files silently skipped
+
+User exported `_MG_9703-1.jxl` through `-8.jxl`. JXL (JPEG XL) is not supported by the `image` crate in our config. Files returned `None` from `SourceKind::classify` → silently `skipped_unsupported`. Now logs a clear warning with the extension and "Convert to JPEG first" message.
+
+### Open: XMP virtual copies (session-16 scope)
+
+`_MG_9703-1.cr3` through `-8.cr3` are identical bytes (same PhotoId → catalog deduplicates to 1 entry). Each XMP has different `crs:CropTop/Left/Bottom/Right` values defining 8 different aspect ratio crops. The catalog and export pipeline don't support virtual copies. This is a session-16 feature (DN-042).
+
+### Restart prompt
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-15/watermark-and-rename
+just session-start
+```
+
+Then read `SESSION-STATE.md` and this checkpoint. **Next action: run `/session-end`** to fire the final review gate and open the PR to main.
