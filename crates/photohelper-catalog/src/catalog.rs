@@ -878,7 +878,7 @@ impl Catalog {
                  LEFT JOIN cull_scores cs ON cs.photo_id = p.id AND cs.model_slug = ?1 \
                  LEFT JOIN dup_clusters dc ON dc.photo_id = p.id AND dc.model_slug = ?2 \
                  WHERE p.superseded_at_unix_seconds IS NULL \
-                 ORDER BY p.ingested_at_unix_seconds",
+                 ORDER BY p.ingested_at_unix_seconds, p.id",
             )
             .map_err(|e| Error::CatalogOpen {
                 path: self.canonical_path.clone(),

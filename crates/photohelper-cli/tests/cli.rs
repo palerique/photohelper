@@ -2914,3 +2914,177 @@ fn watermark_output_nested_in_source_is_rejected() {
         .assert()
         .failure();
 }
+
+// =====================================================================
+// D3 — rename subcommand integration tests
+// =====================================================================
+
+/// Seed an ingested + scored + clustered CR3 into a catalog.
+/// Returns (cat_path, cr3_path) where the CR3 is `photo.CR3` inside `tmp`.
+fn seed_renamed_catalog(
+    tmp: &tempfile::TempDir,
+    score: f64,
+    cluster_id: i64,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let cat_path = tmp.path().join("catalog.db");
+    let cat_str = cat_path.to_str().unwrap();
+
+    // Step 1: proper catalog init via the real ingest subcommand.
+    let cr3 = ingest_fake_cr3(cat_str, tmp.path());
+
+    // Step 2: insert cull score + embedding + cluster via raw SQLite.
+    {
+        let conn = rusqlite::Connection::open(&cat_path).unwrap();
+        let photo_id: Vec<u8> = conn
+            .query_row("SELECT id FROM photos LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        conn.execute(
+            "INSERT INTO cull_scores (photo_id, model_slug, aesthetic_score, scored_at_unix_seconds) \
+             VALUES (?1, 'nima-aesthetic-v1', ?2, 1700000001)",
+            rusqlite::params![photo_id, score],
+        ).unwrap();
+
+        // Embeddings FK required before cluster insert.
+        let dummy: Vec<u8> = vec![0u8; 512 * 4];
+        conn.execute(
+            "INSERT INTO embeddings (photo_id, model_slug, dim, quantization, embedding, embedded_at_unix_seconds) \
+             VALUES (?1, 'clip-vit-b32-laion2b-v1', 512, 'f32-le', ?2, 1700000001)",
+            rusqlite::params![photo_id, dummy],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO dup_clusters (photo_id, model_slug, cluster_id, similarity_threshold, clustered_at_unix_seconds) \
+             VALUES (?1, 'clip-vit-b32-laion2b-v1', ?2, 0.85, 1700000001)",
+            rusqlite::params![photo_id, cluster_id],
+        ).unwrap();
+    }
+
+    (cat_path, cr3)
+}
+
+/// D3 — empty source (no matching rows) → matched: 0, exit 0.
+#[test]
+fn rename_empty_source_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+
+    // Seed a catalog pointing at tmp.path().
+    let (cat_path, _) = seed_renamed_catalog(&tmp, 7.0, 1);
+
+    // Use a different source dir so no rows match.
+    let other_src = tmp.path().join("other_source");
+    std::fs::create_dir_all(&other_src).unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "rename",
+            "--source",
+            other_src.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0)
+        .stderr(contains("matched: 0"));
+}
+
+/// D3 — happy path: ingested CR3 with score+cluster → renamed file exists, source untouched.
+#[test]
+fn rename_happy_path_copies_raw_with_correct_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    let (cat_path, cr3) = seed_renamed_catalog(&tmp, 7.85, 7);
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "rename",
+            "--source",
+            tmp.path().to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0)
+        .stderr(contains("renamed: 1"))
+        .stderr(contains("sidecar-absent: 1"));
+
+    // Expected output: Cluster-007_Cull-07.85-photo.CR3
+    let expected = out.join("Cluster-007_Cull-07.85-photo.CR3");
+    assert!(expected.exists(), "renamed CR3 must exist");
+
+    // Source untouched.
+    assert!(cr3.exists(), "source CR3 must still exist");
+    let src_bytes = std::fs::read(&cr3).unwrap();
+    assert_eq!(src_bytes.len(), 1024 * 1024, "source bytes unchanged");
+}
+
+/// D3 — XMP sidecar copied + renamed alongside the RAW.
+#[test]
+fn rename_copies_xmp_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    let (cat_path, cr3) = seed_renamed_catalog(&tmp, 5.0, 7);
+
+    // Place a stub XMP next to the CR3.
+    let xmp = cr3.with_extension("xmp");
+    std::fs::write(&xmp, b"<x:xmpmeta/>").unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "rename",
+            "--source",
+            tmp.path().to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0)
+        .stderr(contains("renamed: 1"))
+        .stderr(contains("sidecar-copied: 1"));
+
+    // XMP must be renamed to same stem + .xmp.
+    let expected_xmp = out.join("Cluster-007_Cull-05.00-photo.xmp");
+    assert!(expected_xmp.exists(), "renamed XMP must exist");
+    let content = std::fs::read(&expected_xmp).unwrap();
+    assert_eq!(content, b"<x:xmpmeta/>", "XMP must be verbatim copy");
+}
+
+/// D3 — missing source file → file-missing: 1, exit 2.
+#[test]
+fn rename_missing_source_file_exits_2() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    let (cat_path, cr3) = seed_renamed_catalog(&tmp, 6.0, 1);
+
+    // Delete the source CR3 after catalog setup.
+    std::fs::remove_file(&cr3).unwrap();
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "rename",
+            "--source",
+            tmp.path().to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .code(2)
+        .stderr(contains("file-missing: 1"));
+}

@@ -30,6 +30,7 @@ use commands::dedup::{DedupeArgs, run_dedup};
 use commands::develop::{DevelopArgs, run_develop};
 use commands::export::{ExportArgs, run_export};
 use commands::ingest::run_ingest;
+use commands::rename::{RenameArgs, run_rename};
 use commands::run::{RunArgs, run_pipeline};
 use commands::watermark::{WatermarkArgs, run_watermark};
 
@@ -81,6 +82,8 @@ enum Command {
     Run(RunArgs),
     /// Apply shadow gradient + dual corner marks to a directory of images → JPEG.
     Watermark(WatermarkArgs),
+    /// Copy RAW+XMP into --output under catalog-driven Cluster-X_Cull-Y-Name.ext filenames.
+    Rename(RenameArgs),
     /// Manage AI model bundles (planned for v0.1).
     Models,
     /// Inspect / list known camera profiles (planned for v0.1).
@@ -169,6 +172,7 @@ fn main() -> ExitCode {
         Command::Develop(args) => handle_pipeline_result(run_develop(&cli, args)),
         Command::Export(args) => handle_pipeline_result(run_export(&cli, args)),
         Command::Watermark(args) => handle_pipeline_result(run_watermark(&cli, args)),
+        Command::Rename(args) => handle_pipeline_result(run_rename(&cli, args)),
         Command::Run(args) => {
             let model_dir = resolve_model_dir();
 
