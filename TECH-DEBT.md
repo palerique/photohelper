@@ -464,15 +464,17 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
-### TD-029 — Windows x86_64 binary distribution deferred to v0.2 (2026-06-02, session 15)
+### TD-029 — Windows x86_64 binary distribution (RESOLVED 2026-06-02, session 15)
 
-- **Status**: Open
+- **Status**: **CLOSED** — resolved in the same session it was filed.
 - **Opened**: 2026-06-02 (session 15, release-CI implementation)
-- **Stop-gap location**: `.github/workflows/release.yml` — Windows target absent; Windows users must build from source.
-- **Fundamental fix**: Add a `build-windows-x86_64` job to `.github/workflows/release.yml` using the `windows-latest` runner and either: (A) `msys2/setup-msys2@v2` to provide autoconf/automake/g++ so the existing `build.rs` runs unchanged, OR (B) extend `crates/photohelper-raw/build.rs` to detect Windows and use a cmake-based LibRaw build (LibRaw ships `CMakeLists.txt`). ORT ships a pre-built Windows `.dll`; MozJPEG must compile against the MSVC C runtime.
-- **Binding trigger**: First Windows user request OR v0.2 milestone.
-- **Scope estimate**: ~100 LoC (build.rs cmake path + GHA job + test validation) / medium risk (MSVC C runtime ABI differences with MozJPEG and LibRaw).
-- **Consequence of inaction**: Windows users cannot install pre-built binaries; they must have a Rust toolchain + MSYS2 or WSL to build from source.
+- **Closed**: 2026-06-02 (session 15, Windows support added)
+- **Resolution**: Added `build-windows-x86_64` job to `.github/workflows/release.yml`
+  using `windows-latest` + `msys2/setup-msys2` (MINGW64). Modified `build.rs` to invoke
+  `sh ./configure` instead of `./configure` directly so the shebang script runs through
+  MSYS2's sh on Windows. Rust target: `x86_64-pc-windows-gnu`. Archive: `.zip` with
+  `photohelper.exe` + `onnxruntime.dll` + models. Remaining limitation: MinGW ABI (not
+  MSVC-native); MSVC binary planned for v0.2 if users request it.
 
 ---
 

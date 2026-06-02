@@ -269,10 +269,109 @@ jobs:
           name: linux-x86_64
           path: photohelper-*.tar.gz*
 
+  # ── Windows x86_64 ─────────────────────────────────────────────────────────
+  # Uses MSYS2 MINGW64 to provide sh, make, autoconf, pkg-config and gcc so
+  # the existing `build.rs` (which calls `sh ./configure && make`) works on
+  # Windows. The Rust target is x86_64-pc-windows-gnu (MinGW ABI).
+  # Archive format: .zip (conventional on Windows). ORT ships onnxruntime.dll
+  # which lands next to the .exe — Windows DLL search finds it automatically.
+  build-windows-x86_64:
+    name: Build Windows x86_64
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-gnu
+    defaults:
+      run:
+        shell: bash  # Git Bash (default on windows-latest)
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          lfs: true
+
+      - name: Set version from tag
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          (Get-Content Cargo.toml) -replace '^version = "0\.0\.0"', "version = `"$version`"" | Set-Content Cargo.toml
+          Add-Content $env:GITHUB_ENV "RELEASE_VERSION=$version"
+
+      - uses: msys2/setup-msys2@648c8d3d3d8554833d64123949594327799cdcc2  # HEAD 2026-06-02
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-autotools
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-zlib
+            zip
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          key: release-windows-x86_64
+
+      - name: Build release binary
+        # Run inside MSYS2 shell so that sh, make, autoconf, pkg-config,
+        # and the MinGW gcc are all on PATH for the LibRaw build.rs.
+        shell: msys2 {0}
+        env:
+          # Tell cargo to use the MinGW GCC linker for x86_64-pc-windows-gnu
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: |
+          export PATH="/mingw64/bin:$PATH"
+          cargo build --release -p photohelper-cli --target x86_64-pc-windows-gnu
+
+      - name: Bundle archive (.zip)
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_VERSION}"
+          TARGET="x86_64-pc-windows-gnu"
+          DIR="photohelper-${VERSION}-${TARGET}"
+          mkdir -p "${DIR}/models"
+
+          cp "target/${TARGET}/release/photohelper.exe" "${DIR}/"
+
+          # Find ORT DLL — downloaded by ort crate's download-binaries feature
+          ORT_DLL=""
+          for pattern in \
+              "target/${TARGET}/release/build/ort-*/out/onnxruntime/lib/onnxruntime.dll" \
+              "target/release/build/ort-*/out/onnxruntime/lib/onnxruntime.dll" \
+              "target/${TARGET}/release/build/ort-sys-*/out/onnxruntime/lib/onnxruntime.dll"; do
+              ORT_DLL=$(find . -path "${pattern}" | head -1 2>/dev/null || true)
+              [[ -n "${ORT_DLL}" ]] && break
+          done
+          if [[ -z "${ORT_DLL}" ]]; then
+              echo "ERROR: onnxruntime.dll not found in build output" >&2
+              find target -name 'onnxruntime*.dll' 2>/dev/null | head -20
+              exit 1
+          fi
+          echo "Found ORT DLL: ${ORT_DLL}"
+          cp "${ORT_DLL}" "${DIR}/"
+
+          cp crates/photohelper-ai/models/manifest.toml "${DIR}/models/"
+          cp crates/photohelper-ai/models/*.onnx        "${DIR}/models/"
+          cp scripts/README-install-windows.md          "${DIR}/README-install.md"
+
+          # Create .zip (MSYS2 provides zip)
+          zip -r "${DIR}.zip" "${DIR}"
+          sha256sum "${DIR}.zip" > "${DIR}.zip.sha256"
+          echo "Archive: $(du -sh ${DIR}.zip | cut -f1)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # HEAD
+        with:
+          name: windows-x86_64
+          path: photohelper-*.zip*
+
   # ── GitHub Release ──────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release (draft)
-    needs: [build-macos-arm64, build-macos-x86_64, build-linux-x86_64]
+    needs: [build-macos-arm64, build-macos-x86_64, build-linux-x86_64, build-windows-x86_64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
