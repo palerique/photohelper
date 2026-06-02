@@ -1339,3 +1339,75 @@ git switch -c session-13/to-be-determined
 just session-start
 cat SESSION-STATE.md
 ```
+
+---
+
+## Checkpoint — session 15 PAUSED for context refresh (2026-06-02; plan-review COMPLETE, implementation not yet started)
+
+**Status**: PAUSED. Branch: `session-15/watermark-and-rename`. `just ci` GREEN (248 tests). Plan-review complete (plan v4 committed; 3 review rounds ran to convergence). No implementation code written yet.
+
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code session 15, context-refresh window)
+
+### What landed this window
+
+7 commits on `session-15/watermark-and-rename`:
+
+| Commit | Subject |
+|---|---|
+| `82b2bd79` | `docs(session-15): session contract + state pointer (session-start)` — plan v1 + SESSION-STATE pointer corrected. |
+| `59bf5ff5` | `docs(session-15): plan-review Round 1 artifact (7C+10H+3M+2L by theme)` |
+| `d749f289` | `docs(session-15): plan v2 — Round 1 remediation (closes 7C+10H+3M+2L)` |
+| `dbda6004` | `docs(session-15): plan-review Round 2 artifact (2C+7H+6M+3L by theme)` |
+| `a8704da3` | `docs(session-15): plan v3 — Round 2 remediation (closes 2C+7H+6M+3L)` |
+| `717c7741` | `docs(session-15): plan-review Round 3 artifact (0C+2H+4M+5L, CONVERGED)` |
+| `da818c0d` | `docs(session-15): plan v4 — Round 3 remediation; plan-review COMPLETE` |
+
+Plus (in this pause window):
+- TD-024 filed (`paste` RUSTSEC-2024-0436 — unmaintained dev-dep advisory surfaced by fresh audit DB fetch; ignored in `.cargo/audit.toml`)
+- Ledger updates (SESSION-STATE, HANDOFF, TECH-DEBT)
+
+### Plan-review summary (what was decided and why)
+
+The plan-review ran 3 rounds (R1 → R2 → R3) to convergence. Full 8-agent suite + 9th-agent verification each round; **cumulative hallucination/discard rate: 0.00** across ~50 code citations.
+
+**Severity trajectory**: 7C → 2C → **0C** (converged R3).
+
+**The single highest-value catch (R1):** the plan repeatedly described net-new work as "reuse." `export_photo` (`crates/photohelper-export/src/lib.rs:178-347`) is a private 170-line monolith — so the plan now extracts shared `pub` primitives **first** (D1.0), then builds the two new subcommands on top.
+
+**Round-2 CRITICALs (both closed by Round 3):**
+- **RT-A**: `canonicalize_within` cannot validate a *non-existent* destination (it wraps `std::fs::canonicalize` which errors on missing paths — `model.rs:264`). v4 uses **lexical containment** on the already-canonicalized `--output` directory instead.
+- **RT-B**: sanitized-stem + NAME_MAX truncation could silently clobber two distinct sources to one output. v4 pins the exact pipeline order (sanitize → compose → cap-STEM → `resolve_collisions` keyed on final bytes) and makes the catalog `ORDER BY` total (add `, p.id`). Note: `PhotoId` has **no `Ord`** and `ingested_at` is **not projected** onto `DevelopRow`, so the Rust-sort option is non-compilable — the SQL `, p.id` is the only viable branch.
+
+**Four user decisions baked into the plan:**
+- **Q-A**: RAW via `ProcessOptions::Srgb8` (plain sRGB, not filmic ISP) → uniform look with raster.
+- **Q-B**: mark-doesn't-fit = **error** (no JPEG written, `EX_PARTIAL_FAIL` even without `--strict`).
+- **Q-C**: non-CR3 RAW gated behind `--allow-untested-raw` + post-decode dimension+channel sanity guard.
+- **Q-D**: marks are **PNG only** (fatal up-front on non-PNG).
+
+**Key architectural pin from plan-review:**
+`render_to_jpeg(rgb: &[u8], w, h, opts)` takes a **borrow** (not an owned `Vec`) — call as `render_to_jpeg(img.pixels(), img.width().get(), img.height().get(), &opts)` — so there is no per-image ~24MB copy at the `RgbImage → render_to_jpeg` seam.
+
+### What is not yet in place
+
+- **D0**: remove untracked scratch files (`crates/photohelper-sidecar/test_quick_xml.rs`, `crates/photohelper-sidecar/test_quick_xml/`, `diff.txt`).
+- **D1.0**: extract `resize_rgb`/`render_to_jpeg`/`pixmap_to_rgb` from the monolith + make `compress_jpeg`/`draw_image_watermark`/`calculate_watermark_position` `pub`; re-point `export_photo` at the shared functions; move `TempFileGuard` + `resolve_collisions` to `cli/util.rs`. Migrate `test_watermark_position_calculation` to the 2-axis signature. Re-point export, green its integration tests.
+- **D1**: raster loader (`image` dep on `photohelper-export`; `SourceKind` dispatch; EXIF orientation; `RgbImage::new` channel guard); `MarkPlacement`/`GeometryError`/`MarkSlot` geometry module; shadow generator; composite parametrization (`BadgeSizeBasis { LongEdge(Scale) | Height(f32) }`, per-axis margin).
+- **D2**: `watermark` subcommand wiring, tests (incl. `mark_doesnt_fit` integration test asserting exit 2/1 — R3-B; written:N positive row — R3-F).
+- **D3**: `rename` subcommand (the shared `RenamedFilename` builder, `(ingested_at, id)` ORDER BY via SQL `, p.id`).
+- **D4**: ledger updates, DN reconciliation (duplicate DN-029@241/329, DN-033@284/305 → renumber to DN-038/039; new untested-RAW DN-040), decision note, scripts, README quickstart. File NEF/ARW fixtures TD at TD-024 (BUT NOTE: TD-024 was just claimed for the `paste` advisory above — the NEF/ARW TD is now **TD-027** per the ledger non-contiguity scan; confirm against TECH-DEBT.md at filing).
+
+**Important correction on TD numbering**: At plan-review time, we computed TD-024 was free and earmarked it for the NEF/ARW fixtures TD. But during this pause window, TD-024 was filed for the `paste` audit advisory. The NEF/ARW fixtures TD should now be filed as **TD-027** (next free after TD-026; TD-027..TD-039 were confirmed free; TD-040 is taken). Confirm against TECH-DEBT.md before filing.
+
+### Open session-14 sidecar debt (NOT in scope for session 15)
+
+The session-14 session-end review left 15 verified findings open (2 CRITICAL + 8 HIGH + 3 MEDIUM + 2 LOW) in `photohelper-sidecar` (`conflict.rs`, `writer.rs`) with no Round-4 CLEAN artifact. Session 15 deliberately avoids this code (D-Q7: catalog metrics + verbatim `.xmp` copy; `rename` never calls `read_xmp`/`write_xmp`). A future sidecar-focused remediation session is needed.
+
+### Restart prompt
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-15/watermark-and-rename
+just session-start
+```
+
+Then read `SESSION-STATE.md` (top), this checkpoint, and `docs/plans/session-15.md` (v4, the final plan). Begin with **D0** (the untracked scratch files are still present — `rg`-confirm they're unreferenced, then `rm`), then **D1.0** (extraction + export re-point + green CI), then D1 → D2 → D3 → D4.
