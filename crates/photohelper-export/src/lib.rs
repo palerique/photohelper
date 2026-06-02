@@ -1,6 +1,17 @@
 //! Export pipeline for photohelper: resize, watermark, JPEG encode.
+//!
+//! # Shared rendering primitives (D1.0)
+//!
+//! - [`resize_rgb`] — aspect-ratio-preserving resize into a [`tiny_skia::Pixmap`]
+//! - [`render_to_jpeg`] — full pipeline: resize → shadow → marks → JPEG bytes
+//! - [`pixmap_to_rgb`] — demultiply tiny-skia RGBA → RGB
+//! - [`compress_jpeg`] — MozJPEG encoding → `Vec<u8>`
+//! - [`load_source_image`] — raster (JPEG/PNG) + RAW → [`photohelper_core::model::RgbImage`]
+//! - [`shadow_alpha_ramp`] — monotonic opacity gradient for the shadow band
+//! - [`MarkPlacement`] — geometry validator for corner marks
 
 use std::cell::RefCell;
+use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,6 +19,32 @@ use thiserror::Error;
 
 mod isp;
 pub use isp::ToneMappingLut;
+
+// ===== D1b constants =====
+
+/// Fraction of image height for Mark1 (top-right watermark).
+pub const MARK1_HEIGHT_FRAC: f32 = 0.14;
+
+/// Fraction of image height for Mark2 (bottom-left watermark).
+pub const MARK2_HEIGHT_FRAC: f32 = 0.13;
+
+/// Fraction of the image SHORT edge used as the uniform margin on all four sides.
+///
+/// Applying this to `min(W, H)` gives the same absolute pixel distance from
+/// every adjacent border, regardless of image aspect ratio.
+pub const MARK_MARGIN_FRAC: f32 = 0.046;
+
+/// Fraction of image height covered by the shadow gradient band.
+pub const SHADOW_BAND_FRAC: f32 = 0.30;
+
+/// Minimum mark height in pixels below which a complex logo may be illegible.
+///
+/// [`composite_mark_on_pixmap`] emits a `tracing::warn!` when the computed
+/// mark height is smaller than this threshold. The mark is still rendered —
+/// the user decides whether the result is acceptable.
+pub const MARK_MIN_READABLE_PX: u32 = 80;
+
+// ===== Existing types (unchanged) =====
 
 /// Strong type for Photo Rating (validated/clamped to -1..=5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,39 +85,54 @@ impl NimaScore {
 /// Metadata passed to the export pipeline.
 #[derive(Debug, Clone)]
 pub struct ExportMetadata {
+    /// Photo rating (-1..=5).
     pub rating: Rating,
+    /// NIMA aesthetic score if available.
     pub nima_score: Option<NimaScore>,
 }
 
-/// Configurable position for text watermarks.
+/// Configurable position for text watermarks (export subcommand).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WatermarkPosition {
+    /// Bottom-left corner.
     BottomLeft,
+    /// Top-right corner.
     TopRight,
+    /// Top-left corner.
     TopLeft,
+    /// Bottom-right corner.
     BottomRight,
+    /// Center of image.
     Center,
 }
 
+/// Scale value clamped to \[0.001, 100.0\].
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Scale(f32);
 
 impl Scale {
+    /// Clamp `val` into the valid scale range.
     pub fn new(val: f32) -> Self {
         Self(val.clamp(0.001, 100.0))
     }
+
+    /// Raw scale value.
     pub fn value(&self) -> f32 {
         self.0
     }
 }
 
+/// A PNG badge preloaded into a pixmap.
 #[derive(Clone)]
 pub struct PreloadedBadge {
+    /// The decoded PNG pixmap.
     pub pixmap: Arc<tiny_skia::Pixmap>,
+    /// Optional scale as percentage of image long edge.
     pub scale: Option<Scale>,
 }
 
 impl PreloadedBadge {
+    /// Load a PNG file and decode it into a pixmap.
     pub fn load(path: &Path, scale: Option<Scale>) -> Result<Self, ExportError> {
         let badge_data = std::fs::read(path).map_err(|e| ExportError::BadgeLoadFailed {
             path: path.to_path_buf(),
@@ -107,14 +159,19 @@ impl std::fmt::Debug for PreloadedBadge {
     }
 }
 
+/// Watermark payload for the export subcommand.
 #[derive(Debug, Clone)]
 pub enum Watermark {
+    /// Text watermark.
     Text(String),
+    /// Image badge watermark.
     Image(PreloadedBadge),
 }
 
+/// Tone-mapping options for the export ISP.
 #[derive(Debug, Clone)]
 pub struct ToneMappingOptions {
+    /// Exposure adjustment in EV stops.
     pub exposure_ev: f32,
 }
 
@@ -124,44 +181,422 @@ impl Default for ToneMappingOptions {
     }
 }
 
-/// Options to control the export pipeline.
+/// Options for the `export` subcommand pipeline.
 #[derive(Debug, Clone)]
 pub struct ExportOptions {
+    /// Output file path (may be a `.tmp` path for atomic rename).
     pub output_path: PathBuf,
+    /// JPEG quality (1..=100).
     pub quality: u8,
+    /// Optional long-edge resize limit in pixels (≥16).
     pub long_edge: Option<u32>,
+    /// Watermarks keyed by position.
     pub watermarks: std::collections::HashMap<WatermarkPosition, Watermark>,
+    /// Overwrite existing outputs.
     pub force: bool,
+    /// Tone-mapping settings.
     pub tone_mapping: ToneMappingOptions,
+    /// Height-based corner marks composited after filmic tone-mapping inside the same
+    /// encode pass — avoids a second JPEG decode/encode cycle versus a separate
+    /// `watermark` subcommand invocation.
+    pub render_marks: Vec<MarkSpec>,
+    /// Optional shadow gradient. Callers should set this alongside `render_marks`; the
+    /// shadow is applied independently of whether marks are present.
+    pub render_shadow: Option<ShadowSpec>,
 }
+
+// ===== D1b — Geometry types =====
+
+/// Which corner slot a mark occupies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkSlot {
+    /// Top-right corner (mark1).
+    Mark1,
+    /// Bottom-left corner (mark2).
+    Mark2,
+}
+
+/// How a mark badge's long dimension is determined.
+#[derive(Debug, Clone)]
+pub enum BadgeSizeBasis {
+    /// Badge long edge = image long edge × scale / 100.
+    LongEdge(Scale),
+    /// Badge height = image height × fraction.
+    Height(f32),
+}
+
+/// A single image mark to composite via [`render_to_jpeg`].
+#[derive(Debug, Clone)]
+pub struct MarkSpec {
+    /// Decoded PNG badge.
+    pub badge: Arc<tiny_skia::Pixmap>,
+    /// How to size the badge relative to the image.
+    pub basis: BadgeSizeBasis,
+    /// Which corner slot to place the badge.
+    pub slot: MarkSlot,
+    /// Margin fraction used to compute the pixel distance from adjacent edges.
+    ///
+    /// Interpretation depends on [`BadgeSizeBasis`]:
+    /// - `Height` path: applied to `min(W, H)` (the image short edge) to produce
+    ///   equal-pixel margins from both adjacent borders. `margin_y` is **ignored**.
+    /// - `LongEdge` path: applied to post-resize image **width** for the x-axis margin.
+    pub margin_x: f32,
+    /// Top/bottom margin as a fraction of post-resize image **height** (LongEdge path only).
+    ///
+    /// **Not used** in the `Height` compositing path — `margin_x` controls both axes there.
+    pub margin_y: f32, // TD-041: dead in Height path — see TECH-DEBT.md
+}
+
+/// Shadow gradient specification.
+#[derive(Debug, Clone, Copy)]
+pub struct ShadowSpec {
+    /// Fraction of image height covered by the shadow band (0 < band_frac ≤ 1).
+    pub band_frac: f32,
+}
+
+/// Render options for [`render_to_jpeg`]. Excludes caller concerns (output path, force).
+#[derive(Debug, Clone)]
+pub struct RenderOptions {
+    /// Optional long-edge resize limit (≥16). `None` = native size.
+    pub long_edge: Option<u32>,
+    /// If true, images smaller than `long_edge` are emitted at native size (no upscale).
+    pub downscale_only: bool,
+    /// JPEG quality (1..=100).
+    pub quality: u8,
+    /// Optional full-bleed bottom shadow gradient.
+    pub shadow: Option<ShadowSpec>,
+    /// Image marks to composite in order (Mark1 first, Mark2 second).
+    pub marks: Vec<MarkSpec>,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            long_edge: None,
+            downscale_only: false,
+            quality: 80,
+            shadow: None,
+            marks: vec![],
+        }
+    }
+}
+
+// ===== D1b — Geometry validator =====
+
+/// Geometry error returned by [`MarkPlacement::fit`].
+#[derive(Debug, Error, Clone)]
+pub enum GeometryError {
+    /// The mark cannot fit at its required size within the image.
+    #[error("mark {which:?} ({mark_dims:?}) does not fit in image ({target_dims:?})")]
+    MarkDoesNotFit {
+        /// Which slot failed to place.
+        which: MarkSlot,
+        /// Requested mark dimensions (w, h).
+        mark_dims: (u32, u32),
+        /// Image dimensions (w, h).
+        target_dims: (u32, u32),
+    },
+}
+
+/// Validated placement of a mark badge within a target image.
+///
+/// Produced by [`MarkPlacement::fit`]; private fields + accessors prevent
+/// construction from outside this module (invariant: mark fits in image).
+#[derive(Debug, Clone, Copy)]
+pub struct MarkPlacement {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+impl MarkPlacement {
+    /// Compute a validated placement for a mark badge in `slot` within `target`.
+    ///
+    /// - `mark_h = round(H × height_frac).max(1)`
+    /// - `scale  = mark_h / mark_original_h`
+    /// - `mark_w = round(mark_original_w × scale).max(1)`
+    /// - `margin_x = round(W × margin_frac)`, `margin_y = round(H × margin_frac)`
+    /// - Origins use `checked_sub` so underflow maps to [`GeometryError::MarkDoesNotFit`].
+    ///
+    /// `height_frac` must be in `(0, 1]`; enforced by `debug_assert!` in
+    /// non-release builds.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the mark cannot fit at its computed size.
+    pub fn fit(
+        target: (u32, u32),
+        mark_dims: (u32, u32),
+        height_frac: f32,
+        margin_x_frac: f32,
+        margin_y_frac: f32,
+        slot: MarkSlot,
+    ) -> Result<Self, GeometryError> {
+        debug_assert!(
+            height_frac.is_finite() && height_frac > 0.0 && height_frac <= 1.0,
+            "height_frac must be in (0, 1]"
+        );
+        debug_assert!(
+            margin_x_frac.is_finite() && (0.0..1.0).contains(&margin_x_frac),
+            "margin_x_frac must be in [0, 1)"
+        );
+        debug_assert!(
+            margin_y_frac.is_finite() && (0.0..1.0).contains(&margin_y_frac),
+            "margin_y_frac must be in [0, 1)"
+        );
+        let (tw, th) = target;
+        let (mw, mh) = mark_dims;
+
+        let mark_h = ((th as f32 * height_frac).round() as u32).max(1);
+        let scale = mark_h as f32 / (mh as f32).max(1.0);
+        let mark_w = ((mw as f32 * scale).round() as u32).max(1);
+        let margin_x = (tw as f32 * margin_x_frac).round() as u32;
+        let margin_y = (th as f32 * margin_y_frac).round() as u32;
+
+        let (x, y) = match slot {
+            MarkSlot::Mark1 => {
+                // top-right: x = W - margin_x - mark_w; y = margin_y
+                let x = tw
+                    .checked_sub(margin_x)
+                    .and_then(|v| v.checked_sub(mark_w))
+                    .ok_or(GeometryError::MarkDoesNotFit {
+                        which: MarkSlot::Mark1,
+                        mark_dims: (mark_w, mark_h),
+                        target_dims: target,
+                    })?;
+                (x, margin_y)
+            }
+            MarkSlot::Mark2 => {
+                // bottom-left: x = margin_x; y = H - margin_y - mark_h
+                let y = th
+                    .checked_sub(margin_y)
+                    .and_then(|v| v.checked_sub(mark_h))
+                    .ok_or(GeometryError::MarkDoesNotFit {
+                        which: MarkSlot::Mark2,
+                        mark_dims: (mark_w, mark_h),
+                        target_dims: target,
+                    })?;
+                (margin_x, y)
+            }
+        };
+
+        // Bounds check: mark must not extend past the image edge.
+        if x.checked_add(mark_w).is_none_or(|e| e > tw)
+            || y.checked_add(mark_h).is_none_or(|e| e > th)
+        {
+            return Err(GeometryError::MarkDoesNotFit {
+                which: slot,
+                mark_dims: (mark_w, mark_h),
+                target_dims: target,
+            });
+        }
+
+        Ok(Self {
+            x,
+            y,
+            w: mark_w,
+            h: mark_h,
+        })
+    }
+
+    /// Like [`fit`] but uses a **single absolute pixel margin** on every adjacent side.
+    ///
+    /// Callers pass `round(min(W, H) × MARK_MARGIN_FRAC)`, which produces the same
+    /// physical distance from both the right edge and the top edge (for Mark1) and
+    /// both the left edge and the bottom edge (for Mark2), regardless of aspect ratio.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the mark cannot fit at its computed size.
+    pub fn fit_equal_margin(
+        target: (u32, u32),
+        mark_dims: (u32, u32),
+        height_frac: f32,
+        margin_px: u32,
+        slot: MarkSlot,
+    ) -> Result<Self, GeometryError> {
+        debug_assert!(
+            height_frac.is_finite() && height_frac > 0.0 && height_frac <= 1.0,
+            "height_frac must be in (0, 1]"
+        );
+        let (tw, th) = target;
+        let (mw, mh) = mark_dims;
+
+        let mark_h = ((th as f32 * height_frac).round() as u32).max(1);
+        let scale = mark_h as f32 / (mh as f32).max(1.0);
+        let mark_w = ((mw as f32 * scale).round() as u32).max(1);
+
+        let (x, y) = match slot {
+            MarkSlot::Mark1 => {
+                // top-right: right_gap = margin_px, top_gap = margin_px
+                let x = tw
+                    .checked_sub(margin_px)
+                    .and_then(|v| v.checked_sub(mark_w))
+                    .ok_or(GeometryError::MarkDoesNotFit {
+                        which: MarkSlot::Mark1,
+                        mark_dims: (mark_w, mark_h),
+                        target_dims: target,
+                    })?;
+                (x, margin_px)
+            }
+            MarkSlot::Mark2 => {
+                // bottom-left: left_gap = margin_px, bottom_gap = margin_px
+                let y = th
+                    .checked_sub(margin_px)
+                    .and_then(|v| v.checked_sub(mark_h))
+                    .ok_or(GeometryError::MarkDoesNotFit {
+                        which: MarkSlot::Mark2,
+                        mark_dims: (mark_w, mark_h),
+                        target_dims: target,
+                    })?;
+                (margin_px, y)
+            }
+        };
+
+        if x.checked_add(mark_w).is_none_or(|e| e > tw)
+            || y.checked_add(mark_h).is_none_or(|e| e > th)
+        {
+            return Err(GeometryError::MarkDoesNotFit {
+                which: slot,
+                mark_dims: (mark_w, mark_h),
+                target_dims: target,
+            });
+        }
+
+        Ok(Self {
+            x,
+            y,
+            w: mark_w,
+            h: mark_h,
+        })
+    }
+
+    /// Top-left x pixel of the placed mark.
+    #[must_use]
+    pub fn x(&self) -> u32 {
+        self.x
+    }
+    /// Top-left y pixel of the placed mark.
+    #[must_use]
+    pub fn y(&self) -> u32 {
+        self.y
+    }
+    /// Width of the placed mark in pixels.
+    #[must_use]
+    pub fn w(&self) -> u32 {
+        self.w
+    }
+    /// Height of the placed mark in pixels.
+    #[must_use]
+    pub fn h(&self) -> u32 {
+        self.h
+    }
+}
+
+// ===== D1a — Source file kind =====
+
+/// Classification of a source image file for [`load_source_image`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// JPEG or PNG raster.
+    Raster,
+    /// Canon CR3 RAW (decode-tested).
+    Cr3,
+    /// Other LibRaw-supported RAW (decode-untested; gated by `--allow-untested-raw`).
+    UntestedRaw,
+}
+
+impl SourceKind {
+    /// Classify `path` by file extension (`eq_ignore_ascii_case`).
+    ///
+    /// Returns `None` for unrecognised or missing extensions.
+    #[must_use]
+    pub fn classify(path: &Path) -> Option<Self> {
+        let ext = path.extension()?.to_str()?;
+        match ext.to_ascii_lowercase().as_str() {
+            "jpg" | "jpeg" | "png" => Some(Self::Raster),
+            "cr3" => Some(Self::Cr3),
+            "cr2" | "nef" | "arw" | "raf" | "orf" | "rw2" | "dng" => Some(Self::UntestedRaw),
+            _ => None,
+        }
+    }
+}
+
+// ===== Error type =====
 
 /// Errors returned by the export pipeline.
 #[derive(Debug, Error)]
 pub enum ExportError {
-    #[error("Invalid dimensions")]
+    /// Image dimensions are zero or otherwise invalid.
+    #[error("invalid image dimensions")]
     InvalidDimensions,
 
-    #[error("Allocation failed")]
+    /// Memory allocation for a pixmap failed.
+    #[error("pixmap allocation failed")]
     AllocationFailed,
 
-    #[error("IO error: {0}")]
+    /// I/O error (file read/write/rename).
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// LibRaw RAW decode error.
     #[error("RAW decode error: {0}")]
     RawDecode(String),
 
+    /// MozJPEG compression error.
     #[error("JPEG encode error: {0}")]
     JpegEncode(String),
 
-    #[error("Duplicate watermark position: {0:?}")]
+    /// Duplicate watermark position in the export pipeline.
+    #[error("duplicate watermark position: {0:?}")]
     DuplicateWatermarkPosition(WatermarkPosition),
 
-    #[error("Failed to load badge at {path}: {reason}")]
-    BadgeLoadFailed { path: PathBuf, reason: String },
+    /// Failed to load or decode a PNG badge.
+    #[error("failed to load badge at {path}: {reason}")]
+    BadgeLoadFailed {
+        /// Path to the badge file.
+        path: PathBuf,
+        /// Human-readable failure reason.
+        reason: String,
+    },
 
-    #[error("Watermark omitted because it does not fit")]
+    /// Watermark omitted (does not fit) — legacy export path.
+    #[error("watermark omitted: does not fit on image")]
     WatermarkOmitted,
+
+    /// Source file has an unrecognised extension (`skipped_unsupported`).
+    #[error("unsupported source file format: {}", path.display())]
+    UnsupportedSource {
+        /// Path to the source file.
+        path: PathBuf,
+    },
+
+    /// Non-CR3 RAW file gated by `--allow-untested-raw` (`skipped_unsupported`).
+    #[error(
+        "untested RAW format (pass --allow-untested-raw to enable): {}",
+        path.display()
+    )]
+    UntestedRawGated {
+        /// Path to the RAW file.
+        path: PathBuf,
+    },
+
+    /// Raster (JPEG/PNG) decode or orientation error (`decode_failed`).
+    #[error("raster decode failed at {}: {reason}", path.display())]
+    RasterDecodeFailed {
+        /// Path to the raster file.
+        path: PathBuf,
+        /// Human-readable failure reason.
+        reason: String,
+    },
+
+    /// Geometry error from [`MarkPlacement::fit`] (`mark_doesnt_fit`).
+    #[error("geometry error: {0}")]
+    Geometry(#[from] GeometryError),
 }
+
+// ===== Font system (private; export subcommand only) =====
 
 thread_local! {
     static FONT_SYSTEM: RefCell<cosmic_text::FontSystem> = {
@@ -173,195 +608,748 @@ thread_local! {
     static SWASH_CACHE: RefCell<cosmic_text::SwashCache> = RefCell::new(cosmic_text::SwashCache::new());
 }
 
-/// Core function to export a single photo.
-#[tracing::instrument(skip(options))]
-pub fn export_photo(
-    options: &ExportOptions,
-    source_path: &Path,
-    _metadata: &ExportMetadata,
-) -> Result<(), ExportError> {
-    // 1. Decode RAW to 16-bit linear image
-    let processed = photohelper_raw::decode::decode_image(
-        source_path,
-        photohelper_raw::decode::ProcessOptions::Linear16,
-    )
-    .map_err(|e| ExportError::RawDecode(e.to_string()))?;
+// ===== D1a — Source image loader =====
 
-    let linear_img = match processed {
-        photohelper_raw::decode::ProcessedImage::Linear16(img) => img,
-        _ => {
-            return Err(ExportError::RawDecode(
-                "Expected 16-bit linear image".to_string(),
-            ));
+/// Load a source image (raster or RAW) and return a decoded RGB buffer.
+///
+/// For raster files (JPEG/PNG), EXIF orientation is applied: an unknown
+/// orientation tag logs a warning and defaults to identity (no rotation).
+///
+/// For RAW files:
+/// - CR3 is always accepted.
+/// - Other LibRaw formats require `allow_untested_raw = true` and pass through
+///   a post-decode sanity guard (dimensions ≥ 16×16; 3 channels).
+///
+/// # Errors
+///
+/// - [`ExportError::UnsupportedSource`] — unrecognised extension
+///   (`skipped_unsupported`, not a failure).
+/// - [`ExportError::UntestedRawGated`] — non-CR3 RAW without the flag
+///   (`skipped_unsupported`, not a failure).
+/// - [`ExportError::RasterDecodeFailed`] — decode or orientation error
+///   (`decode_failed`).
+/// - [`ExportError::RawDecode`] — LibRaw decode error (`decode_failed`).
+pub fn load_source_image(
+    path: &Path,
+    allow_untested_raw: bool,
+) -> Result<photohelper_core::model::RgbImage, ExportError> {
+    match SourceKind::classify(path) {
+        None => Err(ExportError::UnsupportedSource {
+            path: path.to_path_buf(),
+        }),
+        Some(SourceKind::UntestedRaw) if !allow_untested_raw => {
+            Err(ExportError::UntestedRawGated {
+                path: path.to_path_buf(),
+            })
+        }
+        Some(SourceKind::Raster) => decode_raster(path),
+        Some(SourceKind::Cr3) | Some(SourceKind::UntestedRaw) => {
+            // TD-027: untested-raw decode unverified (colour/demosaic) for non-CR3 formats.
+            // Sanity guard checks dims+channels only; colour correctness not tested.
+            decode_raw_srgb8(
+                path,
+                matches!(SourceKind::classify(path), Some(SourceKind::UntestedRaw)),
+            )
+        }
+    }
+}
+
+/// Decode a JPEG or PNG file and apply EXIF orientation.
+fn decode_raster(path: &Path) -> Result<photohelper_core::model::RgbImage, ExportError> {
+    let bytes = std::fs::read(path).map_err(|e| ExportError::RasterDecodeFailed {
+        path: path.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+
+    let img = image::load_from_memory(&bytes).map_err(|e| ExportError::RasterDecodeFailed {
+        path: path.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+
+    // Apply EXIF orientation for JPEG files.
+    let img = {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+        if matches!(ext.as_deref(), Some("jpg") | Some("jpeg")) {
+            let orientation = jpeg_exif_orientation(&bytes);
+            match orientation {
+                Some(o) if o != 1 => apply_exif_orientation(img, o, path),
+                None => {
+                    // No EXIF tag — identity (no warning; common for synthetic images).
+                    img
+                }
+                _ => img,
+            }
+        } else {
+            img
         }
     };
 
-    let width = linear_img.width.get();
-    let height = linear_img.height.get();
-    let channels = linear_img.channels as usize;
+    let rgb = img.to_rgb8();
+    let (w, h) = (rgb.width(), rgb.height());
 
-    if width == 0 || height == 0 {
+    if rgb.len() != rgb.width() as usize * rgb.height() as usize * 3 {
+        return Err(ExportError::RasterDecodeFailed {
+            path: path.to_path_buf(),
+            reason: format!("decoded buffer len {} ≠ {}×{}×3", rgb.len(), w, h),
+        });
+    }
+
+    let nzw = NonZeroU32::new(w).ok_or_else(|| ExportError::RasterDecodeFailed {
+        path: path.to_path_buf(),
+        reason: "zero-width image".to_string(),
+    })?;
+    let nzh = NonZeroU32::new(h).ok_or_else(|| ExportError::RasterDecodeFailed {
+        path: path.to_path_buf(),
+        reason: "zero-height image".to_string(),
+    })?;
+
+    photohelper_core::model::RgbImage::new(rgb.into_raw(), nzw, nzh).map_err(|e| {
+        ExportError::RasterDecodeFailed {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        }
+    })
+}
+
+/// Decode a RAW file via LibRaw Srgb8.
+fn decode_raw_srgb8(
+    path: &Path,
+    sanity_check: bool,
+) -> Result<photohelper_core::model::RgbImage, ExportError> {
+    let img = photohelper_raw::decode::read_raw_rgb(path)
+        .map_err(|e| ExportError::RawDecode(e.to_string()))?;
+
+    if sanity_check {
+        let w = img.width().get() as usize;
+        let h = img.height().get() as usize;
+        if w < 16 || h < 16 || img.pixels().len() != w * h * 3 {
+            return Err(ExportError::RawDecode(format!(
+                "post-decode sanity guard failed for {}: dims {}×{} or non-3-channel output",
+                path.display(),
+                w,
+                h
+            )));
+        }
+    }
+
+    Ok(img)
+}
+
+/// Parse JPEG EXIF orientation from raw file bytes. Returns `None` if absent.
+fn jpeg_exif_orientation(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut pos = 2usize;
+    while pos + 3 < bytes.len() {
+        if bytes[pos] != 0xFF {
+            break;
+        }
+        let marker = bytes[pos + 1];
+        if marker == 0xFF {
+            pos += 1;
+            continue;
+        }
+        // Segment length includes the 2 length bytes but not the FF marker byte.
+        let seg_len = usize::from(u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]));
+        // APP1 = 0xE1; check for "Exif\0\0" header.
+        if marker == 0xE1 {
+            let start = pos + 4;
+            if start + 6 <= bytes.len() {
+                let app1 = &bytes[start..];
+                if app1.starts_with(b"Exif\0\0") {
+                    return tiff_orientation(&app1[6..]);
+                }
+            }
+        }
+        // Stop before SOS (start of scan) — data after is not segment-framed.
+        if marker == 0xDA || marker == 0xD9 {
+            break;
+        }
+        pos = pos.saturating_add(2 + seg_len);
+    }
+    None
+}
+
+/// Extract the orientation tag value from a TIFF blob.
+fn tiff_orientation(data: &[u8]) -> Option<u32> {
+    if data.len() < 8 {
+        return None;
+    }
+    let le = data.starts_with(b"II");
+    if !le && !data.starts_with(b"MM") {
+        return None;
+    }
+    let u16_at = |off: usize| -> Option<u16> {
+        let b = data.get(off..off + 2)?;
+        if le {
+            Some(u16::from_le_bytes([b[0], b[1]]))
+        } else {
+            Some(u16::from_be_bytes([b[0], b[1]]))
+        }
+    };
+    let u32_at = |off: usize| -> Option<u32> {
+        let b = data.get(off..off + 4)?;
+        if le {
+            Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        } else {
+            Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        }
+    };
+    if u16_at(2)? != 42 {
+        return None;
+    }
+    let ifd_off = u32_at(4)? as usize;
+    let count = u16_at(ifd_off)? as usize;
+    for i in 0..count {
+        let entry = ifd_off + 2 + i * 12;
+        let tag = u16_at(entry)?;
+        if tag == 0x0112 {
+            // Orientation tag: type SHORT (3), value in bytes 8–9 of entry.
+            return Some(u32::from(u16_at(entry + 8)?));
+        }
+    }
+    None
+}
+
+/// Apply EXIF orientation to a `DynamicImage`. Unknown tags → warn + identity.
+fn apply_exif_orientation(
+    img: image::DynamicImage,
+    orientation: u32,
+    path: &Path,
+) -> image::DynamicImage {
+    match orientation {
+        1 => img,
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.rotate90().fliph(),
+        6 => img.rotate90(),
+        7 => img.rotate270().fliph(),
+        8 => img.rotate270(),
+        _ => {
+            tracing::warn!(
+                path = %path.display(),
+                orientation,
+                "unknown EXIF orientation tag; defaulting to identity (no rotation)"
+            );
+            img
+        }
+    }
+}
+
+// ===== D1.0 — Shared rendering primitives =====
+
+/// Aspect-ratio-preserving resize of an RGB buffer into a [`tiny_skia::Pixmap`].
+///
+/// If `long_edge` is `None`, the pixmap is filled at native size (no resize).
+/// If `downscale_only` is `true` and the image is already smaller than
+/// `long_edge`, it is emitted at native size (no upscale).
+///
+/// # Errors
+///
+/// Returns [`ExportError::InvalidDimensions`] if `long_edge < 16`, or
+/// [`ExportError::AllocationFailed`] if pixmap allocation fails.
+pub fn resize_rgb(
+    rgb: &[u8],
+    w: u32,
+    h: u32,
+    long_edge: Option<u32>,
+    downscale_only: bool,
+) -> Result<tiny_skia::Pixmap, ExportError> {
+    let Some(limit) = long_edge else {
+        // Native size — fill pixmap without rescaling.
+        let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or(ExportError::AllocationFailed)?;
+        rgba_fill(pixmap.data_mut(), rgb);
+        return Ok(pixmap);
+    };
+
+    if limit < 16 {
         return Err(ExportError::InvalidDimensions);
     }
-    if channels < 3 {
-        return Err(ExportError::RawDecode(
-            "Image has fewer than 3 channels".to_string(),
-        ));
+
+    let w_f = w as f32;
+    let h_f = h as f32;
+    let long_e = w_f.max(h_f);
+    let mut scale = limit as f32 / long_e;
+    if downscale_only {
+        scale = scale.min(1.0);
     }
+    let target_w = ((w_f * scale).round() as u32).max(1);
+    let target_h = ((h_f * scale).round() as u32).max(1);
 
-    // 2. LUT-Accelerated ISP Tone Mapping
-    let lut = ToneMappingLut::new(options.tone_mapping.exposure_ev);
-    let mut rgb_pixels = Vec::with_capacity((width * height * 3) as usize);
+    // Source pixmap at native size.
+    let mut src_pixmap = tiny_skia::Pixmap::new(w, h).ok_or(ExportError::AllocationFailed)?;
+    rgba_fill(src_pixmap.data_mut(), rgb);
 
-    for pixel in linear_img.data.chunks_exact(channels) {
-        rgb_pixels.push(lut.apply(pixel[0]));
-        rgb_pixels.push(lut.apply(pixel[1]));
-        rgb_pixels.push(lut.apply(pixel[2]));
-    }
-
-    // Fast-path bypass: No resizing and no watermarks -> Encode directly
-    if options.long_edge.is_none() && options.watermarks.is_empty() {
-        compress_jpeg(
-            &rgb_pixels,
-            width,
-            height,
-            options.quality,
-            &options.output_path,
-        )?;
-        return Ok(());
-    }
-
-    // 3. Aspect-ratio preserving resizing
-    let (target_w, target_h, scale) = if let Some(limit) = options.long_edge {
-        if limit < 16 {
-            return Err(ExportError::InvalidDimensions);
-        }
-        let w_f = width as f32;
-        let h_f = height as f32;
-        let long_edge = w_f.max(h_f);
-        let s = limit as f32 / long_edge;
-        let tw = (w_f * s).round() as u32;
-        let th = (h_f * s).round() as u32;
-        (tw.max(1), th.max(1), s)
-    } else {
-        (width, height, 1.0f32)
-    };
-
+    // Target pixmap — bicubic resample.
     let mut pixmap =
         tiny_skia::Pixmap::new(target_w, target_h).ok_or(ExportError::AllocationFailed)?;
+    let paint = tiny_skia::Paint {
+        shader: tiny_skia::Pattern::new(
+            src_pixmap.as_ref(),
+            tiny_skia::SpreadMode::Pad,
+            tiny_skia::FilterQuality::Bicubic,
+            1.0f32,
+            tiny_skia::Transform::from_scale(scale, scale),
+        ),
+        ..Default::default()
+    };
+    let rect = tiny_skia::Rect::from_xywh(0.0, 0.0, target_w as f32, target_h as f32)
+        .ok_or(ExportError::InvalidDimensions)?;
+    pixmap.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
 
-    // Fill pixmap with input image pixels padded to 255 alpha
-    {
-        let output_data = pixmap.data_mut();
-        if options.long_edge.is_some() {
-            let mut src_pixmap =
-                tiny_skia::Pixmap::new(width, height).ok_or(ExportError::AllocationFailed)?;
-            let src_data = src_pixmap.data_mut();
+    Ok(pixmap)
+}
 
-            let mut src_idx = 0;
-            let mut dst_idx = 0;
-            while src_idx < rgb_pixels.len() {
-                src_data[dst_idx] = rgb_pixels[src_idx];
-                src_data[dst_idx + 1] = rgb_pixels[src_idx + 1];
-                src_data[dst_idx + 2] = rgb_pixels[src_idx + 2];
-                src_data[dst_idx + 3] = 255;
-                src_idx += 3;
-                dst_idx += 4;
-            }
+/// D1c — Compute the shadow gradient ramp for a given image height and band fraction.
+///
+/// Returns a `Vec<u8>` of length `round(band_frac × H)`,
+/// where `ramp[0] == 0` (transparent, top of band) and
+/// `ramp[band_h − 1] == 255` (fully opaque, bottom row).
+/// Returns an empty vec for tiny images where the band would be zero pixels.
+///
+/// The pinned denominator `(band_h − 1).max(1)` keeps the formula well-defined
+/// for one-pixel bands. Use [`SHADOW_BAND_FRAC`] for the standard 30 % band.
+pub fn shadow_alpha_ramp(image_h: u32, band_frac: f32) -> Vec<u8> {
+    // Guard: invalid band_frac produces no shadow rather than OOM or out-of-bounds access.
+    if !band_frac.is_finite() || band_frac <= 0.0 || band_frac > 1.0 {
+        return vec![];
+    }
+    let band_h = (image_h as f32 * band_frac).round() as usize;
+    if band_h == 0 {
+        return vec![];
+    }
+    let denom = (band_h - 1).max(1) as f32;
+    (0..band_h)
+        .map(|i| ((i as f32 / denom) * 255.0).round() as u8)
+        .collect()
+}
 
-            let mut paint = tiny_skia::Paint::default();
-            let shader = tiny_skia::Pattern::new(
-                src_pixmap.as_ref(),
-                tiny_skia::SpreadMode::Pad,
-                tiny_skia::FilterQuality::Bicubic,
-                1.0f32,
-                tiny_skia::Transform::from_scale(scale, scale),
-            );
-            paint.shader = shader;
-
-            let rect = tiny_skia::Rect::from_xywh(0.0, 0.0, target_w as f32, target_h as f32)
-                .ok_or(ExportError::InvalidDimensions)?;
-            pixmap.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
-        } else {
-            let mut src_idx = 0;
-            let mut dst_idx = 0;
-            while src_idx < rgb_pixels.len() {
-                output_data[dst_idx] = rgb_pixels[src_idx];
-                output_data[dst_idx + 1] = rgb_pixels[src_idx + 1];
-                output_data[dst_idx + 2] = rgb_pixels[src_idx + 2];
-                output_data[dst_idx + 3] = 255;
-                src_idx += 3;
-                dst_idx += 4;
-            }
-        }
+/// Full rendering pipeline: resize → shadow → mark compositing → JPEG bytes.
+///
+/// # Fast-path
+///
+/// If `opts.long_edge` is `None`, `opts.shadow` is `None`, and `opts.marks`
+/// is empty, the input `rgb` buffer is encoded directly via MozJPEG (no pixmap
+/// allocation).
+///
+/// # Compositing order
+///
+/// resize → shadow gradient → mark1 → mark2 (caller controls order via
+/// `opts.marks`).
+///
+/// # Errors
+///
+/// Returns [`ExportError::InvalidDimensions`] / [`ExportError::AllocationFailed`]
+/// for geometry or allocation failures; [`ExportError::Geometry`] if a mark
+/// cannot fit at its required size; [`ExportError::JpegEncode`] on MozJPEG
+/// failure.
+pub fn render_to_jpeg(
+    rgb: &[u8],
+    w: u32,
+    h: u32,
+    opts: &RenderOptions,
+) -> Result<Vec<u8>, ExportError> {
+    // Fast-path: no resize, no shadow, no marks — encode directly.
+    if opts.long_edge.is_none() && opts.shadow.is_none() && opts.marks.is_empty() {
+        return compress_jpeg(rgb, w, h, opts.quality);
     }
 
-    // 4. Draw Watermarks
-    for (pos, watermark) in &options.watermarks {
-        match watermark {
-            Watermark::Text(text) => {
-                draw_text_watermark(&mut pixmap, text, *pos, target_w, target_h)?;
-            }
-            Watermark::Image(badge) => {
-                draw_image_watermark(&mut pixmap, badge, *pos, target_w, target_h)?;
-            }
-        }
+    // Step 1: Resize (or fill at native size).
+    let mut pixmap = resize_rgb(rgb, w, h, opts.long_edge, opts.downscale_only)?;
+    let pw = pixmap.width();
+    let ph = pixmap.height();
+
+    // Step 2: Shadow gradient (D1c).
+    if let Some(ref shadow) = opts.shadow {
+        apply_shadow_gradient(&mut pixmap, shadow.band_frac);
     }
 
-    // 5. Extract and demultiply alpha channels from tiny-skia Pixmap
-    let final_data = pixmap.data();
-    let mut out_buffer = Vec::with_capacity(target_w as usize * target_h as usize * 3);
+    // Step 3: Mark compositing in caller-specified order.
+    for mark in &opts.marks {
+        composite_mark_on_pixmap(&mut pixmap, mark, pw, ph)?;
+    }
+
+    // Step 4: Demultiply + encode.
+    let rgb_out = pixmap_to_rgb(&pixmap);
+    compress_jpeg(&rgb_out, pw, ph, opts.quality)
+}
+
+/// Demultiply a tiny-skia RGBA pixmap into a packed 3-channel RGB buffer.
+///
+/// tiny-skia pre-multiplies alpha; this reverses that for pixels with
+/// partial alpha (a ∈ 1..254). Opaque pixels (a = 255) pass through;
+/// fully transparent (a = 0) become black.
+#[must_use]
+pub fn pixmap_to_rgb(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
+    let data = pixmap.data();
+    let n = pixmap.width() as usize * pixmap.height() as usize;
+    let mut out = Vec::with_capacity(n * 3);
     let mut idx = 0;
-    while idx < final_data.len() {
-        let r = final_data[idx];
-        let g = final_data[idx + 1];
-        let b = final_data[idx + 2];
-        let a = final_data[idx + 3];
-
-        if a == 255 {
-            out_buffer.push(r);
-            out_buffer.push(g);
-            out_buffer.push(b);
-        } else if a == 0 {
-            out_buffer.push(0);
-            out_buffer.push(0);
-            out_buffer.push(0);
-        } else {
-            out_buffer.push(((r as f32 / a as f32) * 255.0).round().clamp(0.0, 255.0) as u8);
-            out_buffer.push(((g as f32 / a as f32) * 255.0).round().clamp(0.0, 255.0) as u8);
-            out_buffer.push(((b as f32 / a as f32) * 255.0).round().clamp(0.0, 255.0) as u8);
+    while idx < data.len() {
+        let r = data[idx];
+        let g = data[idx + 1];
+        let b = data[idx + 2];
+        let a = data[idx + 3];
+        match a {
+            255 => {
+                out.push(r);
+                out.push(g);
+                out.push(b);
+            }
+            0 => {
+                out.push(0);
+                out.push(0);
+                out.push(0);
+            }
+            _ => {
+                let af = a as f32;
+                out.push(((r as f32 / af) * 255.0).round().clamp(0.0, 255.0) as u8);
+                out.push(((g as f32 / af) * 255.0).round().clamp(0.0, 255.0) as u8);
+                out.push(((b as f32 / af) * 255.0).round().clamp(0.0, 255.0) as u8);
+            }
         }
         idx += 4;
     }
-
-    // 6. MozJPEG Optimized Compression
-    compress_jpeg(
-        &out_buffer,
-        target_w,
-        target_h,
-        options.quality,
-        &options.output_path,
-    )?;
-
-    Ok(())
+    out
 }
 
-fn calculate_watermark_position(
+/// Compress an RGB buffer to JPEG bytes using MozJPEG inside a panic-safe FFI boundary.
+///
+/// # Errors
+///
+/// Returns [`ExportError::JpegEncode`] if MozJPEG fails or panics.
+pub fn compress_jpeg(
+    rgb_pixels: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+) -> Result<Vec<u8>, ExportError> {
+    // MozJPEG FFI bindings may panic; catch_unwind contains any panic.
+    let res = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<Vec<u8>, String> {
+        let mut comp = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
+        comp.set_size(width as usize, height as usize);
+        comp.set_quality(quality as f32);
+        comp.set_progressive_mode();
+        let mut writer = comp
+            .start_compress(Vec::new())
+            .map_err(|e| format!("start_compress: {e}"))?;
+        writer
+            .write_scanlines(rgb_pixels)
+            .map_err(|e| format!("write_scanlines: {e}"))?;
+        writer.finish().map_err(|e| format!("finish: {e}"))
+    }));
+    match res {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(msg)) => Err(ExportError::JpegEncode(msg)),
+        Err(_) => Err(ExportError::JpegEncode("MozJPEG thread panic".to_string())),
+    }
+}
+
+/// Composite an image badge watermark onto `pixmap` at `pos`.
+///
+/// The badge is scaled so its long edge equals `scale_pct`% of the image
+/// long edge; placement is computed via [`calculate_watermark_position`] with
+/// equal `margin_x == margin_y == long_edge × 0.015`.
+///
+/// # Errors
+///
+/// Returns [`ExportError::WatermarkOmitted`] if the badge cannot fit.
+pub fn draw_image_watermark(
+    pixmap: &mut tiny_skia::Pixmap,
+    badge: &PreloadedBadge,
+    pos: WatermarkPosition,
+    target_w: u32,
+    target_h: u32,
+) -> Result<(), ExportError> {
+    let badge_pixmap = &badge.pixmap;
+    let long_edge_val = target_w.max(target_h) as f32;
+    let scale_pct = badge.scale.map(|s| s.value()).unwrap_or(5.0);
+    let target_badge_long = (long_edge_val * (scale_pct / 100.0)).max(1.0);
+
+    let bw = badge_pixmap.width() as f32;
+    let bh = badge_pixmap.height() as f32;
+    let badge_long = bw.max(bh);
+    let sf = target_badge_long / badge_long;
+
+    let final_bw = (bw * sf).max(1.0);
+    let final_bh = (bh * sf).max(1.0);
+
+    let padding = (long_edge_val * 0.015).round().max(8.0);
+    let (x_pos, y_pos) = calculate_watermark_position(
+        pos,
+        final_bw,
+        final_bh,
+        target_w as f32,
+        target_h as f32,
+        padding,
+        padding,
+    );
+
+    if x_pos < 0.0
+        || y_pos < 0.0
+        || (x_pos + final_bw) > target_w as f32
+        || (y_pos + final_bh) > target_h as f32
+    {
+        tracing::warn!("image watermark does not fit on image, omitting");
+        return Err(ExportError::WatermarkOmitted);
+    }
+
+    blit_badge_at(pixmap, badge_pixmap, x_pos, y_pos, sf)
+}
+
+/// Compute the top-left origin of a mark given its size, target image size, and per-axis margins.
+///
+/// This is the 2-axis version (D1d): `margin_x` and `margin_y` may differ.
+/// The export subcommand passes `margin_x == margin_y == (long_edge × 0.015).max(8.0)`.
+#[must_use]
+pub fn calculate_watermark_position(
     pos: WatermarkPosition,
     width: f32,
     height: f32,
     target_w: f32,
     target_h: f32,
-    padding: f32,
+    margin_x: f32,
+    margin_y: f32,
 ) -> (f32, f32) {
     match pos {
-        WatermarkPosition::BottomLeft => (padding, target_h - padding - height),
-        WatermarkPosition::TopRight => (target_w - padding - width, padding),
-        WatermarkPosition::TopLeft => (padding, padding),
-        WatermarkPosition::BottomRight => (target_w - padding - width, target_h - padding - height),
+        WatermarkPosition::BottomLeft => (margin_x, target_h - margin_y - height),
+        WatermarkPosition::TopRight => (target_w - margin_x - width, margin_y),
+        WatermarkPosition::TopLeft => (margin_x, margin_y),
+        WatermarkPosition::BottomRight => {
+            (target_w - margin_x - width, target_h - margin_y - height)
+        }
         WatermarkPosition::Center => ((target_w - width) / 2.0, (target_h - height) / 2.0),
     }
 }
+
+// ===== Private rendering helpers =====
+
+/// Fill a tiny-skia RGBA data buffer from a packed RGB slice.
+fn rgba_fill(dst: &mut [u8], rgb: &[u8]) {
+    let mut src = 0;
+    let mut d = 0;
+    while src < rgb.len() {
+        dst[d] = rgb[src];
+        dst[d + 1] = rgb[src + 1];
+        dst[d + 2] = rgb[src + 2];
+        dst[d + 3] = 255;
+        src += 3;
+        d += 4;
+    }
+}
+
+/// Apply the shadow gradient to the bottom band of `pixmap` in-place.
+///
+/// The shadow band covers the bottom `round(H × band_frac)` rows.
+/// Each row is darkened by `out = base × (1 − t)` where `t = ramp[row] / 255`.
+/// The alpha channel (byte 3) is not modified.
+fn apply_shadow_gradient(pixmap: &mut tiny_skia::Pixmap, band_frac: f32) {
+    let ph = pixmap.height() as usize;
+    let pw = pixmap.width() as usize;
+    let ramp = shadow_alpha_ramp(pixmap.height(), band_frac);
+    if ramp.is_empty() {
+        return;
+    }
+    let band_start = ph - ramp.len();
+    let data = pixmap.data_mut();
+    for (band_row, &alpha) in ramp.iter().enumerate() {
+        let row = band_start + band_row;
+        let t = alpha as f32 / 255.0;
+        let factor = 1.0 - t;
+        for col in 0..pw {
+            let base = (row * pw + col) * 4;
+            data[base] = (data[base] as f32 * factor).round() as u8;
+            data[base + 1] = (data[base + 1] as f32 * factor).round() as u8;
+            data[base + 2] = (data[base + 2] as f32 * factor).round() as u8;
+            // alpha channel (base + 3) stays 255.
+        }
+    }
+}
+
+/// Composite one [`MarkSpec`] onto `pixmap` using the new slot-based geometry.
+///
+/// For `BadgeSizeBasis::Height` marks [`MarkPlacement::fit_equal_margin`] is
+/// used: the margin pixel value is derived from `min(pw, ph) × mark.margin_x`
+/// so that the mark has the same physical distance from BOTH its adjacent edges
+/// (right + top for Mark1; left + bottom for Mark2), regardless of aspect ratio.
+///
+/// If the computed mark height is below [`MARK_MIN_READABLE_PX`], a
+/// `tracing::warn!` is emitted — the mark still renders, but may be illegible.
+fn composite_mark_on_pixmap(
+    pixmap: &mut tiny_skia::Pixmap,
+    mark: &MarkSpec,
+    pw: u32,
+    ph: u32,
+) -> Result<(), ExportError> {
+    let bw = mark.badge.width() as f32;
+    let bh = mark.badge.height() as f32;
+
+    match &mark.basis {
+        BadgeSizeBasis::Height(frac) => {
+            // Equal-margin compositing: margin_px is based on the SHORT edge so
+            // the mark is equidistant from both its adjacent borders on any
+            // aspect ratio (fixes asymmetric placement on 16:9 / 3:2 images).
+            let margin_px = (pw.min(ph) as f32 * mark.margin_x).round() as u32;
+
+            let placement = MarkPlacement::fit_equal_margin(
+                (pw, ph),
+                (mark.badge.width(), mark.badge.height()),
+                *frac,
+                margin_px,
+                mark.slot,
+            )
+            .map_err(ExportError::Geometry)?;
+
+            // Readability guard: warn after placement so we use the resolved height.
+            if placement.h() < MARK_MIN_READABLE_PX {
+                tracing::warn!(
+                    slot = ?mark.slot,
+                    mark_h_px = placement.h(),
+                    min_readable_px = MARK_MIN_READABLE_PX,
+                    image_h_px = ph,
+                    "Mark rendered at only {}px height \
+                     (< {MARK_MIN_READABLE_PX}px minimum readable). \
+                     Consider a larger output resolution. The mark will still be \
+                     composited — check the output and decide.",
+                    placement.h(),
+                );
+            }
+
+            let sf = placement.h() as f32 / bh.max(1.0);
+            blit_badge_at(
+                pixmap,
+                &mark.badge,
+                placement.x() as f32,
+                placement.y() as f32,
+                sf,
+            )
+        }
+        BadgeSizeBasis::LongEdge(scale_pct) => {
+            // TD-028: LongEdge path duplicates MarkPlacement slot-position logic.
+            // Legacy path used by export_photo re-point.
+            // Margins are fractions of post-resize dimensions.
+            let long_e = pw.max(ph) as f32;
+            let target_long = (long_e * (scale_pct.value() / 100.0)).max(1.0);
+            let badge_long = bw.max(bh);
+            let sf = target_long / badge_long.max(1.0);
+            let mark_w = ((bw * sf).round() as u32).max(1);
+            let mark_h = ((bh * sf).round() as u32).max(1);
+
+            let mx = (pw as f32 * mark.margin_x).round() as u32;
+            let my = (ph as f32 * mark.margin_y).round() as u32;
+            let (x, y) = match mark.slot {
+                MarkSlot::Mark1 => {
+                    let x = pw
+                        .checked_sub(mx)
+                        .and_then(|v| v.checked_sub(mark_w))
+                        .ok_or(ExportError::Geometry(GeometryError::MarkDoesNotFit {
+                            which: MarkSlot::Mark1,
+                            mark_dims: (mark_w, mark_h),
+                            target_dims: (pw, ph),
+                        }))?;
+                    (x, my)
+                }
+                MarkSlot::Mark2 => {
+                    let y = ph
+                        .checked_sub(my)
+                        .and_then(|v| v.checked_sub(mark_h))
+                        .ok_or(ExportError::Geometry(GeometryError::MarkDoesNotFit {
+                            which: MarkSlot::Mark2,
+                            mark_dims: (mark_w, mark_h),
+                            target_dims: (pw, ph),
+                        }))?;
+                    (mx, y)
+                }
+            };
+
+            if x.checked_add(mark_w).is_none_or(|e| e > pw)
+                || y.checked_add(mark_h).is_none_or(|e| e > ph)
+            {
+                let which = mark.slot;
+                return Err(ExportError::Geometry(GeometryError::MarkDoesNotFit {
+                    which,
+                    mark_dims: (mark_w, mark_h),
+                    target_dims: (pw, ph),
+                }));
+            }
+
+            blit_badge_at(pixmap, &mark.badge, x as f32, y as f32, sf)
+        }
+    }
+}
+
+/// Alpha-blend a badge (scaled by `scale_factor`) into `pixmap` at pixel `(x, y)`.
+///
+/// Uses `image::imageops::FilterType::Lanczos3` for the downscale step so that
+/// extreme downscales (e.g. 15-20× for high-resolution mark PNGs at small output
+/// sizes) produce sharp, properly anti-aliased results. tiny-skia's Pattern bicubic
+/// is an interpolation filter that looks blurry at these ratios because it only
+/// samples nearby source pixels instead of averaging over the full coverage area.
+fn blit_badge_at(
+    pixmap: &mut tiny_skia::Pixmap,
+    badge: &tiny_skia::Pixmap,
+    x: f32,
+    y: f32,
+    scale_factor: f32,
+) -> Result<(), ExportError> {
+    let final_w = (badge.width() as f32 * scale_factor).max(1.0).round() as u32;
+    let final_h = (badge.height() as f32 * scale_factor).max(1.0).round() as u32;
+
+    // High-quality anti-aliased downscaling in premultiplied space (Lanczos3).
+    // tiny-skia stores pixels as premultiplied RGBA; the image crate's resize
+    // operates on premultiplied data correctly — filtering in straight-alpha space
+    // would produce dark halos at semi-transparent badge edges because the Lanczos3
+    // kernel's negative lobes pull colors toward the zero-RGB transparent pixels.
+    let src_img = image::RgbaImage::from_raw(badge.width(), badge.height(), badge.data().to_vec())
+        .ok_or(ExportError::AllocationFailed)?;
+    let resized = image::imageops::resize(
+        &src_img,
+        final_w,
+        final_h,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let resized_raw = resized.as_raw();
+
+    // Alpha-composite into the destination (premultiplied source over premultiplied dst).
+    // resized_raw is premultiplied: dst = src_premult + dst_premult × (1 − src_alpha/255).
+    let dst_w = pixmap.width() as i32;
+    let dst_h = pixmap.height() as i32;
+    let base_x = x.round() as i32;
+    let base_y = y.round() as i32;
+    let dst = pixmap.data_mut();
+
+    for row in 0..final_h as i32 {
+        for col in 0..final_w as i32 {
+            let dx = base_x + col;
+            let dy = base_y + row;
+            if dx < 0 || dx >= dst_w || dy < 0 || dy >= dst_h {
+                continue;
+            }
+            let si = ((row * final_w as i32 + col) * 4) as usize;
+            let sa = resized_raw[si + 3];
+            if sa == 0 {
+                continue;
+            }
+            let di = ((dy * dst_w + dx) * 4) as usize;
+            let inv_a = 1.0 - sa as f32 / 255.0;
+            dst[di] = (resized_raw[si] as f32 + dst[di] as f32 * inv_a).clamp(0.0, 255.0) as u8;
+            dst[di + 1] =
+                (resized_raw[si + 1] as f32 + dst[di + 1] as f32 * inv_a).clamp(0.0, 255.0) as u8;
+            dst[di + 2] =
+                (resized_raw[si + 2] as f32 + dst[di + 2] as f32 * inv_a).clamp(0.0, 255.0) as u8;
+            // dst[di + 3] stays 255.
+        }
+    }
+
+    Ok(())
+}
+
+// ===== Text watermark helpers (export subcommand only) =====
 
 fn draw_text_watermark(
     pixmap: &mut tiny_skia::Pixmap,
@@ -373,213 +1361,84 @@ fn draw_text_watermark(
     let long_edge_val = target_w.max(target_h) as f32;
     let font_size = (long_edge_val * 0.02).round().max(12.0);
     let padding = (long_edge_val * 0.015).round().max(8.0);
-
     let mut omitted = false;
 
     FONT_SYSTEM.with(|fs_cell| {
         SWASH_CACHE.with(|cache_cell| {
             let mut fs = fs_cell.borrow_mut();
             let mut cache = cache_cell.borrow_mut();
-
-            let mut buffer =
+            let mut buf =
                 cosmic_text::Buffer::new(&mut fs, cosmic_text::Metrics::new(font_size, font_size));
-            buffer.set_size(&mut fs, Some(target_w as f32), None);
-            buffer.set_text(
+            buf.set_size(&mut fs, Some(target_w as f32), None);
+            buf.set_text(
                 &mut fs,
                 text,
                 cosmic_text::Attrs::new().family(cosmic_text::Family::Monospace),
                 cosmic_text::Shaping::Basic,
             );
-            buffer.shape_until_scroll(&mut fs, false);
+            buf.shape_until_scroll(&mut fs, false);
 
-            let mut max_width = 0.0f32;
-            let mut total_height = 0.0f32;
-            let runs: Vec<_> = buffer.layout_runs().collect();
+            let mut max_w = 0.0f32;
+            let mut total_h = 0.0f32;
+            let runs: Vec<_> = buf.layout_runs().collect();
             if !runs.is_empty() {
                 for run in &runs {
-                    if run.line_w > max_width {
-                        max_width = run.line_w;
+                    if run.line_w > max_w {
+                        max_w = run.line_w;
                     }
                 }
-                let last_run = &runs[runs.len() - 1];
-                total_height = last_run.line_y + font_size;
+                let last = &runs[runs.len() - 1];
+                total_h = last.line_y + font_size;
             }
 
             let (x_pos, y_pos) = calculate_watermark_position(
                 pos,
-                max_width,
-                total_height,
+                max_w,
+                total_h,
                 target_w as f32,
                 target_h as f32,
+                padding,
                 padding,
             );
 
             if x_pos < 0.0
                 || y_pos < 0.0
-                || (x_pos + max_width) > target_w as f32
-                || (y_pos + total_height) > target_h as f32
+                || (x_pos + max_w) > target_w as f32
+                || (y_pos + total_h) > target_h as f32
             {
-                tracing::warn!("Watermark text '{}' does not fit on image, omitting.", text);
+                tracing::warn!(text, "text watermark does not fit on image, omitting");
                 omitted = true;
-            } else {
-                let offset = if font_size < 40.0 { 1 } else { 2 };
-                let shadow_color = tiny_skia::Color::from_rgba8(0, 0, 0, 76);
-                let text_color = tiny_skia::Color::from_rgba8(255, 255, 255, 178);
+                return;
+            }
 
+            let offset = if font_size < 40.0 { 1 } else { 2 };
+            let shadow_color = tiny_skia::Color::from_rgba8(0, 0, 0, 76);
+            let text_color = tiny_skia::Color::from_rgba8(255, 255, 255, 178);
+            for (dx, dy) in [
+                (-offset, -offset),
+                (offset, -offset),
+                (-offset, offset),
+                (offset, offset),
+            ] {
                 draw_text_at(
                     pixmap,
-                    &buffer,
+                    &buf,
                     &mut fs,
                     &mut cache,
-                    x_pos - offset as f32,
-                    y_pos - offset as f32,
+                    x_pos + dx as f32,
+                    y_pos + dy as f32,
                     shadow_color,
-                );
-                draw_text_at(
-                    pixmap,
-                    &buffer,
-                    &mut fs,
-                    &mut cache,
-                    x_pos + offset as f32,
-                    y_pos - offset as f32,
-                    shadow_color,
-                );
-                draw_text_at(
-                    pixmap,
-                    &buffer,
-                    &mut fs,
-                    &mut cache,
-                    x_pos - offset as f32,
-                    y_pos + offset as f32,
-                    shadow_color,
-                );
-                draw_text_at(
-                    pixmap,
-                    &buffer,
-                    &mut fs,
-                    &mut cache,
-                    x_pos + offset as f32,
-                    y_pos + offset as f32,
-                    shadow_color,
-                );
-                draw_text_at(
-                    pixmap, &buffer, &mut fs, &mut cache, x_pos, y_pos, text_color,
                 );
             }
+            draw_text_at(pixmap, &buf, &mut fs, &mut cache, x_pos, y_pos, text_color);
         });
     });
 
     if omitted {
-        return Err(ExportError::WatermarkOmitted);
+        Err(ExportError::WatermarkOmitted)
+    } else {
+        Ok(())
     }
-    Ok(())
-}
-
-fn draw_image_watermark(
-    pixmap: &mut tiny_skia::Pixmap,
-    badge: &PreloadedBadge,
-    pos: WatermarkPosition,
-    target_w: u32,
-    target_h: u32,
-) -> Result<(), ExportError> {
-    let badge_pixmap = &badge.pixmap;
-
-    let long_edge_val = target_w.max(target_h) as f32;
-    let scale_pct = badge.scale.map(|s| s.value()).unwrap_or(5.0);
-
-    let target_badge_long_edge = (long_edge_val * (scale_pct / 100.0)).max(1.0);
-
-    let badge_w = badge_pixmap.width() as f32;
-    let badge_h = badge_pixmap.height() as f32;
-    let badge_long_edge = badge_w.max(badge_h);
-    let scale_factor = target_badge_long_edge / badge_long_edge;
-
-    let final_badge_w = (badge_w * scale_factor).max(1.0);
-    let final_badge_h = (badge_h * scale_factor).max(1.0);
-
-    let padding = (long_edge_val * 0.015).round().max(8.0);
-    let (x_pos, y_pos) = calculate_watermark_position(
-        pos,
-        final_badge_w,
-        final_badge_h,
-        target_w as f32,
-        target_h as f32,
-        padding,
-    );
-
-    if x_pos < 0.0
-        || y_pos < 0.0
-        || (x_pos + final_badge_w) > target_w as f32
-        || (y_pos + final_badge_h) > target_h as f32
-    {
-        tracing::warn!("Watermark image does not fit, omitting.");
-        return Err(ExportError::WatermarkOmitted);
-    }
-
-    let paint = tiny_skia::Paint {
-        shader: tiny_skia::Pattern::new(
-            (**badge_pixmap).as_ref(),
-            tiny_skia::SpreadMode::Pad,
-            tiny_skia::FilterQuality::Bicubic,
-            1.0,
-            tiny_skia::Transform::from_scale(scale_factor, scale_factor),
-        ),
-        ..Default::default()
-    };
-
-    let mut temp_badge =
-        tiny_skia::Pixmap::new(final_badge_w.ceil() as u32, final_badge_h.ceil() as u32)
-            .ok_or_else(|| ExportError::BadgeLoadFailed {
-                path: PathBuf::from("<internal>"),
-                reason: "Allocation failed".to_string(),
-            })?;
-    let temp_rect =
-        tiny_skia::Rect::from_xywh(0.0, 0.0, final_badge_w, final_badge_h).ok_or_else(|| {
-            ExportError::BadgeLoadFailed {
-                path: PathBuf::from("<internal>"),
-                reason: "Invalid badge dimensions".to_string(),
-            }
-        })?;
-    temp_badge.fill_rect(temp_rect, &paint, tiny_skia::Transform::identity(), None);
-
-    let src_data = temp_badge.data();
-    let dst_w = pixmap.width() as i32;
-    let dst_h = pixmap.height() as i32;
-    let dst_data = pixmap.data_mut();
-
-    let base_x = x_pos.round() as i32;
-    let base_y = y_pos.round() as i32;
-
-    for y in 0..(temp_badge.height() as i32) {
-        for x in 0..(temp_badge.width() as i32) {
-            let dx = base_x + x;
-            let dy = base_y + y;
-
-            if dx >= 0 && dx < dst_w && dy >= 0 && dy < dst_h {
-                let src_idx = ((y * temp_badge.width() as i32 + x) * 4) as usize;
-                let dst_idx = ((dy * dst_w + dx) * 4) as usize;
-
-                let src_r = src_data[src_idx] as f32;
-                let src_g = src_data[src_idx + 1] as f32;
-                let src_b = src_data[src_idx + 2] as f32;
-                let src_a = src_data[src_idx + 3] as f32;
-                let alpha = src_a / 255.0;
-
-                let dst_r = dst_data[dst_idx] as f32;
-                let dst_g = dst_data[dst_idx + 1] as f32;
-                let dst_b = dst_data[dst_idx + 2] as f32;
-                // Leave background alpha untouched (usually 255)
-
-                let inv_alpha = 1.0 - alpha;
-
-                dst_data[dst_idx] = (src_r + dst_r * inv_alpha).clamp(0.0, 255.0) as u8;
-                dst_data[dst_idx + 1] = (src_g + dst_g * inv_alpha).clamp(0.0, 255.0) as u8;
-                dst_data[dst_idx + 2] = (src_b + dst_b * inv_alpha).clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn draw_text_at(
@@ -593,25 +1452,17 @@ fn draw_text_at(
 ) {
     for run in buffer.layout_runs() {
         for glyph in run.glyphs {
-            let physical_glyph = glyph.physical((x_pos, y_pos), 1.0);
-            if let Some(image) = cache.get_image(fs, physical_glyph.cache_key) {
-                let x_glyph = physical_glyph.x + image.placement.left;
-                // Since Swash Y is Y-up, and tiny-skia is Y-down:
-                let y_glyph = physical_glyph.y - image.placement.top;
-
-                for gy in 0..image.placement.height {
-                    for gx in 0..image.placement.width {
-                        let mask_alpha = image.data[(gy * image.placement.width + gx) as usize];
-                        if mask_alpha == 0 {
+            let physical = glyph.physical((x_pos, y_pos), 1.0);
+            if let Some(image) = cache.get_image(fs, physical.cache_key) {
+                let gx = physical.x + image.placement.left;
+                let gy = physical.y - image.placement.top;
+                for py in 0..image.placement.height {
+                    for px in 0..image.placement.width {
+                        let mask = image.data[(py * image.placement.width + px) as usize];
+                        if mask == 0 {
                             continue;
                         }
-                        blend_pixel(
-                            pixmap,
-                            x_glyph + gx as i32,
-                            y_glyph + gy as i32,
-                            color,
-                            mask_alpha,
-                        );
+                        blend_pixel(pixmap, gx + px as i32, gy + py as i32, color, mask);
                     }
                 }
             }
@@ -629,80 +1480,177 @@ fn blend_pixel(
     if x < 0 || x >= pixmap.width() as i32 || y < 0 || y >= pixmap.height() as i32 {
         return;
     }
-    let idx = ((y as usize * pixmap.width() as usize) + x as usize) * 4;
+    let idx = (y as usize * pixmap.width() as usize + x as usize) * 4;
     let data = pixmap.data_mut();
-
     let f = (mask_alpha as f32 / 255.0) * color.alpha();
     if f <= 0.0 {
         return;
     }
-
     let src_r = color.red() * f * 255.0;
     let src_g = color.green() * f * 255.0;
     let src_b = color.blue() * f * 255.0;
     let src_a = f * 255.0;
-
-    let dst_r = data[idx] as f32;
-    let dst_g = data[idx + 1] as f32;
-    let dst_b = data[idx + 2] as f32;
-    let dst_a = data[idx + 3] as f32;
-
-    let inv_src_a = 1.0 - f;
-
-    let out_r = (src_r + dst_r * inv_src_a).round().clamp(0.0, 255.0) as u8;
-    let out_g = (src_g + dst_g * inv_src_a).round().clamp(0.0, 255.0) as u8;
-    let out_b = (src_b + dst_b * inv_src_a).round().clamp(0.0, 255.0) as u8;
-    let out_a = (src_a + dst_a * inv_src_a).round().clamp(0.0, 255.0) as u8;
-
-    data[idx] = out_r;
-    data[idx + 1] = out_g;
-    data[idx + 2] = out_b;
-    data[idx + 3] = out_a;
+    let inv = 1.0 - f;
+    data[idx] = (src_r + data[idx] as f32 * inv).round().clamp(0.0, 255.0) as u8;
+    data[idx + 1] = (src_g + data[idx + 1] as f32 * inv)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    data[idx + 2] = (src_b + data[idx + 2] as f32 * inv)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    data[idx + 3] = (src_a + data[idx + 3] as f32 * inv)
+        .round()
+        .clamp(0.0, 255.0) as u8;
 }
 
-/// Compress RGB buffer using MozJPEG inside a panic-safe FFI boundary.
-fn compress_jpeg(
-    rgb_pixels: &[u8],
-    width: u32,
-    height: u32,
-    quality: u8,
-    output_path: &Path,
+// ===== export_photo (re-pointed to use shared primitives) =====
+
+/// Core function to export a single photo.
+///
+/// Decodes the RAW file via LibRaw (16-bit linear), applies the filmic ISP
+/// tone-mapping LUT, then delegates to the shared rendering pipeline.
+///
+/// Image badge marks at `TopRight`/`BottomLeft` are translated to [`MarkSpec`]
+/// and processed via [`render_to_jpeg`]; text watermarks and badges at other
+/// positions use the legacy pixmap path.
+#[tracing::instrument(skip(options))]
+pub fn export_photo(
+    options: &ExportOptions,
+    source_path: &Path,
+    _metadata: &ExportMetadata,
 ) -> Result<(), ExportError> {
-    // SAFETY: We catch any panic from MozJPEG FFI bindings inside AssertUnwindSafe.
-    let res = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<Vec<u8>, String> {
-        let mut comp = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
-        comp.set_size(width as usize, height as usize);
-        comp.set_quality(quality as f32);
-        comp.set_progressive_mode();
+    // 1. Decode RAW to 16-bit linear.
+    let processed = photohelper_raw::decode::decode_image(
+        source_path,
+        photohelper_raw::decode::ProcessOptions::Linear16,
+    )
+    .map_err(|e| ExportError::RawDecode(e.to_string()))?;
 
-        let mut comp_writer = comp
-            .start_compress(Vec::new())
-            .map_err(|e| format!("Failed to start compress: {e}"))?;
-
-        comp_writer
-            .write_scanlines(rgb_pixels)
-            .map_err(|e| format!("Failed to write scanlines: {e}"))?;
-
-        let jpeg_bytes = comp_writer
-            .finish()
-            .map_err(|e| format!("Failed to finish compress: {e}"))?;
-
-        Ok(jpeg_bytes)
-    }));
-
-    match res {
-        Ok(Ok(bytes)) => {
-            std::fs::write(output_path, bytes)?;
-            Ok(())
+    let linear_img = match processed {
+        photohelper_raw::decode::ProcessedImage::Linear16(img) => img,
+        _ => {
+            return Err(ExportError::RawDecode(
+                "expected 16-bit linear image".to_string(),
+            ));
         }
-        Ok(Err(err_msg)) => Err(ExportError::JpegEncode(err_msg)),
-        Err(_) => Err(ExportError::JpegEncode("MozJPEG thread panic".to_string())),
+    };
+
+    let width = linear_img.width.get();
+    let height = linear_img.height.get();
+    let channels = linear_img.channels as usize;
+
+    if width == 0 || height == 0 {
+        return Err(ExportError::InvalidDimensions);
     }
+    if channels < 3 {
+        return Err(ExportError::RawDecode(
+            "image has fewer than 3 channels".to_string(),
+        ));
+    }
+
+    // 2. Filmic ISP tone mapping (LUT-accelerated).
+    let lut = ToneMappingLut::new(options.tone_mapping.exposure_ev);
+    let mut rgb_pixels = Vec::with_capacity((width * height * 3) as usize);
+    for pixel in linear_img.data.chunks_exact(channels) {
+        rgb_pixels.push(lut.apply(pixel[0]));
+        rgb_pixels.push(lut.apply(pixel[1]));
+        rgb_pixels.push(lut.apply(pixel[2]));
+    }
+
+    // 3. Separate legacy watermarks from the new MarkSpec system.
+    let has_text = options
+        .watermarks
+        .values()
+        .any(|w| matches!(w, Watermark::Text(_)));
+
+    // Positions not supported by MarkSlot (TopLeft, BottomRight, Center).
+    let has_unsupported_pos = options.watermarks.iter().any(|(pos, w)| {
+        matches!(w, Watermark::Image(_))
+            && !matches!(
+                pos,
+                WatermarkPosition::TopRight | WatermarkPosition::BottomLeft
+            )
+    });
+
+    if has_text || has_unsupported_pos {
+        // Legacy path: resize_rgb → draw_text_watermark / draw_image_watermark → compress.
+        let tmp_path = &options.output_path;
+        if options.long_edge.is_none() && options.watermarks.is_empty() {
+            let bytes = compress_jpeg(&rgb_pixels, width, height, options.quality)?;
+            std::fs::write(tmp_path, bytes)?;
+            return Ok(());
+        }
+        let mut pixmap = resize_rgb(&rgb_pixels, width, height, options.long_edge, false)?;
+        let pw = pixmap.width();
+        let ph = pixmap.height();
+        for (pos, wm) in &options.watermarks {
+            match wm {
+                Watermark::Text(text) => {
+                    draw_text_watermark(&mut pixmap, text, *pos, pw, ph)?;
+                }
+                Watermark::Image(badge) => {
+                    draw_image_watermark(&mut pixmap, badge, *pos, pw, ph)?;
+                }
+            }
+        }
+        let rgb_out = pixmap_to_rgb(&pixmap);
+        let bytes = compress_jpeg(&rgb_out, pw, ph, options.quality)?;
+        std::fs::write(tmp_path, bytes)?;
+        return Ok(());
+    }
+
+    // 4. New path: translate image badges at TopRight/BottomLeft to MarkSpec.
+    // margin_x/margin_y are fractions (0..1); 0.015 ≈ export's (long_edge × 0.015) / long_edge.
+    const EXPORT_MARK_MARGIN_FRAC: f32 = 0.015;
+    let marks: Vec<MarkSpec> = options
+        .watermarks
+        .iter()
+        .filter_map(|(pos, wm)| {
+            if let Watermark::Image(badge) = wm {
+                let slot = match pos {
+                    WatermarkPosition::TopRight => MarkSlot::Mark1,
+                    WatermarkPosition::BottomLeft => MarkSlot::Mark2,
+                    _ => return None,
+                };
+                Some(MarkSpec {
+                    badge: badge.pixmap.clone(),
+                    basis: BadgeSizeBasis::LongEdge(badge.scale.unwrap_or(Scale::new(5.0))),
+                    slot,
+                    margin_x: EXPORT_MARK_MARGIN_FRAC,
+                    margin_y: EXPORT_MARK_MARGIN_FRAC,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Combine legacy badge marks (LongEdge-based) with new height-based marks
+    // so the export+watermark pipeline can run in a single filmic-ISP pass.
+    let mut combined_marks = marks;
+    combined_marks.extend(options.render_marks.iter().cloned());
+
+    let render_opts = RenderOptions {
+        long_edge: options.long_edge,
+        downscale_only: false,
+        quality: options.quality,
+        shadow: options.render_shadow,
+        marks: combined_marks,
+    };
+
+    let jpeg_bytes = render_to_jpeg(&rgb_pixels, width, height, &render_opts)?;
+    std::fs::write(&options.output_path, jpeg_bytes)?;
+
+    Ok(())
 }
+
+// ===== Tests =====
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- Existing regression tests (kept with updated call sites) -----
 
     #[test]
     fn test_rating_clamping() {
@@ -718,66 +1666,39 @@ mod tests {
         assert_eq!(NimaScore::new(6.5).unwrap().value(), 6.5);
     }
 
+    /// RT-C — `pixmap_to_rgb` demultiplication regression (hand-computed expected values).
     #[test]
     fn test_pixel_demultiplication() {
         let mut pixmap = tiny_skia::Pixmap::new(2, 2).unwrap();
         {
             let data = pixmap.data_mut();
-            // Pixel 0: Opaque Red [255, 0, 0, 255]
+            // Pixel 0: opaque red [255, 0, 0, 255]
             data[0] = 255;
             data[1] = 0;
             data[2] = 0;
             data[3] = 255;
-            // Pixel 1: Half-transparent Green [0, 100, 0, 200]
+            // Pixel 1: half-transparent green [0, 100, 0, 200]
             data[4] = 0;
             data[5] = 100;
             data[6] = 0;
             data[7] = 200;
-            // Pixel 2: Fully transparent [0, 0, 0, 0]
+            // Pixel 2: fully transparent [0, 0, 0, 0]
             data[8] = 0;
             data[9] = 0;
             data[10] = 0;
             data[11] = 0;
-            // Pixel 3: Fully opaque White [255, 255, 255, 255]
+            // Pixel 3: opaque white [255, 255, 255, 255]
             data[12] = 255;
             data[13] = 255;
             data[14] = 255;
             data[15] = 255;
         }
-
-        let final_data = pixmap.data();
-        let mut rgb_buffer = Vec::new();
-        let mut idx = 0;
-        while idx < final_data.len() {
-            let r = final_data[idx];
-            let g = final_data[idx + 1];
-            let b = final_data[idx + 2];
-            let a = final_data[idx + 3];
-
-            if a == 255 {
-                rgb_buffer.push(r);
-                rgb_buffer.push(g);
-                rgb_buffer.push(b);
-            } else if a == 0 {
-                rgb_buffer.push(0);
-                rgb_buffer.push(0);
-                rgb_buffer.push(0);
-            } else {
-                let r_demult = ((r as f32 / a as f32) * 255.0).round().clamp(0.0, 255.0) as u8;
-                let g_demult = ((g as f32 / a as f32) * 255.0).round().clamp(0.0, 255.0) as u8;
-                let b_demult = ((b as f32 / a as f32) * 255.0).round().clamp(0.0, 255.0) as u8;
-                rgb_buffer.push(r_demult);
-                rgb_buffer.push(g_demult);
-                rgb_buffer.push(b_demult);
-            }
-            idx += 4;
-        }
-
-        assert_eq!(rgb_buffer[0..3], [255, 0, 0]);
-        // 100 / 200 * 255 = 127.5 -> 128
-        assert_eq!(rgb_buffer[3..6], [0, 128, 0]);
-        assert_eq!(rgb_buffer[6..9], [0, 0, 0]);
-        assert_eq!(rgb_buffer[9..12], [255, 255, 255]);
+        let rgb = pixmap_to_rgb(&pixmap);
+        assert_eq!(rgb[0..3], [255, 0, 0]);
+        // 100 / 200 * 255 = 127.5 → 128
+        assert_eq!(rgb[3..6], [0, 128, 0]);
+        assert_eq!(rgb[6..9], [0, 0, 0]);
+        assert_eq!(rgb[9..12], [255, 255, 255]);
     }
 
     #[test]
@@ -788,11 +1709,19 @@ mod tests {
         assert_eq!(Scale::new(5.0).value(), 5.0);
     }
 
+    /// RT-C — `test_watermark_position_calculation` migrated to 2-axis signature.
     #[test]
     fn test_watermark_position_calculation() {
-        // Test 1x1 image target zero-clamping bounds
-        let (x, y) =
-            calculate_watermark_position(WatermarkPosition::Center, 10.0, 10.0, 1.0, 1.0, 0.0);
+        // 1×1 target with zero margins: centre of a 10×10 watermark sits at −4.5.
+        let (x, y) = calculate_watermark_position(
+            WatermarkPosition::Center,
+            10.0,
+            10.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0, // margin_x, margin_y
+        );
         assert_eq!(x, -4.5);
         assert_eq!(y, -4.5);
     }
@@ -800,54 +1729,757 @@ mod tests {
     #[test]
     fn test_tone_mapping_lut() {
         let lut = ToneMappingLut::new(0.0);
-        // Test black
         assert_eq!(lut.apply(0), 0);
-        // Test white (may not reach exactly 255 due to filmic curve shoulder)
         assert!(lut.apply(65535) > 230);
-
-        let lut_plus_1 = ToneMappingLut::new(1.0); // +1 EV
-        // Mid-tone should be brighter
-        assert!(lut_plus_1.apply(10000) > lut.apply(10000));
+        let lut_plus = ToneMappingLut::new(1.0);
+        assert!(lut_plus.apply(10000) > lut.apply(10000));
     }
 
+    // ----- D1b — Geometry tests -----
+
+    /// Geometry: Mark1 (top-right) in a landscape image.
     #[test]
-    fn test_aspect_ratio_calculations() {
-        // Landscape input: 100x50, long edge limit 20 -> expected 20x10
-        let w_f = 100.0f32;
-        let h_f = 50.0f32;
-        let limit = 20.0f32;
-        let scale = limit / w_f.max(h_f);
-        let tw = (w_f * scale).round() as u32;
-        let th = (h_f * scale).round() as u32;
-        assert_eq!(tw.max(1), 20);
-        assert_eq!(th.max(1), 10);
+    fn test_mark_placement_mark1_landscape() {
+        // 1000×600 image, badge 200×100 (landscape logo)
+        // mark_h = round(600 * 0.14) = round(84) = 84
+        // scale = 84 / 100 = 0.84
+        // mark_w = round(200 * 0.84) = round(168) = 168
+        // margin_x = round(1000 * 0.046) = round(46) = 46
+        // margin_y = round(600 * 0.046) = round(27.6) = 28
+        // x = 1000 - 46 - 168 = 786
+        // y = 28
+        let p = MarkPlacement::fit(
+            (1000, 600),
+            (200, 100),
+            MARK1_HEIGHT_FRAC,
+            MARK_MARGIN_FRAC,
+            MARK_MARGIN_FRAC,
+            MarkSlot::Mark1,
+        )
+        .unwrap();
+        assert_eq!(p.h(), 84, "mark_h");
+        assert_eq!(p.w(), 168, "mark_w");
+        assert_eq!(p.x(), 786, "x");
+        assert_eq!(p.y(), 28, "y");
+    }
 
-        // Portrait input: 50x100, long edge limit 20 -> expected 10x20
-        let w_f = 50.0f32;
-        let h_f = 100.0f32;
-        let scale = limit / w_f.max(h_f);
-        let tw = (w_f * scale).round() as u32;
-        let th = (h_f * scale).round() as u32;
-        assert_eq!(tw.max(1), 10);
-        assert_eq!(th.max(1), 20);
+    /// Geometry: Mark2 (bottom-left) in a landscape image.
+    #[test]
+    fn test_mark_placement_mark2_landscape() {
+        // 1000×600 image, badge 200×100
+        // mark_h = round(600 * 0.13) = round(78) = 78
+        // scale = 78 / 100 = 0.78
+        // mark_w = round(200 * 0.78) = round(156) = 156
+        // margin_x = round(1000 * 0.046) = 46
+        // margin_y = round(600 * 0.046) = 28
+        // x = 46
+        // y = 600 - 28 - 78 = 494
+        let p = MarkPlacement::fit(
+            (1000, 600),
+            (200, 100),
+            MARK2_HEIGHT_FRAC,
+            MARK_MARGIN_FRAC,
+            MARK_MARGIN_FRAC,
+            MarkSlot::Mark2,
+        )
+        .unwrap();
+        assert_eq!(p.h(), 78);
+        assert_eq!(p.w(), 156);
+        assert_eq!(p.x(), 46);
+        assert_eq!(p.y(), 494);
+    }
 
-        // Square input: 100x100, limit 20 -> expected 20x20
-        let w_f = 100.0f32;
-        let h_f = 100.0f32;
-        let scale = limit / w_f.max(h_f);
-        let tw = (w_f * scale).round() as u32;
-        let th = (h_f * scale).round() as u32;
-        assert_eq!(tw.max(1), 20);
-        assert_eq!(th.max(1), 20);
+    /// Geometry: Mark2 sits inside the shadow band.
+    #[test]
+    fn test_mark2_inside_shadow_band() {
+        let (tw, th): (u32, u32) = (1000, 600);
+        let p = MarkPlacement::fit(
+            (tw, th),
+            (200, 100),
+            MARK2_HEIGHT_FRAC,
+            MARK_MARGIN_FRAC,
+            MARK_MARGIN_FRAC,
+            MarkSlot::Mark2,
+        )
+        .unwrap();
+        let band_h = (th as f32 * SHADOW_BAND_FRAC).round() as u32;
+        assert!(
+            p.y() >= th - band_h,
+            "mark2 y={} should be within shadow band starting at {}",
+            p.y(),
+            th - band_h
+        );
+    }
 
-        // Extremely thin panoramic strip: 1000x2, limit 16 -> expected 16x1
-        let w_f = 1000.0f32;
-        let h_f = 2.0f32;
-        let limit = 16.0f32;
-        let scale = limit / w_f.max(h_f);
-        let tw = (w_f * scale).round() as u32;
-        let th = (h_f * scale).round() as u32;
-        assert_eq!(tw.max(1), 16);
-        assert_eq!(th.max(1), 1);
+    /// Geometry: wide-logo badge cannot fit at required height → MarkDoesNotFit.
+    #[test]
+    fn test_mark_placement_doesnt_fit() {
+        // 50×50 image, badge 500×20 (very wide logo):
+        // mark_h = round(50 * 0.50) = 25; scale = 25/20 = 1.25
+        // mark_w = round(500 * 1.25) = 625 → far exceeds image width 50
+        // → checked_sub underflows → MarkDoesNotFit
+        let result = MarkPlacement::fit(
+            (50, 50),
+            (500, 20),
+            0.50,
+            MARK_MARGIN_FRAC,
+            MARK_MARGIN_FRAC,
+            MarkSlot::Mark1,
+        );
+        assert!(
+            result.is_err(),
+            "Expected MarkDoesNotFit for oversized wide badge"
+        );
+        let GeometryError::MarkDoesNotFit { which, .. } = result.unwrap_err();
+        assert_eq!(which, MarkSlot::Mark1);
+    }
+
+    // ----- D1c — Shadow gradient tests -----
+
+    /// `shadow_alpha_ramp` endpoints and monotonicity.
+    #[test]
+    fn test_shadow_alpha_ramp_endpoints() {
+        let ramp = shadow_alpha_ramp(100, SHADOW_BAND_FRAC);
+        let band_h = (100.0_f32 * SHADOW_BAND_FRAC).round() as usize;
+        assert_eq!(ramp.len(), band_h, "ramp length == round(0.30 * H)");
+        assert_eq!(ramp[0], 0, "top of band is transparent");
+        assert_eq!(ramp[band_h - 1], 255, "bottom row is fully opaque");
+        // Monotonic non-decreasing.
+        for w in ramp.windows(2) {
+            assert!(w[0] <= w[1], "ramp must be monotonically non-decreasing");
+        }
+    }
+
+    /// Small H with band_h == 0 → empty ramp.
+    #[test]
+    fn test_shadow_alpha_ramp_tiny_image() {
+        // H = 2: band_h = round(0.30 * 2) = 1 → valid ramp of len 1
+        let ramp = shadow_alpha_ramp(2, SHADOW_BAND_FRAC);
+        assert_eq!(ramp.len(), 1);
+        assert_eq!(
+            ramp[0], 0,
+            "single-element band: row 0 of band = ramp[0] = 0 (no darkening)"
+        );
+        // H = 1: band_h = round(0.30 * 1) = 0 → empty
+        let ramp0 = shadow_alpha_ramp(1, SHADOW_BAND_FRAC);
+        assert!(ramp0.is_empty(), "band_h==0 → empty ramp");
+    }
+
+    /// Shadow compositing: mid-band row at t=0.5 → base 200 → output 100.
+    #[test]
+    fn test_shadow_compositing_exact_mid_band() {
+        // H = 10, band_h = round(0.30 * 10) = 3
+        // ramp: [0, 128, 255]  (denom = 2, ramp[1] = round(1/2 * 255) = 128)
+        // t at ramp[1] = 128/255; factor = 1 - 128/255 = 127/255
+        // out = round(200 * 127/255) = round(99.608) = 100
+        let h = 10u32;
+        let w = 4u32;
+        let mut pixmap = tiny_skia::Pixmap::new(w, h).unwrap();
+        // Fill all pixels with RGB (200, 200, 200, 255).
+        {
+            let data = pixmap.data_mut();
+            for chunk in data.chunks_exact_mut(4) {
+                chunk[0] = 200;
+                chunk[1] = 200;
+                chunk[2] = 200;
+                chunk[3] = 255;
+            }
+        }
+        apply_shadow_gradient(&mut pixmap, SHADOW_BAND_FRAC);
+        // Band starts at row 10 - 3 = 7. Mid-band row = 7 + 1 = 8.
+        let data = pixmap.data();
+        let mid_band_row = 8usize;
+        let pixel_base = mid_band_row * w as usize * 4;
+        // Check alpha stays 255.
+        assert_eq!(data[pixel_base + 3], 255, "alpha must remain 255");
+        // Check darkening.
+        let expected = 100u8;
+        assert_eq!(data[pixel_base], expected, "R at mid-band row");
+        assert_eq!(data[pixel_base + 1], expected, "G at mid-band row");
+        assert_eq!(data[pixel_base + 2], expected, "B at mid-band row");
+    }
+
+    /// Row ABOVE the shadow band is bit-identical to the source.
+    #[test]
+    fn test_shadow_row_above_band_unchanged() {
+        let h = 10u32;
+        let w = 2u32;
+        let mut pixmap = tiny_skia::Pixmap::new(w, h).unwrap();
+        {
+            let data = pixmap.data_mut();
+            for chunk in data.chunks_exact_mut(4) {
+                chunk[0] = 123;
+                chunk[1] = 45;
+                chunk[2] = 67;
+                chunk[3] = 255;
+            }
+        }
+        apply_shadow_gradient(&mut pixmap, SHADOW_BAND_FRAC);
+        // band_h = round(0.30 * 10) = 3 → starts at row 7.
+        // Row 6 (one above band) must be unchanged.
+        let data = pixmap.data();
+        let row6 = 6 * w as usize * 4;
+        assert_eq!(data[row6], 123);
+        assert_eq!(data[row6 + 1], 45);
+        assert_eq!(data[row6 + 2], 67);
+        assert_eq!(data[row6 + 3], 255);
+    }
+
+    // ----- D1.0 — resize_rgb downscale-only tests -----
+
+    /// Sub-limit image emitted at native size (no upscale).
+    #[test]
+    fn test_resize_rgb_no_upscale() {
+        // 100×50 image, long_edge limit 800, downscale_only = true → stays 100×50.
+        let rgb = vec![128u8; 100 * 50 * 3];
+        let pixmap = resize_rgb(&rgb, 100, 50, Some(800), true).unwrap();
+        assert_eq!(pixmap.width(), 100);
+        assert_eq!(pixmap.height(), 50);
+    }
+
+    /// Downscale: 1000×500 with long_edge 200 → 200×100.
+    #[test]
+    fn test_resize_rgb_downscale() {
+        let rgb = vec![0u8; 1000 * 500 * 3];
+        let pixmap = resize_rgb(&rgb, 1000, 500, Some(200), false).unwrap();
+        assert_eq!(pixmap.width(), 200);
+        assert_eq!(pixmap.height(), 100);
+    }
+
+    /// Aspect ratio preserved within ±1 pixel.
+    #[test]
+    fn test_resize_rgb_aspect_ratio_preserved() {
+        let rgb = vec![0u8; 100 * 50 * 3];
+        let pixmap = resize_rgb(&rgb, 100, 50, Some(20), false).unwrap();
+        let w = pixmap.width() as f64;
+        let h = pixmap.height() as f64;
+        let original_ratio = 100.0_f64 / 50.0;
+        let actual_ratio = w / h;
+        assert!(
+            (original_ratio - actual_ratio).abs() < 0.1,
+            "aspect ratio drift"
+        );
+    }
+
+    // ----- D1a — Source kind classification -----
+
+    #[test]
+    fn test_source_kind_classify() {
+        use std::path::Path;
+        assert_eq!(
+            SourceKind::classify(Path::new("a.jpg")),
+            Some(SourceKind::Raster)
+        );
+        assert_eq!(
+            SourceKind::classify(Path::new("a.JPEG")),
+            Some(SourceKind::Raster)
+        );
+        assert_eq!(
+            SourceKind::classify(Path::new("a.png")),
+            Some(SourceKind::Raster)
+        );
+        assert_eq!(
+            SourceKind::classify(Path::new("a.CR3")),
+            Some(SourceKind::Cr3)
+        );
+        assert_eq!(
+            SourceKind::classify(Path::new("a.nef")),
+            Some(SourceKind::UntestedRaw)
+        );
+        assert_eq!(
+            SourceKind::classify(Path::new("a.arw")),
+            Some(SourceKind::UntestedRaw)
+        );
+        assert_eq!(SourceKind::classify(Path::new("a.txt")), None);
+        assert_eq!(SourceKind::classify(Path::new("no_ext")), None);
+    }
+
+    // ----- D1.0 — render_to_jpeg RT-C regression -----
+
+    /// RT-C: `render_to_jpeg` with default options — not upscaled, no shadow,
+    /// decoded output pixel close to input (128 ± JPEG tolerance).
+    #[test]
+    fn test_render_to_jpeg_default_no_shadow_no_marks() {
+        let w = 8u32;
+        let h = 8u32;
+        let rgb = vec![128u8; (w * h * 3) as usize];
+        let opts = RenderOptions::default();
+        let bytes = render_to_jpeg(&rgb, w, h, &opts).unwrap();
+        assert!(!bytes.is_empty(), "JPEG bytes must not be empty");
+        assert_eq!(bytes[0], 0xFF, "must start with JPEG SOI FF");
+        assert_eq!(bytes[1], 0xD8, "must start with JPEG SOI D8");
+
+        // Decode back: dimensions must match and pixel must be near 128.
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        assert_eq!(
+            decoded.width(),
+            w,
+            "output width must equal input (no upscale)"
+        );
+        assert_eq!(
+            decoded.height(),
+            h,
+            "output height must equal input (no upscale)"
+        );
+        let [r, g, b] = decoded.get_pixel(0, 0).0;
+        assert!(
+            (r as i32 - 128).abs() <= 8,
+            "top-left R={r} must be near 128 (no shadow)"
+        );
+        assert!(
+            (g as i32 - 128).abs() <= 8,
+            "top-left G={g} must be near 128"
+        );
+        assert!(
+            (b as i32 - 128).abs() <= 8,
+            "top-left B={b} must be near 128"
+        );
+    }
+
+    /// Portrait geometry: mark1 (top-right) in a portrait image.
+    #[test]
+    fn test_mark_placement_mark1_portrait() {
+        // 600×1000 portrait image, badge 100×200
+        // mark_h = round(1000 * 0.14) = 140; scale = 140/200 = 0.7
+        // mark_w = round(100 * 0.7) = 70
+        // margin_x = round(600 * 0.046) = 28; margin_y = round(1000 * 0.046) = 46
+        // x = 600 - 28 - 70 = 502; y = 46
+        let p = MarkPlacement::fit(
+            (600, 1000),
+            (100, 200),
+            MARK1_HEIGHT_FRAC,
+            MARK_MARGIN_FRAC,
+            MARK_MARGIN_FRAC,
+            MarkSlot::Mark1,
+        )
+        .unwrap();
+        assert_eq!(p.h(), 140, "mark_h");
+        assert_eq!(p.w(), 70, "mark_w");
+        assert_eq!(p.x(), 502, "x");
+        assert_eq!(p.y(), 46, "y");
+    }
+
+    /// Square geometry: mark2 (bottom-left) in a square image.
+    #[test]
+    fn test_mark_placement_mark2_square() {
+        // 800×800 square image, badge 200×100
+        // mark_h = round(800 * 0.13) = round(104) = 104; scale = 104/100 = 1.04
+        // mark_w = round(200 * 1.04) = round(208) = 208
+        // margin_x = round(800 * 0.046) = round(36.8) = 37
+        // margin_y = round(800 * 0.046) = 37
+        // y = 800 - 37 - 104 = 659; x = 37
+        let p = MarkPlacement::fit(
+            (800, 800),
+            (200, 100),
+            MARK2_HEIGHT_FRAC,
+            MARK_MARGIN_FRAC,
+            MARK_MARGIN_FRAC,
+            MarkSlot::Mark2,
+        )
+        .unwrap();
+        assert_eq!(p.h(), 104, "mark_h");
+        assert_eq!(p.w(), 208, "mark_w");
+        assert_eq!(p.x(), 37, "x");
+        assert_eq!(p.y(), 659, "y");
+    }
+
+    // ----- Equal-margin + readability tests -----
+
+    /// Bug-2 fix: Mark1 top-right on a landscape image must be equidistant
+    /// from the right edge AND the top edge after `fit_equal_margin`.
+    #[test]
+    fn test_mark_placement_equal_margin_landscape_mark1() {
+        // 1920×1080, badge 500×300, Mark1 (top-right)
+        // margin_px = round(min(1920, 1080) × 0.046) = round(1080 × 0.046) = round(49.68) = 50
+        // mark_h = round(1080 × 0.14) = round(151.2) = 151
+        // scale = 151/300 ≈ 0.5033; mark_w = round(500 × 0.5033) = round(251.67) = 252
+        // x = 1920 - 50 - 252 = 1618; y = 50
+        // right_gap = 1920 - 1618 - 252 = 50 = top_gap ✓
+        let margin_px = (1080_f32 * MARK_MARGIN_FRAC).round() as u32; // min(1920, 1080) = 1080
+        let p = MarkPlacement::fit_equal_margin(
+            (1920, 1080),
+            (500, 300),
+            MARK1_HEIGHT_FRAC,
+            margin_px,
+            MarkSlot::Mark1,
+        )
+        .unwrap();
+        let right_gap = 1920 - p.x() - p.w();
+        let top_gap = p.y();
+        assert_eq!(
+            right_gap, top_gap,
+            "right_gap={right_gap} must equal top_gap={top_gap}"
+        );
+        assert_eq!(right_gap, margin_px, "gap must equal margin_px={margin_px}");
+    }
+
+    /// Bug-2 fix: Mark2 bottom-left on a landscape image must be equidistant
+    /// from the left edge AND the bottom edge after `fit_equal_margin`.
+    #[test]
+    fn test_mark_placement_equal_margin_landscape_mark2() {
+        let margin_px = (1080_f32 * MARK_MARGIN_FRAC).round() as u32; // min(1920, 1080) = 1080
+        let p = MarkPlacement::fit_equal_margin(
+            (1920, 1080),
+            (500, 300),
+            MARK2_HEIGHT_FRAC,
+            margin_px,
+            MarkSlot::Mark2,
+        )
+        .unwrap();
+        let left_gap = p.x();
+        let bottom_gap = 1080 - p.y() - p.h();
+        assert_eq!(
+            left_gap, bottom_gap,
+            "left_gap={left_gap} must equal bottom_gap={bottom_gap}"
+        );
+        assert_eq!(left_gap, margin_px, "gap must equal margin_px={margin_px}");
+    }
+
+    /// Bug-2 fix: portrait image (720×1080) — same invariant.
+    #[test]
+    fn test_mark_placement_equal_margin_portrait_mark1() {
+        // short edge = 720; margin_px = round(720 × 0.046) = round(33.12) = 33
+        let margin_px = (720_f32 * MARK_MARGIN_FRAC).round() as u32; // min(720, 1080) = 720
+        let p = MarkPlacement::fit_equal_margin(
+            (720, 1080),
+            (300, 500),
+            MARK1_HEIGHT_FRAC,
+            margin_px,
+            MarkSlot::Mark1,
+        )
+        .unwrap();
+        let right_gap = 720 - p.x() - p.w();
+        let top_gap = p.y();
+        assert_eq!(
+            right_gap, top_gap,
+            "right={right_gap} must equal top={top_gap}"
+        );
+    }
+
+    /// Bug-1: a very small image produces mark_h < MARK_MIN_READABLE_PX.
+    /// The placement must still succeed (warn-only, no error).
+    #[test]
+    fn test_mark_placement_small_image_succeeds_below_readability_threshold() {
+        // 300×200 image: mark_h = round(200 × 0.14) = 28px < 80px threshold
+        let mark_h = ((200_f32 * MARK1_HEIGHT_FRAC).round() as u32).max(1);
+        assert!(
+            mark_h < MARK_MIN_READABLE_PX,
+            "precondition: mark_h={mark_h} < MARK_MIN_READABLE_PX={MARK_MIN_READABLE_PX}"
+        );
+        // fit_equal_margin must still return Ok (warn is a runtime concern)
+        let margin_px = (200_f32 * MARK_MARGIN_FRAC).round() as u32; // min(300, 200) = 200
+        let result = MarkPlacement::fit_equal_margin(
+            (300, 200),
+            (100, 80),
+            MARK1_HEIGHT_FRAC,
+            margin_px,
+            MarkSlot::Mark1,
+        );
+        assert!(
+            result.is_ok(),
+            "small image must not error, only warn: {result:?}"
+        );
+        assert_eq!(result.unwrap().h(), mark_h);
+    }
+
+    // ----- D1a raster decode tests (RT-J) -----
+
+    /// Truncated JPEG → `RasterDecodeFailed`.
+    #[test]
+    fn test_load_source_image_truncated_jpeg_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("truncated.jpg");
+        // Write only the JPEG SOI header (2 bytes) — not a valid JPEG.
+        std::fs::write(&path, [0xFF_u8, 0xD8]).unwrap();
+        let result = load_source_image(&path, false);
+        assert!(
+            matches!(result, Err(ExportError::RasterDecodeFailed { .. })),
+            "truncated JPEG must produce RasterDecodeFailed, got: {result:?}"
+        );
+    }
+
+    /// JPEG with EXIF Orientation=6 (90° CW rotation) → width/height swapped.
+    #[test]
+    fn test_load_source_image_exif_orientation_6_portrait() {
+        // Build a 4×8 JPEG (width=4, height=8) with Orientation=6.
+        // After applying orientation=6 (rotate 90° CW), the result should be 8×4 (w=8, h=4).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("portrait.jpg");
+
+        // Create a 4×8 image and save with EXIF orientation=6 embedded in the APP1 marker.
+        // We'll create the image using the `image` crate, then manually patch the EXIF bytes.
+        let img = image::RgbImage::from_pixel(4, 8, image::Rgb([100u8, 150u8, 200u8]));
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .unwrap();
+        let base_bytes = buf.into_inner();
+
+        // Build a minimal EXIF APP1 marker with Orientation=6.
+        // TIFF LE: II + magic(42) + IFD offset(8)
+        // IFD: 1 entry + tag(0x0112) + type(3=SHORT) + count(1) + value(6)
+        let mut exif_tiff = vec![
+            0x49, 0x49, // "II" — little-endian
+            0x2A, 0x00, // TIFF magic 42
+            0x08, 0x00, 0x00, 0x00, // IFD offset = 8
+            0x01, 0x00, // 1 IFD entry
+            0x12, 0x01, // Tag 0x0112 (Orientation)
+            0x03, 0x00, // Type SHORT
+            0x01, 0x00, 0x00, 0x00, // Count 1
+            0x06, 0x00, 0x00, 0x00, // Value 6 (90° CW rotation)
+        ];
+        let exif_header = b"Exif\x00\x00";
+        let mut app1_data: Vec<u8> = exif_header.to_vec();
+        app1_data.append(&mut exif_tiff);
+
+        // Compute APP1 segment length (includes the 2 length bytes itself).
+        let seg_len = (app1_data.len() + 2) as u16;
+        let mut patched: Vec<u8> = vec![0xFF, 0xD8]; // SOI
+        patched.push(0xFF);
+        patched.push(0xE1); // APP1 marker
+        patched.extend_from_slice(&seg_len.to_be_bytes());
+        patched.extend_from_slice(&app1_data);
+        // Append the rest of the JPEG (skip original SOI).
+        patched.extend_from_slice(&base_bytes[2..]);
+        std::fs::write(&path, &patched).unwrap();
+
+        let img = load_source_image(&path, false).unwrap();
+        // Orientation=6 rotates 90° CW: 4×8 → 8×4 (w=8, h=4).
+        assert_eq!(
+            img.width().get(),
+            8,
+            "after orientation=6: width should be original height"
+        );
+        assert_eq!(
+            img.height().get(),
+            4,
+            "after orientation=6: height should be original width"
+        );
+    }
+
+    /// JPEG with unknown EXIF orientation tag → identity (no rotation, no error).
+    #[test]
+    fn test_load_source_image_unknown_exif_orientation_defaults_to_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("odd_orientation.jpg");
+
+        let img_4x8 = image::RgbImage::from_pixel(4, 8, image::Rgb([50u8, 60u8, 70u8]));
+        let dyn_img = image::DynamicImage::ImageRgb8(img_4x8);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .unwrap();
+        let base_bytes = buf.into_inner();
+
+        // Orientation tag = 99 (unknown).
+        let exif_header = b"Exif\x00\x00";
+        let mut exif_tiff = vec![
+            0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x12, 0x01, 0x03, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x63, 0x00, 0x00, 0x00, // Value=99 (unknown)
+        ];
+        let mut app1_data: Vec<u8> = exif_header.to_vec();
+        app1_data.append(&mut exif_tiff);
+        let seg_len = (app1_data.len() + 2) as u16;
+        let mut patched = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        patched.extend_from_slice(&seg_len.to_be_bytes());
+        patched.extend_from_slice(&app1_data);
+        patched.extend_from_slice(&base_bytes[2..]);
+        std::fs::write(&path, &patched).unwrap();
+
+        let result = load_source_image(&path, false);
+        assert!(result.is_ok(), "unknown orientation must not error");
+        let img = result.unwrap();
+        // No rotation applied: 4×8 stays 4×8.
+        assert_eq!(img.width().get(), 4);
+        assert_eq!(img.height().get(), 8);
+    }
+
+    /// Sentinel pixel survives JPEG decode (within compression tolerance).
+    /// All pixels are the sentinel color to minimize DCT drift.
+    #[test]
+    fn test_load_source_image_sentinel_pixel_jpeg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sentinel.jpg");
+        // Uniform [180, 90, 45] image — uniform fields compress with minimal drift.
+        let img = image::RgbImage::from_pixel(8, 8, image::Rgb([180u8, 90u8, 45u8]));
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .unwrap();
+        std::fs::write(&path, buf.into_inner()).unwrap();
+
+        let decoded = load_source_image(&path, false).unwrap();
+        assert_eq!(decoded.width().get(), 8);
+        assert_eq!(decoded.height().get(), 8);
+        let pix = decoded.pixel_rgb(0, 0).unwrap();
+        // Uniform fields compress cleanly; tolerance ±8.
+        assert!((pix[0] as i32 - 180).abs() <= 8, "R={} near 180", pix[0]);
+        assert!((pix[1] as i32 - 90).abs() <= 8, "G={} near 90", pix[1]);
+        assert!((pix[2] as i32 - 45).abs() <= 8, "B={} near 45", pix[2]);
+    }
+
+    /// Sentinel pixel survives PNG decode (exact).
+    #[test]
+    fn test_load_source_image_sentinel_pixel_png() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sentinel.png");
+        let mut img = image::RgbImage::from_pixel(4, 4, image::Rgb([0u8, 0u8, 0u8]));
+        img.put_pixel(0, 0, image::Rgb([77u8, 88u8, 99u8]));
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        dyn_img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        std::fs::write(&path, buf.into_inner()).unwrap();
+
+        let decoded = load_source_image(&path, false).unwrap();
+        let pix = decoded.pixel_rgb(0, 0).unwrap();
+        assert_eq!(pix, [77, 88, 99], "PNG pixel must survive exactly");
+    }
+
+    // ----- blit_badge_at alpha-compositing tests (R3-F) -----
+
+    /// Helper: create a 1×1 tiny_skia Pixmap with the given premultiplied RGBA bytes.
+    fn make_1x1_pixmap(r: u8, g: u8, b: u8, a: u8) -> tiny_skia::Pixmap {
+        debug_assert!(
+            r <= a && g <= a && b <= a,
+            "violates premultiplied invariant: r={r} g={g} b={b} must all be <= a={a}"
+        );
+        let mut p = tiny_skia::Pixmap::new(1, 1).unwrap();
+        let d = p.data_mut();
+        d[0] = r;
+        d[1] = g;
+        d[2] = b;
+        d[3] = a;
+        p
+    }
+
+    /// blit_badge_at: fully transparent badge pixel leaves destination unchanged.
+    #[test]
+    fn test_blit_badge_at_fully_transparent_leaves_dst() {
+        let badge = make_1x1_pixmap(0, 0, 0, 0); // a=0 → skip
+        let mut dst = make_1x1_pixmap(0, 0, 255, 255); // solid blue
+        blit_badge_at(&mut dst, &badge, 0.0, 0.0, 1.0).unwrap();
+        let d = dst.data();
+        assert_eq!(d[0], 0, "R must stay 0 (blue)");
+        assert_eq!(d[1], 0, "G must stay 0 (blue)");
+        assert_eq!(d[2], 255, "B must stay 255 (blue)");
+    }
+
+    /// blit_badge_at: fully opaque badge replaces destination pixel.
+    #[test]
+    fn test_blit_badge_at_fully_opaque_replaces_dst() {
+        let badge = make_1x1_pixmap(255, 0, 0, 255); // opaque red (premultiplied)
+        let mut dst = make_1x1_pixmap(0, 0, 255, 255); // solid blue
+        blit_badge_at(&mut dst, &badge, 0.0, 0.0, 1.0).unwrap();
+        let d = dst.data();
+        assert!(
+            (d[0] as i32 - 255).abs() <= 2,
+            "R must be near 255 (red badge), got {}",
+            d[0]
+        );
+        assert!(d[1] <= 2, "G must be near 0, got {}", d[1]);
+        assert!(d[2] <= 2, "B must be near 0, got {}", d[2]);
+    }
+
+    /// blit_badge_at: half-transparent premultiplied green badge over solid blue.
+    /// Premultiplied blend: dst = src_premult + dst_premult × (1 − alpha/255).
+    /// src = (0, 128, 0, 128); dst = (0, 0, 255, 255); alpha = 128/255 ≈ 0.502.
+    /// R: 0 + 0 × 0.498 = 0; G: 128 + 0 × 0.498 = 128; B: 0 + 255 × 0.498 ≈ 127.
+    #[test]
+    fn test_blit_badge_at_semi_transparent_blend() {
+        // Premultiplied green at half-alpha: straight (0,255,0) × (128/255) = (0,128,0,128).
+        let badge = make_1x1_pixmap(0, 128, 0, 128);
+        let mut dst = make_1x1_pixmap(0, 0, 255, 255); // solid blue
+        blit_badge_at(&mut dst, &badge, 0.0, 0.0, 1.0).unwrap();
+        let d = dst.data();
+        // Lanczos3 on a 1×1 image is identity; allow ±4 for rounding.
+        assert!(d[0] <= 4, "R must be near 0, got {}", d[0]);
+        assert!(
+            (d[1] as i32 - 128).abs() <= 4,
+            "G must be near 128, got {}",
+            d[1]
+        );
+        assert!(
+            (d[2] as i32 - 127).abs() <= 4,
+            "B must be near 127 (blue × inv_alpha), got {}",
+            d[2]
+        );
+    }
+
+    // ----- render_to_jpeg with marks + shadow (R3-A) -----
+
+    /// render_to_jpeg non-trivial path: shadow + height-based mark are composited
+    /// without error, and the output is a valid JPEG with correct dimensions.
+    #[test]
+    fn test_render_to_jpeg_with_shadow_and_mark() {
+        let w = 32u32;
+        let h = 32u32;
+        // Gray background.
+        let rgb = vec![160u8; (w * h * 3) as usize];
+
+        // Small solid-white badge (premultiplied white = straight white at a=255).
+        let mut badge_pixmap = tiny_skia::Pixmap::new(4, 4).unwrap();
+        {
+            let d = badge_pixmap.data_mut();
+            for chunk in d.chunks_exact_mut(4) {
+                chunk[0] = 255; // R
+                chunk[1] = 255; // G
+                chunk[2] = 255; // B
+                chunk[3] = 255; // A
+            }
+        }
+        let mark = MarkSpec {
+            badge: Arc::new(badge_pixmap),
+            basis: BadgeSizeBasis::Height(0.25),
+            slot: MarkSlot::Mark1,
+            margin_x: MARK_MARGIN_FRAC,
+            margin_y: MARK_MARGIN_FRAC,
+        };
+
+        let opts = RenderOptions {
+            long_edge: None,
+            downscale_only: false,
+            quality: 90,
+            shadow: Some(ShadowSpec { band_frac: 0.3 }),
+            marks: vec![mark],
+        };
+
+        let bytes = render_to_jpeg(&rgb, w, h, &opts).unwrap();
+        assert!(!bytes.is_empty(), "JPEG output must not be empty");
+        assert_eq!(bytes[0], 0xFF, "must start with JPEG SOI 0xFF");
+        assert_eq!(bytes[1], 0xD8, "must start with JPEG SOI 0xD8");
+
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        assert_eq!(decoded.width(), w, "output width must match input");
+        assert_eq!(decoded.height(), h, "output height must match input");
+
+        // Shadow: bottom row must be darker than top row.
+        let top_lum: u32 = {
+            let [r, g, b] = decoded.get_pixel(0, 0).0;
+            r as u32 + g as u32 + b as u32
+        };
+        let bot_lum: u32 = {
+            let [r, g, b] = decoded.get_pixel(0, h - 1).0;
+            r as u32 + g as u32 + b as u32
+        };
+        assert!(
+            bot_lum < top_lum,
+            "bottom lum={bot_lum} must be < top lum={top_lum} (shadow applied)"
+        );
+
+        // Mark compositing: Mark1 (top-right) at Height(0.25) on 32×32.
+        // margin_px = round(32 × 0.046) = 1; mark_h = round(32 × 0.25) = 8.
+        // scale = 8/4 = 2; mark_w = round(4 × 2) = 8; x = 32 - 1 - 8 = 23; y = 1.
+        // Pixel (25, 4) is well inside the mark region [23..30] × [1..8].
+        // The badge is solid white (255, 255, 255), the background is gray (160).
+        let mark_pixel = decoded.get_pixel(25, 4).0;
+        let mark_lum: u32 = mark_pixel[0] as u32 + mark_pixel[1] as u32 + mark_pixel[2] as u32;
+        let bg_lum: u32 = 160 * 3; // original background luminance
+        assert!(
+            mark_lum > bg_lum,
+            "pixel (25,4) inside mark region must be brighter than background: \
+             mark_lum={mark_lum} vs bg_lum={bg_lum} (mark compositing not applied)"
+        );
     }
 }

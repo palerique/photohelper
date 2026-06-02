@@ -29,6 +29,19 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ## Open
 
+### TD-024 — `paste` crate (RUSTSEC-2024-0436) unmaintained; ignored transitively via `image` dev-dep
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 15, surfaced by fresh advisory DB fetch during session-pause CI gate)
+- **Stop-gap location**: `.cargo/audit.toml` — `ignore = ["RUSTSEC-2024-0436"]` — TD-024
+- **Fundamental fix**: when `image` releases a version that drops `rav1e` (or `rav1e` releases a version that drops `paste`), bump `image` in `crates/photohelper-cli/Cargo.toml`. Alternatively, consider replacing the `image` dev-dep with a lighter raster fixture generator that avoids the `rav1e` chain entirely (e.g. build test PNGs byte-by-byte via `png` crate, avoiding `image`'s codec ecosystem). Note: `image` is a dev-dep only — it is NOT in the production binary.
+- **Binding trigger**: `cargo audit` flags this advisory again (ignore removed) OR next session that bumps `image` OR by 2026-12-01, whichever first. Remove the ignore from `.cargo/audit.toml` and re-run `just audit`; if the advisory is gone, close this TD.
+- **Scope estimate**: ~1–5 LoC (dep bump or fixture change) / low risk (dev-dep only, not in production binary)
+- **Consequence of inaction**: `paste` (unmaintained) remains a transitive dep of the test fixture toolchain; risk is low (dev-dep only, unmaintained ≠ actively insecure) but the advisory will keep re-appearing until the chain is resolved.
+- **Related**: advisory at https://rustsec.org/advisories/RUSTSEC-2024-0436; session-15 plan-review context (D4 ledger).
+
+---
+
 ### TD-001 — GitHub Actions action versions use `@vN` floating tags, not pinned SHAs
 
 - **Status**: CLOSED (2026-05-30, session 06 D0). Pinned all GitHub Actions in `.github/workflows/ci.yml` to full commit SHAs, and documented the chosen SHAs in `docs/decisions/0001-action-version-pinning.md` along with the periodic upgrade protocol and cadence.
@@ -427,6 +440,50 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Consequence of inaction**: Domain boundaries and constraints are pushed to the edges of the application (e.g. CLI argument parsing), making it possible to construct a `SidecarSettings` instance in-code with invalid physical values (like a negative temperature or out-of-bounds exposure).
 - **Related**: `docs/code-reviews/session-11-round2.md § Theme J`.
 
+### TD-027 — Non-CR3 RAW decode verification fixtures absent for `watermark --allow-untested-raw` (2026-06-02, session 15)
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 15 D4)
+- **Stop-gap location**: `crates/photohelper-export/src/lib.rs:load_source_image` — non-CR3 RAW (UntestedRaw arm) passes through only a dimension+channel sanity guard; colour/demosaic correctness is unverified. `crates/photohelper-cli/src/commands/watermark.rs` — `--allow-untested-raw` flag gates access without decode tests. In-source label: `// TD-027: untested-raw decode unverified`.
+- **Fundamental fix**: For each promoted RAW format (nef/arw/cr2/raf/orf/rw2/dng), commit a CC0-licensed fixture under `tests/fixtures/<ext>/`, run it through `load_source_image(path, true)`, and assert: (a) decoded dims match expected W×H, (b) 3 channels confirmed by `RgbImage::new` guard, (c) sample-pixel within a known physical range (not saturated, not zero). One integration test per format. Remove the format from the `UntestedRaw` classification once its test lands.
+- **Binding trigger**: First session that commits a non-CR3 RAW fixture, OR first user report of colour corruption under `--allow-untested-raw`, OR before v0.2 if any gated format is promoted to non-gated.
+- **Scope estimate**: ~50 LoC per format (fixture pipeline + test assertions) / low risk.
+- **Consequence of inaction**: Silent colour corruption (channel swap, wrong WB, exotic CFA pattern) on gated RAW formats goes undetected. Users who pass `--allow-untested-raw` may receive visually incorrect JPEG output. See DN-040.
+
+---
+
+### TD-028 — LongEdge path in `composite_mark_on_pixmap` duplicates `MarkPlacement` slot-position logic (2026-06-02, session 15)
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 15, implementation-review Round 2 R2-F)
+- **Stop-gap location**: `crates/photohelper-export/src/lib.rs` — `composite_mark_on_pixmap` `BadgeSizeBasis::LongEdge` arm (lines ~1101-1155) duplicates ~35 lines of slot-based position computation (`MarkSlot` match, `checked_sub`, right/bottom overflow guard) from `MarkPlacement::fit`. In-source label: `// TD-028: LongEdge path duplicates MarkPlacement slot-position logic`.
+- **Fundamental fix**: Add `MarkPlacement::fit_with_dims(target, mark_w, mark_h, margin_x_frac, margin_y_frac, slot) -> Result<Self, GeometryError>` that accepts pre-computed mark dimensions (bypassing the height-frac sizing step but reusing all position/bounds logic). Rewrite both `Height` and `LongEdge` arms of `composite_mark_on_pixmap` to call it.
+- **Binding trigger**: Next session that modifies `composite_mark_on_pixmap` or `MarkPlacement`; OR when the LongEdge path is promoted from legacy-export-only to a first-class use case.
+- **Scope estimate**: ~60 LoC (new constructor + rewrite of LongEdge arm + test update) / low risk.
+- **Consequence of inaction**: A future bug fix to slot-position logic (e.g. margin semantics, overflow handling) must be applied in two places; divergence between the two copies is a silent correctness risk.
+
+---
+
+### TD-029 — Windows x86_64 binary distribution deferred to v0.2 (2026-06-02, session 15)
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 15, release-CI implementation)
+- **Investigation findings** (session 15): ort-sys 2.0.0-rc.12's pyke CDN has no
+  `x86_64-pc-windows-gnu` prebuilt (only `x86_64-pc-windows-msvc`). The MSVC prebuilt
+  is a `.dll` (dynamic), requiring bundling. The raw lzma2 archive format used by pyke
+  CDN can't be decompressed by MSYS2's standard tools without Python scripting.
+  Switching to `x86_64-pc-windows-msvc` target requires cmake-based LibRaw compilation
+  (the existing `build.rs` uses sh+autoconf which isn't available in MSVC builds).
+  `build.rs` was updated to use `sh ./configure` (not `./configure`) for compatibility.
+- **Fundamental fix**: Either (A) switch to `x86_64-pc-windows-msvc` + cmake for
+  LibRaw + Python to decompress ORT archive, OR (B) build a static ORT for
+  `windows-gnu` from source. Option A is lower risk.
+- **Binding trigger**: First Windows user request OR v0.2 milestone.
+- **Scope estimate**: ~150 LoC (build.rs cmake path + GHA job + Python ORT download).
+- **Consequence of inaction**: Windows users must use WSL2 + Linux build.
+
+---
+
 ### TD-040 — DevelopArgs violates struct_excessive_bools lint
 
 - **Status**: Open
@@ -437,6 +494,19 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Scope estimate**: ~50 LoC / low risk.
 - **Consequence of inaction**: The struct remains difficult to parse mentally and violates the project's strict linting policies via an inline `#[allow]`.
 - **Related**: `docs/code-reviews/session-11-round3.md` (Theme I).
+
+---
+
+### TD-041 — `MarkSpec.margin_y` dead in `Height` compositing path; margin fields should live in `BadgeSizeBasis` variants
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 15, Round 3 review, Theme R3-C)
+- **Stop-gap location**: `crates/photohelper-export/src/lib.rs:239` (`pub margin_y: f32`) and `:1205` (Height branch ignores `margin_y`)
+- **Stop-gap commit**: `bda7c38d` (session-15 R3 remediation — docstrings updated but field kept as-is to avoid churn)
+- **Fundamental fix**: Move margin fields into `BadgeSizeBasis` variants: `Height { frac: f32, margin_frac: f32 }` (single equal-margin fraction applied to short edge) and `LongEdge { scale: Scale, margin_x: f32, margin_y: f32 }`. This makes the dead-field state structurally unrepresentable. Update `composite_mark_on_pixmap`, `MarkSpec` construction in `export.rs` and `watermark.rs`, and all unit tests referencing margin fields.
+- **Binding trigger**: Next session that adds a new `BadgeSizeBasis` variant or modifies `MarkSpec` construction.
+- **Scope estimate**: ~60 LoC / low risk.
+- **Consequence of inaction**: Future callers who set `margin_y` on a `Height`-based `MarkSpec` observe no visual change — a silent logic error.
 
 ## Closed
 

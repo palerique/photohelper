@@ -1339,3 +1339,217 @@ git switch -c session-13/to-be-determined
 just session-start
 cat SESSION-STATE.md
 ```
+
+---
+
+## Checkpoint — session 15 PAUSED for context refresh (2026-06-02; plan-review COMPLETE, implementation not yet started)
+
+**Status**: PAUSED. Branch: `session-15/watermark-and-rename`. `just ci` GREEN (248 tests). Plan-review complete (plan v4 committed; 3 review rounds ran to convergence). No implementation code written yet.
+
+**Author**: Paulo Henrique Lerbach Rodrigues (Claude Code session 15, context-refresh window)
+
+### What landed this window
+
+7 commits on `session-15/watermark-and-rename`:
+
+| Commit | Subject |
+|---|---|
+| `82b2bd79` | `docs(session-15): session contract + state pointer (session-start)` — plan v1 + SESSION-STATE pointer corrected. |
+| `59bf5ff5` | `docs(session-15): plan-review Round 1 artifact (7C+10H+3M+2L by theme)` |
+| `d749f289` | `docs(session-15): plan v2 — Round 1 remediation (closes 7C+10H+3M+2L)` |
+| `dbda6004` | `docs(session-15): plan-review Round 2 artifact (2C+7H+6M+3L by theme)` |
+| `a8704da3` | `docs(session-15): plan v3 — Round 2 remediation (closes 2C+7H+6M+3L)` |
+| `717c7741` | `docs(session-15): plan-review Round 3 artifact (0C+2H+4M+5L, CONVERGED)` |
+| `da818c0d` | `docs(session-15): plan v4 — Round 3 remediation; plan-review COMPLETE` |
+
+Plus (in this pause window):
+- TD-024 filed (`paste` RUSTSEC-2024-0436 — unmaintained dev-dep advisory surfaced by fresh audit DB fetch; ignored in `.cargo/audit.toml`)
+- Ledger updates (SESSION-STATE, HANDOFF, TECH-DEBT)
+
+### Plan-review summary (what was decided and why)
+
+The plan-review ran 3 rounds (R1 → R2 → R3) to convergence. Full 8-agent suite + 9th-agent verification each round; **cumulative hallucination/discard rate: 0.00** across ~50 code citations.
+
+**Severity trajectory**: 7C → 2C → **0C** (converged R3).
+
+**The single highest-value catch (R1):** the plan repeatedly described net-new work as "reuse." `export_photo` (`crates/photohelper-export/src/lib.rs:178-347`) is a private 170-line monolith — so the plan now extracts shared `pub` primitives **first** (D1.0), then builds the two new subcommands on top.
+
+**Round-2 CRITICALs (both closed by Round 3):**
+- **RT-A**: `canonicalize_within` cannot validate a *non-existent* destination (it wraps `std::fs::canonicalize` which errors on missing paths — `model.rs:264`). v4 uses **lexical containment** on the already-canonicalized `--output` directory instead.
+- **RT-B**: sanitized-stem + NAME_MAX truncation could silently clobber two distinct sources to one output. v4 pins the exact pipeline order (sanitize → compose → cap-STEM → `resolve_collisions` keyed on final bytes) and makes the catalog `ORDER BY` total (add `, p.id`). Note: `PhotoId` has **no `Ord`** and `ingested_at` is **not projected** onto `DevelopRow`, so the Rust-sort option is non-compilable — the SQL `, p.id` is the only viable branch.
+
+**Four user decisions baked into the plan:**
+- **Q-A**: RAW via `ProcessOptions::Srgb8` (plain sRGB, not filmic ISP) → uniform look with raster.
+- **Q-B**: mark-doesn't-fit = **error** (no JPEG written, `EX_PARTIAL_FAIL` even without `--strict`).
+- **Q-C**: non-CR3 RAW gated behind `--allow-untested-raw` + post-decode dimension+channel sanity guard.
+- **Q-D**: marks are **PNG only** (fatal up-front on non-PNG).
+
+**Key architectural pin from plan-review:**
+`render_to_jpeg(rgb: &[u8], w, h, opts)` takes a **borrow** (not an owned `Vec`) — call as `render_to_jpeg(img.pixels(), img.width().get(), img.height().get(), &opts)` — so there is no per-image ~24MB copy at the `RgbImage → render_to_jpeg` seam.
+
+### What is not yet in place
+
+- **D0**: remove untracked scratch files (`crates/photohelper-sidecar/test_quick_xml.rs`, `crates/photohelper-sidecar/test_quick_xml/`, `diff.txt`).
+- **D1.0**: extract `resize_rgb`/`render_to_jpeg`/`pixmap_to_rgb` from the monolith + make `compress_jpeg`/`draw_image_watermark`/`calculate_watermark_position` `pub`; re-point `export_photo` at the shared functions; move `TempFileGuard` + `resolve_collisions` to `cli/util.rs`. Migrate `test_watermark_position_calculation` to the 2-axis signature. Re-point export, green its integration tests.
+- **D1**: raster loader (`image` dep on `photohelper-export`; `SourceKind` dispatch; EXIF orientation; `RgbImage::new` channel guard); `MarkPlacement`/`GeometryError`/`MarkSlot` geometry module; shadow generator; composite parametrization (`BadgeSizeBasis { LongEdge(Scale) | Height(f32) }`, per-axis margin).
+- **D2**: `watermark` subcommand wiring, tests (incl. `mark_doesnt_fit` integration test asserting exit 2/1 — R3-B; written:N positive row — R3-F).
+- **D3**: `rename` subcommand (the shared `RenamedFilename` builder, `(ingested_at, id)` ORDER BY via SQL `, p.id`).
+- **D4**: ledger updates, DN reconciliation (duplicate DN-029@241/329, DN-033@284/305 → renumber to DN-038/039; new untested-RAW DN-040), decision note, scripts, README quickstart. File NEF/ARW fixtures TD at TD-024 (BUT NOTE: TD-024 was just claimed for the `paste` advisory above — the NEF/ARW TD is now **TD-027** per the ledger non-contiguity scan; confirm against TECH-DEBT.md at filing).
+
+**Important correction on TD numbering**: At plan-review time, we computed TD-024 was free and earmarked it for the NEF/ARW fixtures TD. But during this pause window, TD-024 was filed for the `paste` audit advisory. The NEF/ARW fixtures TD should now be filed as **TD-027** (next free after TD-026; TD-027..TD-039 were confirmed free; TD-040 is taken). Confirm against TECH-DEBT.md before filing.
+
+### Open session-14 sidecar debt (NOT in scope for session 15)
+
+The session-14 session-end review left 15 verified findings open (2 CRITICAL + 8 HIGH + 3 MEDIUM + 2 LOW) in `photohelper-sidecar` (`conflict.rs`, `writer.rs`) with no Round-4 CLEAN artifact. Session 15 deliberately avoids this code (D-Q7: catalog metrics + verbatim `.xmp` copy; `rename` never calls `read_xmp`/`write_xmp`). A future sidecar-focused remediation session is needed.
+
+### Restart prompt
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-15/watermark-and-rename
+just session-start
+```
+
+Then read `SESSION-STATE.md` (top), this checkpoint, and `docs/plans/session-15.md` (v4, the final plan). Begin with **D0** (the untracked scratch files are still present — `rg`-confirm they're unreferenced, then `rm`), then **D1.0** (extraction + export re-point + green CI), then D1 → D2 → D3 → D4.
+
+---
+
+## Checkpoint — session 15 PAUSED for context refresh (2026-06-02, post-ship discoveries)
+
+**Status**: PAUSED. Branch: `session-15/watermark-and-rename`. `just ci` GREEN. All implementation work complete; all implementation reviews (R1 + R2) clean. Release CI for v0.1.0 green (2 archives: macOS arm64 + Linux x86_64). **Next action: run `/session-end` to ship the PR to main.**
+
+### What is done (complete list)
+
+**Core session-15 deliverables (from previous checkpoint):**
+- D0–D4 all shipped and committed
+- Implementation review R1 (11 HIGH/MEDIUM themes) and R2 (7 HIGH/MEDIUM themes) — all closed
+- `just ci` GREEN throughout
+
+**Post-ship discoveries resolved in this window:**
+
+| Fix | Commit | Detail |
+|---|---|---|
+| Mark quality — Lanczos3 | `fix(export): Lanczos3 for badge...` | Replaced tiny-skia Pattern (interpolation) with `image::imageops::Lanczos3` for badge downscaling. Root cause: Marca-1.png is 1100×1540px and Marca-2.png is 8120×1920px — at 1080px output these scale 15-20× and bicubic aliased badly. Lanczos3 is anti-aliased area-averaging. |
+| Mark margins — equal sides | (earlier R2 fix) | `MarkPlacement::fit` now takes `margin_x_frac` + `margin_y_frac` separately; `fit_equal_margin` added for uniform pixel margin from short edge. Fixes: mark1 had 88px from right but 50px from top on 1920×1080. |
+| Readability warning | (same R2 fix) | `MARK_MIN_READABLE_PX = 80`; warns on stderr when mark_h < 80px. |
+| `photohelper-produce.sh` raster fix | `scripts/photohelper-produce.sh` | When source has BOTH CR3 and JPEG/PNG files, script now watermarks raster files directly (in a temp dir) alongside the catalog-exported RAWs. Addresses the case where user adds JPEG/PNG crops alongside CR3 originals. |
+| Release CI v0.1.0 | `.github/workflows/release.yml` | After extensive debugging: ORT uses Apple CoreML on macOS arm64 (no bundling needed) and links statically on Linux (libonnxruntime.a). Archives: binary + models only. 79-81MB each. Windows deferred (TD-029). |
+| Mark quality test | `just ci GREEN` | Additional tests: Lanczos3 quality is verified by visual output (not unit-testable without golden images). |
+
+**Key architectural findings:**
+
+1. **ORT on macOS arm64 = Apple CoreML** — ort-sys 2.0.0-rc.12 uses CoreML.framework (system) as the inference backend on Apple Silicon. No `libonnxruntime.dylib` to bundle. Binary is self-contained.
+
+2. **ORT on Linux = static link** — ORT 1.24.2 for Linux is a static archive at `~/.cache/ort.pyke.io/.../libonnxruntime.a`. Binary is self-contained.
+
+3. **Virtual copy gap discovered** — User added `_MG_9703-1.cr3` through `_MG_9703-8.cr3` as identical-bytes copies (same mtime!) of `_MG_9703.CR3` with different Lightroom crops in XMP (`crs:CropTop/Left/Bottom/Right`). The catalog deduplicates them all to ONE PhotoId (same hash). Export doesn't apply XMP crops. This is a scope for **session 16** (virtual copy + XMP crop support). See next steps.
+
+### XMP crop data discovered (session-16 scope)
+
+`_MG_9703-1.xmp` through `-8.xmp` each contain different `crs:CropTop/Left/Bottom/Right` values defining 8 different aspect ratio crops of the same RAW. Currently only 1 of the 9 is in the catalog (all share same PhotoId). Session 16 would need:
+1. Sidecar: read crop rect from `crs:HasCrop=True` + Top/Left/Bottom/Right
+2. Export: apply crop to decoded pixel buffer before resize
+3. Catalog: support virtual copies (same-content files with different paths → separate entries)
+
+### Restart prompt (fresh context)
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-15/watermark-and-rename
+just session-start
+```
+
+Then read `SESSION-STATE.md` and this checkpoint. **Next action**: run `/session-end` to fire the final review gate and open the PR to main.
+
+---
+
+## Checkpoint — session 15 PAUSED for context refresh (2026-06-02, second window)
+
+**Status**: PAUSED. Branch: `session-15/watermark-and-rename`. `just ci` GREEN. All post-ship bugfixes committed. **Next action: run `/session-end` to ship the PR to main.**
+
+### What landed since previous checkpoint
+
+| Fix/Feature | Commit | Detail |
+|---|---|---|
+| JXL unsupported-format warning | `fix(watermark)` | `watermark` now logs actionable `tracing::warn!` when file extension is unsupported (e.g. `.jxl`), instructing user to export as JPEG first. |
+| `produce.sh` JXL/HEIC detection | `fix(watermark)` | Script now detects JXL/HEIC/TIFF/WebP at startup and warns with filenames before pipeline runs. |
+| `produce.sh` partial-failure tolerance | `fix(produce)` | Raster watermark step no longer kills the script on exit code 2 (mark-doesnt-fit). Shows warning and continues. Fixed by capturing `WM_EXIT` and checking for EX_PARTIAL_FAIL. |
+| 54% performance optimization | `perf(export)` | Added `--mark1-png`/`--mark2-png`/`--with-shadow` to the `export` subcommand. Marks are now composited INSIDE the filmic-ISP encode step — eliminating the separate `watermark` pass (no second JPEG decode/encode cycle). `produce.sh` updated to use single-pass. Benchmark: 6:10 → 2:50 for 370 photos at 4000px. |
+
+### Architecture added: single-pass export+watermark
+
+`ExportOptions` gained two new fields:
+- `render_marks: Vec<MarkSpec>` — height-based corner marks applied via `render_to_jpeg` after filmic ISP
+- `render_shadow: Option<ShadowSpec>` — shadow gradient alongside the marks
+
+`export_photo` combines legacy badge marks (LongEdge-based) with new height-based marks in `RenderOptions` before the final `render_to_jpeg` call. This means the filmic tone-mapped pixel data gets marks applied WITHOUT a second JPEG encode/decode cycle.
+
+### Bug found: mark-doesnt-fit on narrow portrait images
+
+`_MG_9703-6.jpg` (3000×5333px) at 4000px output scales to 2300×4000. Marca-2 (8120×1920 = 4.23:1 wide) sized at 13% height = 520px tall → 2244px wide. With 184px margin: 2244+184 = 2428 > 2300 → MarkDoesNotFit. This is correct behavior (can't fit). Script now shows warning and continues.
+
+### Bug found: JXL files silently skipped
+
+User exported `_MG_9703-1.jxl` through `-8.jxl`. JXL (JPEG XL) is not supported by the `image` crate in our config. Files returned `None` from `SourceKind::classify` → silently `skipped_unsupported`. Now logs a clear warning with the extension and "Convert to JPEG first" message.
+
+### Open: XMP virtual copies (session-16 scope)
+
+`_MG_9703-1.cr3` through `-8.cr3` are identical bytes (same PhotoId → catalog deduplicates to 1 entry). Each XMP has different `crs:CropTop/Left/Bottom/Right` values defining 8 different aspect ratio crops. The catalog and export pipeline don't support virtual copies. This is a session-16 feature (DN-042).
+
+### Restart prompt
+
+```bash
+cd /Users/ph/area-de-trabalho/pessoal/photohelper
+git switch session-15/watermark-and-rename
+just session-start
+```
+
+Then read `SESSION-STATE.md` and this checkpoint. **Next action: run `/session-end`** to fire the final review gate and open the PR to main.
+
+---
+
+## Checkpoint — session 15 SHIPPED (2026-06-02, final)
+
+**Status**: SHIPPED. Session-end reviews R3 (13 themes) and R4 (8 themes) both CLEAN. `just ci` GREEN. PR pushed to main.
+
+### Session-end review summary
+
+**Round 3** (post-R2 code changes — blit_badge_at, produce.sh, JXL warning, single-pass perf):
+- 1 CRITICAL + 5 HIGH + 3 MEDIUM + 4 LOW (13 themes)
+- Key findings: Lanczos3 on straight-alpha (dark halo risk), no test for single-pass export, produce.sh raster-only pipeline aborting on exit 2, RAW pipeline swallowing fatal exit codes, readability warning referencing wrong flag name.
+- All remediated; tests grew 330 → 342 (+12).
+
+**Round 4** (verify R3 remediation):
+- 0 CRITICAL + 3 HIGH + 2 MEDIUM + 4 LOW (8 themes)
+- Key findings: export call in produce.sh still lacked WM_EXIT guard, header line 19 still said "Export → Watermark" separately, render_to_jpeg test didn't verify mark compositing.
+- All remediated; 342 tests passing.
+
+### Final feature list (session 15 scope — complete)
+
+| Feature | Status |
+|---|---|
+| `watermark` subcommand (shadow + dual corner marks + fit_equal_margin) | ✓ |
+| `rename` subcommand (Cluster-X_Cull-Y-filename) | ✓ |
+| Single-pass export+watermark (--mark1-png/--mark2-png/--with-shadow) | ✓ |
+| Lanczos3 premultiplied badge scaling | ✓ |
+| JXL/HEIC unsupported-format warning | ✓ |
+| produce.sh all-in-one pipeline + partial-failure tolerance | ✓ |
+| Release CI (macOS arm64 + Linux x86_64) | ✓ |
+
+### Open debt (filed; not in scope)
+
+- **TD-022**: Event-based pass-through XMP writer (session-14 deferral)
+- **TD-029**: Windows x86_64 binary distribution
+- **TD-041**: MarkSpec.margin_y structural fix (move into BadgeSizeBasis variants)
+- **Session-14 sidecar R3 findings**: 2 CRITICAL + 9 HIGH open in photohelper-sidecar (no R4 CLEAN artifact)
+- **DN-042**: Virtual copy + XMP crop support (session-16 scope)
+
+### Next session
+
+Session 16: virtual copy + XMP crop support. When same-content files (`_MG_9703-1.cr3` through `-8.cr3`) share a PhotoId, the catalog deduplicates to one entry but each has different `crs:CropTop/Left/Bottom/Right` values in their XMP. Session 16 would: (1) read crop rect from `crs:HasCrop=True`, (2) apply crop in export pipeline, (3) support virtual copies (same-content files → separate catalog entries by path).
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-16/<kebab-slug>
+just session-start
+```

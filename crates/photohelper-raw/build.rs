@@ -182,7 +182,11 @@ fn extract_tarball(tarball: &Path, out_dir: &Path) -> Result<(), String> {
 }
 
 fn run_configure(src_dir: &Path) -> Result<(), String> {
-    let status = Command::new("./configure")
+    // Run `./configure` through `sh` so that: (a) macOS and Linux work as before,
+    // and (b) Windows + MSYS2 works — Windows cannot execute the shebang script
+    // directly but MSYS2's `sh.exe` (from PATH) can.
+    let status = Command::new("sh")
+        .arg("./configure")
         .args([
             // Static-only — no shared library; matches §6(a) commitment.
             "--disable-shared",
@@ -201,14 +205,15 @@ fn run_configure(src_dir: &Path) -> Result<(), String> {
         .status()
         .map_err(|e| {
             println!(
-                "cargo:warning=could not run LibRaw's `./configure`. \
-                 Confirm the vendored tarball was extracted cleanly."
+                "cargo:warning=could not run LibRaw's `sh ./configure`. \
+                 Confirm that `sh` is on PATH (macOS/Linux: built-in; \
+                 Windows: install MSYS2 and add MINGW64 to PATH)."
             );
-            format!("could not spawn ./configure: {e}")
+            format!("could not spawn sh ./configure: {e}")
         })?;
     if !status.success() {
         return Err(format!(
-            "LibRaw `./configure` failed in {}. Rerun `cargo build -vv` to see logs.",
+            "LibRaw `sh ./configure` failed in {}. Rerun `cargo build -vv` to see logs.",
             src_dir.display()
         ));
     }

@@ -16,12 +16,15 @@ use anyhow::Context as _;
 use photohelper_ai::{CLIP_MODEL_SLUG, MODEL_SLUG};
 use photohelper_catalog::Catalog;
 use photohelper_export::{
-    ExportMetadata, ExportOptions, NimaScore, Rating, WatermarkPosition, export_photo,
+    BadgeSizeBasis, ExportMetadata, ExportOptions, MARK_MARGIN_FRAC, MARK1_HEIGHT_FRAC,
+    MARK2_HEIGHT_FRAC, MarkSlot, MarkSpec, NimaScore, PreloadedBadge, Rating, SHADOW_BAND_FRAC,
+    ShadowSpec, WatermarkPosition, export_photo,
 };
 use photohelper_sidecar::read_xmp;
 use rayon::prelude::*;
 
 use crate::Cli;
+use crate::commands::util::{TempFileGuard, resolve_collisions};
 use crate::exit_code;
 use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
 
@@ -139,6 +142,19 @@ pub(crate) struct ExportArgs {
     /// Treat any single-photo export failure as fatal, causing immediate pipeline cancellation.
     #[arg(long, default_value_t = false)]
     pub(crate) strict: bool,
+
+    /// Top-right corner PNG mark applied in the same filmic-ISP pass (avoids a second
+    /// JPEG encode/decode cycle versus running the `watermark` subcommand separately).
+    #[arg(long)]
+    pub(crate) mark1_png: Option<std::path::PathBuf>,
+
+    /// Bottom-left corner PNG mark (same single-pass approach as --mark1-png).
+    #[arg(long)]
+    pub(crate) mark2_png: Option<std::path::PathBuf>,
+
+    /// Apply shadow gradient when --mark1-png/--mark2-png are provided.
+    #[arg(long, default_value_t = false)]
+    pub(crate) with_shadow: bool,
 }
 
 pub fn validate_long_edge(s: &str) -> Result<u32, String> {
@@ -180,41 +196,6 @@ impl ExportStats {
             self.file_missing.load(Ordering::Relaxed),
             self.errored.load(Ordering::Relaxed),
         )
-    }
-}
-
-/// RAII Temporary File Guard to delete temporary `.tmp` files if dropped before commit.
-struct TempFileGuard {
-    path: PathBuf,
-    committed: bool,
-}
-
-impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            committed: false,
-        }
-    }
-
-    fn commit(&mut self) {
-        self.committed = true;
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            if let Err(e) = std::fs::remove_file(&self.path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(
-                        path = %self.path.display(),
-                        error = %e,
-                        "failed to clean up temporary file in drop"
-                    );
-                }
-            }
-        }
     }
 }
 
@@ -268,23 +249,21 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
     }
 
     // 3. Deterministic Collision Resolution
-    let mut collision_map = HashMap::new();
-    let mut stem_counts: HashMap<PathBuf, usize> = HashMap::new();
-
-    for row in &rows {
-        let source_path = row.source_path();
-        let stem = source_path
+    let source_paths: Vec<PathBuf> = rows.iter().map(|r| r.source_path().to_path_buf()).collect();
+    let collision_map = resolve_collisions(&args.output, &source_paths, |src| {
+        let stem = src
             .file_stem()
             .unwrap_or_else(|| std::ffi::OsStr::new("photo"));
-
-        let actual_score = row.nima_score().filter(|s| s.is_finite() && !s.is_nan());
-
-        let cluster_prefix = match row.dedup_cluster_id() {
-            Some(id) => format!("cluster-{id:03}-"),
-            _ => String::new(),
-        };
-
-        let base_name = if let Some(score) = actual_score {
+        // Find the corresponding row to get cull score + cluster id.
+        let row_opt = rows.iter().find(|r| r.source_path() == src);
+        let actual_score = row_opt
+            .and_then(|r| r.nima_score())
+            .filter(|s| s.is_finite() && !s.is_nan());
+        let cluster_prefix = row_opt
+            .and_then(|r| r.dedup_cluster_id())
+            .map(|id| format!("cluster-{id:03}-"))
+            .unwrap_or_default();
+        if let Some(score) = actual_score {
             format!(
                 "{}cull-{:05.2}-{}.jpg",
                 cluster_prefix,
@@ -293,30 +272,13 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             )
         } else {
             format!("{}{}.jpg", cluster_prefix, stem.to_string_lossy())
-        };
-
-        let mut candidate = args.output.join(&base_name);
-
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let target_key = PathBuf::from(candidate.to_string_lossy().to_lowercase());
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let target_key = candidate.clone();
-
-        let count = stem_counts.entry(target_key).or_insert(0);
-        if *count > 0 {
-            let base_stem = base_name.strip_suffix(".jpg").unwrap_or(&base_name);
-            let suffix_name = format!("{base_stem}_{count}.jpg");
-            candidate = args.output.join(&suffix_name);
         }
-        *count += 1;
-
-        collision_map.insert(source_path.to_path_buf(), candidate);
-    }
+    });
 
     let stats = Arc::new(ExportStats::new());
     let cancelled = Arc::new(AtomicBool::new(false));
 
-    // 4. Preload badges
+    // 4. Preload badges (legacy --badge flags)
     let mut preloaded_badges = HashMap::new();
     for badge in &args.badges {
         let preloaded = photohelper_export::PreloadedBadge::load(
@@ -329,6 +291,43 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             anyhow::bail!("Duplicate watermark position detected: {:?}", badge.pos);
         }
     }
+
+    // 4b. Preload single-pass marks (--mark1-png / --mark2-png).
+    // These use height-based sizing + equal margins and run inside the filmic-ISP
+    // encode step, eliminating a second JPEG decode/encode cycle.
+    let mut single_pass_marks: Vec<MarkSpec> = vec![];
+    let render_shadow =
+        if args.with_shadow && (args.mark1_png.is_some() || args.mark2_png.is_some()) {
+            Some(ShadowSpec {
+                band_frac: SHADOW_BAND_FRAC,
+            })
+        } else {
+            None
+        };
+    if let Some(ref p) = args.mark1_png {
+        let badge = PreloadedBadge::load(p, None)
+            .with_context(|| format!("failed to load --mark1-png at {}", p.display()))?;
+        single_pass_marks.push(MarkSpec {
+            badge: badge.pixmap,
+            basis: BadgeSizeBasis::Height(MARK1_HEIGHT_FRAC),
+            slot: MarkSlot::Mark1,
+            margin_x: MARK_MARGIN_FRAC,
+            margin_y: MARK_MARGIN_FRAC,
+        });
+    }
+    if let Some(ref p) = args.mark2_png {
+        let badge = PreloadedBadge::load(p, None)
+            .with_context(|| format!("failed to load --mark2-png at {}", p.display()))?;
+        single_pass_marks.push(MarkSpec {
+            badge: badge.pixmap,
+            basis: BadgeSizeBasis::Height(MARK2_HEIGHT_FRAC),
+            slot: MarkSlot::Mark2,
+            margin_x: MARK_MARGIN_FRAC,
+            margin_y: MARK_MARGIN_FRAC,
+        });
+    }
+    // Owned Vec — MarkSpec::clone is cheap (Arc<Pixmap> + a few Copy scalars).
+    let single_pass_marks: Vec<_> = single_pass_marks;
 
     // 4. Spawn Heartbeat progress thread
     let stop = Arc::new(HeartbeatStop::new());
@@ -465,6 +464,8 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             watermarks,
             force: args.force,
             tone_mapping,
+            render_marks: single_pass_marks.clone(),
+            render_shadow,
         };
 
         let rating = Rating::new(rating_val);
@@ -476,7 +477,6 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
 
         match export_photo(&options, source_path, &metadata) {
             Ok(()) => {
-                guard.commit();
                 if let Err(e) = std::fs::rename(&tmp_path, final_target_path) {
                     tracing::warn!(
                         from = %tmp_path.display(),
@@ -485,12 +485,12 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
                         "failed to rename temporary file to final target"
                     );
                     stats.errored.fetch_add(1, Ordering::Relaxed);
-                    // Best-effort cleanup; ignore if not found or already deleted
-                    let _ = std::fs::remove_file(&tmp_path);
+                    // guard.drop() cleans up tmp_path automatically.
                     if args.strict {
                         cancelled.store(true, Ordering::Relaxed);
                     }
                 } else {
+                    guard.commit(); // Disarm cleanup only after rename succeeds.
                     stats.written.fetch_add(1, Ordering::Relaxed);
                 }
             }
