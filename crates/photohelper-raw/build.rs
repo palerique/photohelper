@@ -1,6 +1,16 @@
 //! Build script: extract + autoconf-build the vendored LibRaw `=0.22.1`
 //! tarball as a static library and emit the link directives.
 //!
+//! ## Platform strategy
+//!
+//! * **macOS / Linux** (Unix path): extracts the vendored tarball via `tar`,
+//!   runs `sh ./configure && make`, and links the resulting `libraw.a`.
+//! * **Windows MSVC** (`x86_64-pc-windows-msvc`): uses vcpkg-installed LibRaw
+//!   (`x64-windows-static-md` triplet); skips tarball + autoconf entirely.
+//!   Requires `VCPKG_ROOT` to be set at build time
+//!   (`vcpkg install libraw:x64-windows-static-md`). See TD-042 for the
+//!   future native `cc::Build` path that eliminates the vcpkg dependency.
+//!
 //! Plan-v3.2 chose `=0.22.1` after the Deliverable 0 pre-flight
 //! (`docs/analysis/ANL-001-libraw-cr3-preflight.md`). The plan originally
 //! prescribed `cmake` as the build driver, but LibRaw 0.22.1's tarball
@@ -9,9 +19,9 @@
 //! per the bundled `README.cmake`. Vendoring a second repo for cmake
 //! rules would double the §6(a) tarball-shipping surface, so this
 //! build.rs invokes the official autoconf path (`./configure && make`)
-//! instead.
+//! instead (on Unix), or vcpkg (on Windows MSVC).
 //!
-//! ## System prerequisites
+//! ## Unix system prerequisites
 //!
 //! * `pkg-config` (or `pkgconf` shim) on `PATH` — LibRaw's `configure`
 //!   probes for it unconditionally.
@@ -20,8 +30,13 @@
 //! * A C++ compiler — Xcode CLT on macOS (`xcode-select --install`),
 //!   `build-essential` on Debian/Ubuntu, `gcc-c++` on Fedora.
 //!
+//! ## Windows MSVC prerequisites
+//!
+//! * vcpkg installed and `VCPKG_ROOT` set to its root directory.
+//! * `vcpkg install libraw:x64-windows-static-md` run once.
+//!
 //! Missing tools fail the build with a `cargo:warning=` line naming
-//! the exact package to install on macOS and Linux.
+//! the exact package to install on each platform.
 
 use sha2::{Digest, Sha256};
 use std::env;
@@ -55,6 +70,16 @@ fn main() {
 fn run() -> Result<(), String> {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").map_err(|_| "CARGO_MANIFEST_DIR not set")?);
+
+    // Dispatch to the Windows MSVC path before touching out_dir (which is
+    // only needed for tarball extraction on Unix). Avoids an unused-variable
+    // warning on Windows builds.
+    let target = env::var("TARGET").unwrap_or_default();
+    if target.contains("windows-msvc") {
+        return run_windows_msvc(&manifest_dir);
+    }
+
+    // ── Unix path (macOS + Linux): extract tarball, autoconf, make ────────
     let out_dir = PathBuf::from(env::var("OUT_DIR").map_err(|_| "OUT_DIR not set")?);
 
     let tarball = manifest_dir.join(TARBALL_REL_PATH);
@@ -86,13 +111,12 @@ fn run() -> Result<(), String> {
     );
     println!("cargo:rustc-link-lib=static=raw");
 
-    // Compile our minimal C ABI shim against LibRaw's headers. `cc::Build`
-    // emits a sibling static lib and the matching `cargo:rustc-link-lib`
-    // directive automatically.
+    // Compile our minimal C ABI shim against LibRaw's public headers.
+    // The tarball root contains `libraw/libraw.h` at `src_dir/libraw/libraw.h`,
+    // so passing `src_dir` as the include root resolves `<libraw/libraw.h>`.
     compile_shim(&manifest_dir, &src_dir)?;
 
     // LibRaw is C++; we need the C++ standard library at the final link.
-    let target = env::var("TARGET").unwrap_or_default();
     if target.contains("apple") {
         println!("cargo:rustc-link-lib=c++");
     } else {
@@ -104,15 +128,66 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn compile_shim(manifest_dir: &Path, libraw_src_dir: &Path) -> Result<(), String> {
+/// Windows MSVC build path: use vcpkg-installed LibRaw.
+///
+/// The Rust `vcpkg` crate defaults to the `x64-windows-static-md` triplet for
+/// `x86_64-pc-windows-msvc` (confirmed: `vcpkg-0.2.15/src/lib.rs:35`).
+/// That triplet links libraries statically with DLL-linked CRT (UCRT, ships
+/// with Windows 10+). `VCPKG_ROOT` must be set; on GHA `windows-latest`,
+/// `VCPKG_INSTALLATION_ROOT` provides the canonical path.
+///
+/// The vcpkg crate scans `$VCPKG_ROOT/installed/<triplet>/` directly and emits
+/// `cargo:rustc-link-lib` directives for LibRaw + transitive deps (zlib).
+/// The C++ runtime is managed automatically by `cl.exe`/`link.exe` — no
+/// explicit `cargo:rustc-link-lib=c++` emit is needed on MSVC.
+///
+/// # TD-042 (stop-gap)
+///
+/// This vcpkg path requires `VCPKG_ROOT` at build time; local Windows
+/// development needs vcpkg installed. A future native `cc::Build` path
+/// (TD-042) will compile LibRaw sources directly, eliminating the dependency.
+fn run_windows_msvc(manifest_dir: &Path) -> Result<(), String> {
+    let lib = vcpkg::find_package("libraw").map_err(|e| {
+        // cargo:warning lines are always visible in cargo output (even without -vv).
+        println!(
+            "cargo:warning=vcpkg could not find `libraw`. \
+             Install: `vcpkg install libraw:x64-windows-static-md` \
+             and set VCPKG_ROOT to the vcpkg installation root."
+        );
+        format!("vcpkg find libraw: {e}")
+    })?;
+
+    // vcpkg crate emits cargo:rustc-link-lib for libraw + transitive deps (zlib).
+    // C++ runtime: cl.exe / link.exe handle it implicitly — no explicit emit needed.
+
+    let include_dir = lib.include_paths.first().ok_or_else(|| {
+        "vcpkg found `libraw` but returned no include paths. \
+         The vcpkg installation may be incomplete. \
+         Try: `vcpkg remove libraw:x64-windows-static-md && \
+         vcpkg install libraw:x64-windows-static-md`"
+            .to_string()
+    })?;
+
+    // Compile our C ABI shim against the vcpkg-installed LibRaw headers.
+    // cc::Build selects cl.exe on MSVC automatically.
+    compile_shim(manifest_dir, include_dir)
+}
+
+/// Compile the C ABI shim against LibRaw headers from `include_dir`.
+///
+/// Called from both Unix (passing the extracted tarball root, which contains
+/// `libraw/libraw.h` as a subdirectory) and Windows MSVC (passing the vcpkg
+/// installed include directory, which also contains `libraw/libraw.h`).
+/// The MSVC linker performs multi-pass symbol resolution, so the ordering
+/// of vcpkg-emitted directives before the shim emit is safe.
+fn compile_shim(manifest_dir: &Path, include_dir: &Path) -> Result<(), String> {
     let shim_src = manifest_dir.join("cpp").join("photohelper_libraw_shim.c");
     println!("cargo:rerun-if-changed={}", shim_src.display());
     cc::Build::new()
         .file(&shim_src)
-        // Include LibRaw's public headers (extracted into OUT_DIR).
-        .include(libraw_src_dir)
-        // Suppress warnings from LibRaw's headers — they're upstream's
-        // problem, not ours.
+        // Include LibRaw's public headers from the given root directory.
+        .include(include_dir)
+        // Suppress warnings from LibRaw's headers — they're upstream's problem.
         .warnings(false)
         .try_compile("photohelper_libraw_shim")
         .map_err(|e| format!("cc::Build for shim failed: {e}"))?;

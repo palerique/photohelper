@@ -72,3 +72,7 @@ sha2.workspace = true
 # wrapper over LibRaw's larger struct types) into a sibling static lib
 # that links alongside libraw.a.
 cc.workspace = true
+# vcpkg: used for Windows MSVC LibRaw path (x64-windows-static-md triplet).
+# Pure-Rust crate; compiles on all platforms. Only invokes filesystem scanning
+# at runtime when vcpkg::find_package is called (in run_windows_msvc).
+vcpkg = "0.2"
