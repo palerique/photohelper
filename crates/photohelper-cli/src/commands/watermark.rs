@@ -199,6 +199,16 @@ pub fn run_watermark(_cli: &Cli, args: &WatermarkArgs) -> anyhow::Result<u8> {
         // Classify source.
         match SourceKind::classify(src_path) {
             None => {
+                let ext = src_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("(no extension)");
+                tracing::warn!(
+                    path = %src_path.display(),
+                    extension = ext,
+                    "unsupported format — skipping. Supported: JPEG, PNG, CR3. \
+                     Convert to JPEG first (e.g. export from Lightroom as JPEG)."
+                );
                 stats.skipped_unsupported.fetch_add(1, Ordering::Relaxed);
                 return;
             }

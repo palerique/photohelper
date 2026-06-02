@@ -73,6 +73,7 @@ elapsed() { echo $(( $(ts) - $1 )); }
 hms()     { local s=$1; printf "%02d:%02d:%02d" $(( s/3600 )) $(( (s%3600)/60 )) $(( s%60 )); }
 bold()    { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()      { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn()    { printf '  \033[33m⚠\033[0m %s\n' "$*"; }
 step()    { echo; printf '\033[1;36m>>> %s\033[0m\n' "$*"; }
 sep()     { echo; printf '%0.s─' {1..72}; echo; }
 info()    { printf '  %-28s %s\n' "$1" "$2"; }
@@ -94,6 +95,17 @@ info "Quality:"        "$QUALITY / 100"
 info "Output:"         "$OUTPUT_DIR"
 RASTER_BANNER_COUNT=$(find "$SOURCE_DIR" -maxdepth 1 \
     \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | wc -l | tr -d ' ')
+# Warn about unsupported formats (JXL, HEIC, TIFF, etc.)
+UNSUPPORTED_COUNT=$(find "$SOURCE_DIR" -maxdepth 1 \
+    \( -iname "*.jxl" -o -iname "*.heic" -o -iname "*.heif" -o -iname "*.tif" -o -iname "*.tiff" -o -iname "*.webp" \) | wc -l | tr -d ' ')
+if [[ "$UNSUPPORTED_COUNT" -gt 0 ]]; then
+    warn "Found $UNSUPPORTED_COUNT file(s) in unsupported formats (JXL/HEIC/TIFF/WebP)."
+    warn "Only JPEG and PNG are supported for direct watermarking."
+    warn "Export them from Lightroom as JPEG first."
+    find "$SOURCE_DIR" -maxdepth 1 \
+        \( -iname "*.jxl" -o -iname "*.heic" -o -iname "*.heif" -o -iname "*.tif" -o -iname "*.tiff" -o -iname "*.webp" \) \
+        -exec basename {} \; | head -5 | while read -r f; do printf "    ⚠️  %s\n" "$f"; done
+fi
 if [[ $RAW_PIPELINE -eq 1 ]]; then
     if [[ "$RASTER_BANNER_COUNT" -gt 0 ]]; then
         info "Pipeline:"   "RAW + raster — $CR3_COUNT CR3s (catalog) + $RASTER_BANNER_COUNT JPEG/PNG (direct)"
