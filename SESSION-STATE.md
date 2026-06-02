@@ -7,13 +7,13 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 12 (`export-enhancements` — 2026-05-31) — **SHIPPED**. Feature enhancements for export pipeline including linear 16-bit to sRGB ISP with ToneMappingLut, watermarking implementation with tiny_skia, O(N) badge preloading, and O(1) collision resolution.
+**Last session**: 14 (`xmp-library-upgrade` — 2026-05-31) — **SHIPPED** via PR #15. TD-022: event-based pass-through XMP writer preserving third-party fields. (Session 13 `auto-tone-and-sortable-labels` shipped via PR #14.) **NOTE**: the session-14 session-end review left Round-3 findings open (2 CRITICAL + 9 HIGH in `photohelper-sidecar`) with no Round-4 CLEAN artifact, yet the PR merged — see `docs/plans/session-15.md § Unresolved prior-session item`.
 
-**Current session**: 14 (`xmp-library-upgrade` — 2026-05-31) — branch `session-14/xmp-library-upgrade`. **IMPLEMENTATION** (remediating Round 1 feedback).
+**Current session**: 15 (`watermark-and-rename` — 2026-06-01) — branch `session-15/watermark-and-rename`. **PLAN AUTHORED** (contract committed; awaiting plan-review Round 1).
 
-**Goal**: Implement TD-022: Replace the hand-rolled `quick-xml` XMP writer template with a robust event-based pass-through writer that preserves third-party XMP fields.
+**Goal**: Two non-destructive, source-read-only batch features. (1) `watermark` subcommand: standardize a mixed raster+RAW directory to `--max-long-edge` (aspect-locked), apply a full-width bottom black shadow gradient (100%→0% over bottom 30% height), then composite dual corner image marks (`--mark1` top-right @14% height, `--mark2` bottom-left @13% height, 4.6% margins), exporting high-quality JPEGs. (2) `rename` subcommand: copy RAW + matching `.xmp` sidecars into `--output` as `Cluster-{X}_Cull-{Y}-OriginalFilename.ext` (X = zero-padded cluster id, Y = zero-padded NIMA score). See `docs/plans/session-15.md`.
 
-**Action**: Remediate the round 1 feedback.
+**Action**: Run plan-review (Round 1 → remediate → Round 2) on `docs/plans/session-15.md` before any implementation code.
 
 **Session-end review (session 12 — COMPLETE)**:
 - R1 → 5 items remediated (O(N) badge preloading, O(N^2) collision, EX_PARTIAL_FAIL strictness, decoupling DevelopRow, watermark fail-open).
