@@ -1270,6 +1270,12 @@ fn composite_mark_on_pixmap(
 }
 
 /// Alpha-blend a badge (scaled by `scale_factor`) into `pixmap` at pixel `(x, y)`.
+///
+/// Uses `image::imageops::FilterType::Lanczos3` for the downscale step so that
+/// extreme downscales (e.g. 15-20× for high-resolution mark PNGs at small output
+/// sizes) produce sharp, properly anti-aliased results. tiny-skia's Pattern bicubic
+/// is an interpolation filter that looks blurry at these ratios because it only
+/// samples nearby source pixels instead of averaging over the full coverage area.
 fn blit_badge_at(
     pixmap: &mut tiny_skia::Pixmap,
     badge: &tiny_skia::Pixmap,
@@ -1277,31 +1283,44 @@ fn blit_badge_at(
     y: f32,
     scale_factor: f32,
 ) -> Result<(), ExportError> {
-    let final_w = (badge.width() as f32 * scale_factor).max(1.0).ceil() as u32;
-    let final_h = (badge.height() as f32 * scale_factor).max(1.0).ceil() as u32;
+    let final_w = (badge.width() as f32 * scale_factor).max(1.0).round() as u32;
+    let final_h = (badge.height() as f32 * scale_factor).max(1.0).round() as u32;
 
-    let paint = tiny_skia::Paint {
-        shader: tiny_skia::Pattern::new(
-            badge.as_ref(),
-            tiny_skia::SpreadMode::Pad,
-            tiny_skia::FilterQuality::Bicubic,
-            1.0,
-            tiny_skia::Transform::from_scale(scale_factor, scale_factor),
-        ),
-        ..Default::default()
-    };
+    // Demultiply tiny-skia's premultiplied RGBA → straight RGBA for the image crate.
+    let badge_data = badge.data();
+    let mut straight: Vec<u8> = Vec::with_capacity(badge_data.len());
+    for px in badge_data.chunks_exact(4) {
+        let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
+        match a {
+            0 => straight.extend_from_slice(&[0, 0, 0, 0]),
+            255 => straight.extend_from_slice(&[r, g, b, 255]),
+            _ => {
+                let af = a as f32;
+                straight.push(((r as f32 / af) * 255.0).round().clamp(0.0, 255.0) as u8);
+                straight.push(((g as f32 / af) * 255.0).round().clamp(0.0, 255.0) as u8);
+                straight.push(((b as f32 / af) * 255.0).round().clamp(0.0, 255.0) as u8);
+                straight.push(a);
+            }
+        }
+    }
 
-    let mut tmp = tiny_skia::Pixmap::new(final_w, final_h).ok_or(ExportError::AllocationFailed)?;
-    let rect = tiny_skia::Rect::from_xywh(0.0, 0.0, final_w as f32, final_h as f32)
-        .ok_or(ExportError::InvalidDimensions)?;
-    tmp.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
+    // High-quality anti-aliased downscaling (Lanczos3 = best quality for large downscales).
+    let src_img = image::RgbaImage::from_raw(badge.width(), badge.height(), straight)
+        .ok_or(ExportError::AllocationFailed)?;
+    let resized = image::imageops::resize(
+        &src_img,
+        final_w,
+        final_h,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let resized_raw = resized.as_raw();
 
-    let src = tmp.data();
+    // Alpha-composite into the destination (straight-alpha source → premultiplied dst).
     let dst_w = pixmap.width() as i32;
     let dst_h = pixmap.height() as i32;
-    let dst = pixmap.data_mut();
     let base_x = x.round() as i32;
     let base_y = y.round() as i32;
+    let dst = pixmap.data_mut();
 
     for row in 0..final_h as i32 {
         for col in 0..final_w as i32 {
@@ -1311,13 +1330,21 @@ fn blit_badge_at(
                 continue;
             }
             let si = ((row * final_w as i32 + col) * 4) as usize;
+            let sa = resized_raw[si + 3];
+            if sa == 0 {
+                continue;
+            }
             let di = ((dy * dst_w + dx) * 4) as usize;
-            let sa = src[si + 3] as f32;
-            let inv_a = 1.0 - sa / 255.0;
-            dst[di] = (src[si] as f32 + dst[di] as f32 * inv_a).clamp(0.0, 255.0) as u8;
-            dst[di + 1] = (src[si + 1] as f32 + dst[di + 1] as f32 * inv_a).clamp(0.0, 255.0) as u8;
-            dst[di + 2] = (src[si + 2] as f32 + dst[di + 2] as f32 * inv_a).clamp(0.0, 255.0) as u8;
-            // dst[di + 3] left at 255.
+            let alpha = sa as f32 / 255.0;
+            let inv_a = 1.0 - alpha;
+            // Premultiply straight source on the fly before blending into premult dst.
+            dst[di] =
+                (resized_raw[si] as f32 * alpha + dst[di] as f32 * inv_a).clamp(0.0, 255.0) as u8;
+            dst[di + 1] = (resized_raw[si + 1] as f32 * alpha + dst[di + 1] as f32 * inv_a)
+                .clamp(0.0, 255.0) as u8;
+            dst[di + 2] = (resized_raw[si + 2] as f32 * alpha + dst[di + 2] as f32 * inv_a)
+                .clamp(0.0, 255.0) as u8;
+            // dst[di + 3] stays 255.
         }
     }
 
