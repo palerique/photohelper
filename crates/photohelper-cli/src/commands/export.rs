@@ -22,6 +22,7 @@ use photohelper_sidecar::read_xmp;
 use rayon::prelude::*;
 
 use crate::Cli;
+use crate::commands::util::{TempFileGuard, resolve_collisions};
 use crate::exit_code;
 use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
 
@@ -183,41 +184,6 @@ impl ExportStats {
     }
 }
 
-/// RAII Temporary File Guard to delete temporary `.tmp` files if dropped before commit.
-struct TempFileGuard {
-    path: PathBuf,
-    committed: bool,
-}
-
-impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            committed: false,
-        }
-    }
-
-    fn commit(&mut self) {
-        self.committed = true;
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            if let Err(e) = std::fs::remove_file(&self.path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(
-                        path = %self.path.display(),
-                        error = %e,
-                        "failed to clean up temporary file in drop"
-                    );
-                }
-            }
-        }
-    }
-}
-
 /// Driver for `photohelper export`.
 ///
 /// # Errors
@@ -268,23 +234,21 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
     }
 
     // 3. Deterministic Collision Resolution
-    let mut collision_map = HashMap::new();
-    let mut stem_counts: HashMap<PathBuf, usize> = HashMap::new();
-
-    for row in &rows {
-        let source_path = row.source_path();
-        let stem = source_path
+    let source_paths: Vec<PathBuf> = rows.iter().map(|r| r.source_path().to_path_buf()).collect();
+    let collision_map = resolve_collisions(&args.output, &source_paths, |src| {
+        let stem = src
             .file_stem()
             .unwrap_or_else(|| std::ffi::OsStr::new("photo"));
-
-        let actual_score = row.nima_score().filter(|s| s.is_finite() && !s.is_nan());
-
-        let cluster_prefix = match row.dedup_cluster_id() {
-            Some(id) => format!("cluster-{id:03}-"),
-            _ => String::new(),
-        };
-
-        let base_name = if let Some(score) = actual_score {
+        // Find the corresponding row to get cull score + cluster id.
+        let row_opt = rows.iter().find(|r| r.source_path() == src);
+        let actual_score = row_opt
+            .and_then(|r| r.nima_score())
+            .filter(|s| s.is_finite() && !s.is_nan());
+        let cluster_prefix = row_opt
+            .and_then(|r| r.dedup_cluster_id())
+            .map(|id| format!("cluster-{id:03}-"))
+            .unwrap_or_default();
+        if let Some(score) = actual_score {
             format!(
                 "{}cull-{:05.2}-{}.jpg",
                 cluster_prefix,
@@ -293,25 +257,8 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             )
         } else {
             format!("{}{}.jpg", cluster_prefix, stem.to_string_lossy())
-        };
-
-        let mut candidate = args.output.join(&base_name);
-
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let target_key = PathBuf::from(candidate.to_string_lossy().to_lowercase());
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let target_key = candidate.clone();
-
-        let count = stem_counts.entry(target_key).or_insert(0);
-        if *count > 0 {
-            let base_stem = base_name.strip_suffix(".jpg").unwrap_or(&base_name);
-            let suffix_name = format!("{base_stem}_{count}.jpg");
-            candidate = args.output.join(&suffix_name);
         }
-        *count += 1;
-
-        collision_map.insert(source_path.to_path_buf(), candidate);
-    }
+    });
 
     let stats = Arc::new(ExportStats::new());
     let cancelled = Arc::new(AtomicBool::new(false));
