@@ -50,17 +50,10 @@ echo 'export PHOTOHELPER_MODEL_DIR="$HOME/photohelper/models"' >> ~/.bashrc && s
 photohelper --help
 ```
 
-### Windows (x86_64)
+### Windows
 
-```powershell
-Expand-Archive photohelper-VERSION-x86_64-pc-windows-gnu.zip -DestinationPath .
-cd photohelper-VERSION-x86_64-pc-windows-gnu
-# Copy exe + DLL to a permanent location, then add to PATH:
-Copy-Item photohelper.exe, onnxruntime.dll -Destination "$env:LOCALAPPDATA\photohelper\"
-$env:PATH += ";$env:LOCALAPPDATA\photohelper"
-$env:PHOTOHELPER_MODEL_DIR = "$env:LOCALAPPDATA\photohelper\models"
-# (See README-install.md inside the archive for full instructions)
-```
+Pre-built Windows binaries are planned for v0.2. In the meantime, Windows users
+can build from source using WSL2 (Ubuntu) and follow the Linux install steps.
 
 > **Note on models**: `PHOTOHELPER_MODEL_DIR` only needs to be set if you use
 > the `cull` or `dedup` subcommands (AI features). All other subcommands work

@@ -464,17 +464,23 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
-### TD-029 — Windows x86_64 binary distribution (RESOLVED 2026-06-02, session 15)
+### TD-029 — Windows x86_64 binary distribution deferred to v0.2 (2026-06-02, session 15)
 
-- **Status**: **CLOSED** — resolved in the same session it was filed.
+- **Status**: Open
 - **Opened**: 2026-06-02 (session 15, release-CI implementation)
-- **Closed**: 2026-06-02 (session 15, Windows support added)
-- **Resolution**: Added `build-windows-x86_64` job to `.github/workflows/release.yml`
-  using `windows-latest` + `msys2/setup-msys2` (MINGW64). Modified `build.rs` to invoke
-  `sh ./configure` instead of `./configure` directly so the shebang script runs through
-  MSYS2's sh on Windows. Rust target: `x86_64-pc-windows-gnu`. Archive: `.zip` with
-  `photohelper.exe` + `onnxruntime.dll` + models. Remaining limitation: MinGW ABI (not
-  MSVC-native); MSVC binary planned for v0.2 if users request it.
+- **Investigation findings** (session 15): ort-sys 2.0.0-rc.12's pyke CDN has no
+  `x86_64-pc-windows-gnu` prebuilt (only `x86_64-pc-windows-msvc`). The MSVC prebuilt
+  is a `.dll` (dynamic), requiring bundling. The raw lzma2 archive format used by pyke
+  CDN can't be decompressed by MSYS2's standard tools without Python scripting.
+  Switching to `x86_64-pc-windows-msvc` target requires cmake-based LibRaw compilation
+  (the existing `build.rs` uses sh+autoconf which isn't available in MSVC builds).
+  `build.rs` was updated to use `sh ./configure` (not `./configure`) for compatibility.
+- **Fundamental fix**: Either (A) switch to `x86_64-pc-windows-msvc` + cmake for
+  LibRaw + Python to decompress ORT archive, OR (B) build a static ORT for
+  `windows-gnu` from source. Option A is lower risk.
+- **Binding trigger**: First Windows user request OR v0.2 milestone.
+- **Scope estimate**: ~150 LoC (build.rs cmake path + GHA job + Python ORT download).
+- **Consequence of inaction**: Windows users must use WSL2 + Linux build.
 
 ---
 

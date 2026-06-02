@@ -2,19 +2,21 @@
 #
 # Triggered by a `v*.*.*` git tag (e.g. `git tag v0.1.0 && git push --tags`).
 #
-# ORT loading architecture (ort 2.0.0-rc.12):
-#   - ORT is loaded at RUNTIME via dlopen, NOT as a conventional dylib dependency.
-#   - The absolute download path is baked into the binary at compile time.
-#   - On end-user machines, the baked path won't exist → use DYLD_LIBRARY_PATH
-#     (macOS) or LD_LIBRARY_PATH (Linux) to point dlopen at the bundled library.
-#   - Each archive includes a photohelper.sh wrapper that sets the library path.
+# ORT runtime architecture (ort 2.0.0-rc.12):
 #
-# ORT prebuilt targets (ort-sys 2.0.0-rc.12 / pyke CDN / ORT 1.24.2):
-#   aarch64-apple-darwin      ✓ — macOS Apple Silicon
-#   x86_64-unknown-linux-gnu  ✓ — Linux glibc
-#   x86_64-pc-windows-msvc    ✓ — Windows (pre-downloaded; C-ABI ok with GNU binary)
-#   x86_64-apple-darwin       ✗ — no prebuilt; Intel Mac users use arm64 via Rosetta 2
-#   x86_64-pc-windows-gnu     ✗ — no prebuilt; we use MSVC ORT DLL with GNU binary
+#   macOS arm64  — ORT inference runs through Apple's CoreML.framework (system,
+#                  always present). Binary has NO external ORT dependency.
+#                  CoreML shows up in `otool -L`; no libonnxruntime.dylib needed.
+#
+#   Linux x86_64 — ort-sys links libonnxruntime.a (ORT 1.24.2 static archive
+#                  cached in ~/.cache/ort.pyke.io/). Binary is self-contained;
+#                  no libonnxruntime.so to bundle.
+#
+#   Windows      — ort-sys has no x86_64-pc-windows-gnu prebuilt on pyke CDN.
+#                  Windows support deferred to v0.2 (TD-029).
+#
+# Each archive contains only: binary + models + README-install.md.
+# PHOTOHELPER_MODEL_DIR env var must point to the models/ directory at runtime.
 #
 # Action versions pinned to commit SHAs (TD-001 policy):
 #   actions/checkout           v4.3.1   34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -23,7 +25,6 @@
 #   actions/upload-artifact    HEAD     043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
 #   actions/download-artifact  HEAD     484a0b528fb4d7bd804637ccb632e47a0e638317
 #   softprops/action-gh-release HEAD    3efcac8951299998593f871640ea8059d6818655
-#   msys2/setup-msys2          v2.31.1  e9898307ac31d1a803454791be09ab9973336e1c
 
 name: Release
 
@@ -38,6 +39,7 @@ env:
 
 jobs:
   # ── macOS arm64 (Apple Silicon) ────────────────────────────────────────────
+  # ORT inference runs through Apple CoreML.framework — no separate ORT library.
   # Intel Mac users: run arm64 binary via Rosetta 2 (transparent).
   build-macos-arm64:
     name: Build macOS arm64
@@ -63,36 +65,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
-          key: release-macos-arm64-v3
+          key: release-macos-arm64-v4
 
       - name: Install LibRaw build dependencies
         run: brew install autoconf automake libtool pkg-config
 
-      - name: Build release binary + capture ORT library immediately
-        # ORT is downloaded by ort-sys during this step. We capture it immediately
-        # before any cache or cleanup can remove it. LD_LIBRARY_PATH/DYLD_LIBRARY_PATH
-        # is used at runtime since ort loads ORT via dlopen.
-        run: |
-          cargo build --release -p photohelper-cli --target ${{ env.TARGET }}
-
-          echo "=== Capturing ORT library ==="
-          # Search immediately after build — library is on disk now
-          ORT_LIB=$(find . "${HOME}" -name 'libonnxruntime.dylib' \
-                    -not -path '*proc_macro*' -not -name '*.bak' 2>/dev/null | head -1 || true)
-          if [[ -z "${ORT_LIB}" ]]; then
-              echo "ERROR: libonnxruntime.dylib not found anywhere" >&2
-              echo "--- otool -L ---" >&2
-              otool -L "target/${{ env.TARGET }}/release/photohelper" >&2 || true
-              echo "--- all dylibs ---" >&2
-              find . "${HOME}" -name '*.dylib' 2>/dev/null | grep -v proc_macro | head -30 >&2
-              exit 1
-          fi
-          echo "Found ORT library: ${ORT_LIB}"
-          # Resolve any symlink, then save to a stable location
-          REAL_ORT=$(readlink -f "${ORT_LIB}" 2>/dev/null || echo "${ORT_LIB}")
-          mkdir -p ort-saved
-          cp "${REAL_ORT}" ort-saved/libonnxruntime.dylib
-          echo "Saved to ort-saved/libonnxruntime.dylib ($(du -sh ort-saved/libonnxruntime.dylib | cut -f1))"
+      - name: Build release binary
+        run: cargo build --release -p photohelper-cli --target ${{ env.TARGET }}
 
       - name: Bundle archive
         run: |
@@ -103,21 +82,9 @@ jobs:
           mkdir -p "${DIR}/models"
 
           cp "target/${TARGET}/release/photohelper" "${DIR}/"
-          cp ort-saved/libonnxruntime.dylib "${DIR}/"
           cp crates/photohelper-ai/models/manifest.toml "${DIR}/models/"
           cp crates/photohelper-ai/models/*.onnx        "${DIR}/models/"
           cp scripts/README-install-macos.md "${DIR}/README-install.md"
-
-          # Create wrapper script: sets DYLD_LIBRARY_PATH so dlopen finds bundled ORT lib.
-          cat > "${DIR}/photohelper.sh" <<'WRAPPER'
-          #!/usr/bin/env bash
-          # photohelper wrapper — sets DYLD_LIBRARY_PATH so ORT finds the bundled library.
-          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          export DYLD_LIBRARY_PATH="${DIR}:${DYLD_LIBRARY_PATH:-}"
-          export PHOTOHELPER_MODEL_DIR="${PHOTOHELPER_MODEL_DIR:-${DIR}/models}"
-          exec "${DIR}/photohelper" "$@"
-          WRAPPER
-          chmod +x "${DIR}/photohelper.sh"
 
           tar czf "${DIR}.tar.gz" "${DIR}"
           shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
@@ -129,6 +96,7 @@ jobs:
           path: photohelper-*.tar.gz*
 
   # ── Linux x86_64-gnu ───────────────────────────────────────────────────────
+  # ort-sys statically links libonnxruntime.a — binary is self-contained.
   build-linux-x86_64:
     name: Build Linux x86_64
     runs-on: ubuntu-latest
@@ -150,7 +118,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential pkg-config autoconf libtool \
-            patchelf libimage-exiftool-perl
+            libimage-exiftool-perl
 
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
         with:
@@ -159,27 +127,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
-          key: release-linux-x86_64-v3
+          key: release-linux-x86_64-v4
 
-      - name: Build release binary + capture ORT library immediately
-        run: |
-          cargo build --release -p photohelper-cli --target ${{ env.TARGET }}
-
-          echo "=== Capturing ORT library ==="
-          ORT_LIB=$(find . "${HOME}" -name 'libonnxruntime.so' \
-                    -not -path '*proc_macro*' -not -name '*.bak' 2>/dev/null | head -1 || true)
-          if [[ -z "${ORT_LIB}" ]]; then
-              echo "ERROR: libonnxruntime.so not found" >&2
-              echo "--- ldd output ---" >&2
-              ldd "target/${{ env.TARGET }}/release/photohelper" >&2 || true
-              find . "${HOME}" -name 'libonnxruntime*' 2>/dev/null | head -20 >&2
-              exit 1
-          fi
-          echo "Found ORT library: ${ORT_LIB}"
-          REAL_ORT=$(readlink -f "${ORT_LIB}" 2>/dev/null || echo "${ORT_LIB}")
-          mkdir -p ort-saved
-          cp "${REAL_ORT}" ort-saved/libonnxruntime.so
-          echo "Saved to ort-saved/libonnxruntime.so ($(du -sh ort-saved/libonnxruntime.so | cut -f1))"
+      - name: Build release binary
+        run: cargo build --release -p photohelper-cli --target ${{ env.TARGET }}
 
       - name: Bundle archive
         run: |
@@ -190,20 +141,9 @@ jobs:
           mkdir -p "${DIR}/models"
 
           cp "target/${TARGET}/release/photohelper" "${DIR}/"
-          cp ort-saved/libonnxruntime.so "${DIR}/"
           cp crates/photohelper-ai/models/manifest.toml "${DIR}/models/"
           cp crates/photohelper-ai/models/*.onnx        "${DIR}/models/"
           cp scripts/README-install-linux.md "${DIR}/README-install.md"
-
-          # Wrapper: sets LD_LIBRARY_PATH so dlopen finds the bundled ORT library.
-          cat > "${DIR}/photohelper.sh" <<'WRAPPER'
-          #!/usr/bin/env bash
-          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          export LD_LIBRARY_PATH="${DIR}:${LD_LIBRARY_PATH:-}"
-          export PHOTOHELPER_MODEL_DIR="${PHOTOHELPER_MODEL_DIR:-${DIR}/models}"
-          exec "${DIR}/photohelper" "$@"
-          WRAPPER
-          chmod +x "${DIR}/photohelper.sh"
 
           tar czf "${DIR}.tar.gz" "${DIR}"
           sha256sum "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
@@ -214,122 +154,10 @@ jobs:
           name: linux-x86_64
           path: photohelper-*.tar.gz*
 
-  # ── Windows x86_64-gnu ─────────────────────────────────────────────────────
-  # MSYS2 MINGW64 provides sh/make/gcc for LibRaw (sh ./configure + make).
-  # ORT MSVC prebuilt is downloaded manually (no windows-gnu prebuilt on pyke CDN).
-  # The MSVC onnxruntime.dll is C-ABI compatible with the MinGW binary.
-  build-windows-x86_64:
-    name: Build Windows x86_64
-    runs-on: windows-latest
-    env:
-      TARGET: x86_64-pc-windows-gnu
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
-        with:
-          lfs: true
-
-      - name: Set version from tag
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v', ''
-          (Get-Content Cargo.toml) -replace '^version = "0\.0\.0"', "version = `"$version`"" | Set-Content Cargo.toml
-          Add-Content $env:GITHUB_ENV "RELEASE_VERSION=$version"
-
-      - uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c  # v2.31.1
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            base-devel
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-autotools
-            mingw-w64-x86_64-pkg-config
-            mingw-w64-x86_64-zlib
-            zip
-
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # 2026-05-29
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: x86_64-pc-windows-gnu
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
-        with:
-          key: release-windows-x86_64-v3
-
-      - name: Download ORT Windows MSVC prebuilt
-        run: |
-          # ORT 1.24.2 MSVC prebuilt — C-ABI compatible with MinGW binary (no C++ objects cross boundary)
-          mkdir -p ort-win-tmp ort-win
-          URL="https://cdn.pyke.io/0/pyke:ort-rs/ms@1.24.2/x86_64-pc-windows-msvc.tar.lzma2"
-          echo "Downloading ORT: ${URL}"
-          curl -L "${URL}" -o ort-win-tmp/ort.tar.lzma2 --retry 3
-          cd ort-win-tmp
-          7z x ort.tar.lzma2 -y > /dev/null
-          7z x "$(ls *.tar)" -o../ort-win -y > /dev/null
-          cd ..
-          echo "ORT library files:"
-          find ort-win -name '*.dll' -o -name '*.lib' | head -10
-
-      - name: Build release binary
-        shell: msys2 {0}
-        env:
-          # ORT_LIB_DIR tells ort-sys to use our prebuilt instead of downloading
-          ORT_LIB_DIR: ${{ github.workspace }}/ort-win/lib
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
-        run: |
-          export PATH="/mingw64/bin:$PATH"
-          cargo build --release -p photohelper-cli --target x86_64-pc-windows-gnu
-
-      - name: Bundle archive (.zip)
-        run: |
-          set -euo pipefail
-          VERSION="${RELEASE_VERSION}"
-          TARGET="x86_64-pc-windows-gnu"
-          DIR="photohelper-${VERSION}-${TARGET}"
-          mkdir -p "${DIR}/models"
-
-          cp "target/${TARGET}/release/photohelper.exe" "${DIR}/"
-
-          # ORT DLL — from our manually downloaded MSVC prebuilt
-          ORT_DLL=$(find ort-win -name 'onnxruntime.dll' 2>/dev/null | head -1 || true)
-          if [[ -z "${ORT_DLL}" || ! -f "${ORT_DLL}" ]]; then
-              echo "ERROR: onnxruntime.dll not found in ort-win" >&2
-              find ort-win -type f | head -20 >&2
-              exit 1
-          fi
-          echo "Using ORT DLL: ${ORT_DLL}"
-          cp "${ORT_DLL}" "${DIR}/onnxruntime.dll"
-
-          cp crates/photohelper-ai/models/manifest.toml "${DIR}/models/"
-          cp crates/photohelper-ai/models/*.onnx        "${DIR}/models/"
-          cp scripts/README-install-windows.md          "${DIR}/README-install.md"
-
-          # Windows batch wrapper to set PATH (so onnxruntime.dll is found via PATH)
-          cat > "${DIR}/photohelper.cmd" <<'CMD'
-          @echo off
-          set "DIR=%~dp0"
-          set "PATH=%DIR%;%PATH%"
-          set "PHOTOHELPER_MODEL_DIR=%PHOTOHELPER_MODEL_DIR%"
-          if "%PHOTOHELPER_MODEL_DIR%"=="" set "PHOTOHELPER_MODEL_DIR=%DIR%models"
-          "%DIR%photohelper.exe" %*
-          CMD
-
-          zip -r "${DIR}.zip" "${DIR}"
-          sha256sum "${DIR}.zip" > "${DIR}.zip.sha256"
-          echo "Archive size: $(du -sh ${DIR}.zip | cut -f1)"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # HEAD
-        with:
-          name: windows-x86_64
-          path: photohelper-*.zip*
-
   # ── GitHub Release ──────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release (draft)
-    needs: [build-macos-arm64, build-linux-x86_64, build-windows-x86_64]
+    needs: [build-macos-arm64, build-linux-x86_64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
