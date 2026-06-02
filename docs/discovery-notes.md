@@ -302,7 +302,9 @@
 - **Owner**: session 07 (this session, resolved in reader loop).
 - **Status**: reconciled (2026-05-30, enforced a strict maximum depth limit of **64** on the qualified path stack inside `crates/photohelper-sidecar/src/reader.rs` and returns a parser error if exceeded).
 
-### DN-033 — photohelper export ignores develop sidecar edits (2026-05-31, session X)
+### DN-038 — photohelper export ignores develop sidecar edits (2026-05-31, session X)
+
+*(Previously mislabelled DN-033 — renumbered here to resolve the duplicate; session-15 D4 correction.)*
 
 - **Observed**: The `photohelper export` command exports the base RAW image without applying any of the `crs:` (Lightroom) or `ph:` edits defined in the `.xmp` sidecars (e.g. exposure compensation, white balance, contrast). The pipeline currently decodes the RAW directly to RGB via `libraw`, performs scaling and watermarking, and then encodes to JPEG via `MozJPEG`.
 - **Why it matters**: `photohelper` functions as a pre-culling and proxy-export assistant for Lightroom, but cannot function as a standalone ISP (Image Signal Processor). If a user expects `photohelper export` to bake-in the AI-suggested exposure and color edits natively, they will see unedited images.
@@ -310,13 +312,13 @@
 - **Binding trigger**: First session that aims to natively apply `.xmp` develop settings before JPEG compression. Will require integrating a mature FOSS image processing engine (like `imageproc`, Darktable's engine, or OpenImageIO) to apply complex adjustments (curves, denoise, white balance matrices) to the linear RAW data.
 - **Status**: open (informational; current behavior is proxy-export by design).
 
-### DN-036 — Image watermarks with dynamic positioning and scaling deferred (2026-05-31, session X)
+### DN-036 — Image watermarks with dynamic positioning and scaling (2026-05-31, session X; trigger fired session 15)
 
 - **Observed**: The `photohelper export` command only supports single-position text watermarks via the `--watermark` flag. It lacks support for image-based badges, simultaneous placement in multiple locations (e.g., both bottom-left and top-right), and dynamic scaling/fitting of image badges to accommodate variable resolution and portrait/landscape orientations. It also currently uses a very tight dynamic padding for text (1.5% of the long edge).
-- **Why it matters**: Users needing to overlay logos, branding, or complex multi-badge arrangements cannot use the export pipeline for their final deliverables. Badges must be placed harmonically (e.g. starting at a baseline 25px offset from the edges, then dynamically scaling this offset to fit the resolution proportionally) so they look consistent on both small proxies and full 24MP exports.
-- **Owner**: Session 08+ (or next export refinement session).
-- **Binding trigger**: Next session that touches the `export` pipeline or `export_photo` logic. Must implement image rendering over `tiny-skia` with dynamic scale factors and coordinate calculation logic that accommodates multiple simultaneous watermark templates, using a base harmonic margin (e.g. proportional equivalent of 25px).
-- **Status**: open (informational; current behavior is limited to simple text rendering).
+- **Why it matters**: Users needing to overlay logos, branding, or complex multi-badge arrangements cannot use the export pipeline for their final deliverables.
+- **Owner**: Session 08+ (or next export refinement session). Cross-ref: DN-002 (watermark configuration scope).
+- **Binding trigger**: ~~Next session that touches `export_photo`~~ — **TRIGGER FIRED** (session 15 D1.0 touched `export_photo`; D2 delivered the dual-corner image-mark capability in the NEW `watermark` subcommand). The `export` pipeline integration of dynamic image badges remains DEFERRED (do NOT hard-close): the export command still uses only text watermarks; integrating `MarkSpec`/`BadgeSizeBasis` marks into `run_export` is a future deliverable. Next binding trigger: next session that modifies `run_export` badge handling.
+- **Status**: PARTIALLY DELIVERED (session 15). The `watermark` subcommand now supports dual height-based corner marks (Mark1 top-right @14% height, Mark2 bottom-left @13% height, 4.6% margins) with shadow gradient on any JPEG/PNG/CR3 source. The `export` pipeline does not yet use the new system. Deferred per plan §D-Q1: export keeps its filmic ISP + legacy watermark path; the `watermark` subcommand is the new standalone pipeline.
 
 ### DN-037 — Fail-open risk in file metadata operations (2026-05-31, session 11)
 
@@ -326,5 +328,17 @@
 - **Binding trigger**: Next time filesystem interaction is added or reviewed.
 - **Status**: reconciled (2026-05-31, updated `conflict.rs` to propagate non-NotFound IO errors natively and `writer.rs` to explicitly match `NotFound` and escalate other errors).
 
-### DN-029: Lightroom Label Sorting and NIMA score padding
-Lightroom native sorting by "Label Text" works lexicographically rather than numerically. To support native NIMA score sorting via labels, the CLI must pad the floating-point values with leading zeros (e.g., `09.50` instead of `9.5`). This ensures that a score of `10.00` correctly sorts after `09.99`.
+### DN-039 — Lightroom label sorting and NIMA score padding (session 15 D4 correction)
+
+*(Previously mislabelled DN-029 at end of file — renumbered here to resolve the duplicate; session-15 D4 correction.)*
+
+Lightroom native sorting by "Label Text" works lexicographically rather than numerically. To support native NIMA score sorting via labels, the CLI must pad the floating-point values with leading zeros (e.g., `09.50` instead of `9.5`). This ensures that a score of `10.00` correctly sorts after `09.99`. The `format_nima_score_label` helper in `commands/util.rs` implements this padding.
+
+### DN-040 — Non-CR3 RAW formats decode-unverified in `watermark` subcommand (2026-06-02, session 15)
+
+- **Observed**: Session 15 D2 (`watermark`) added a `--allow-untested-raw` flag to accept non-CR3 RAW files (cr2/nef/arw/raf/orf/rw2/dng) via LibRaw. These formats are gated by the flag and pass through a post-decode dimension+channel sanity guard (`load_source_image` in `photohelper-export`). However, the sanity guard only catches absurd dimensions and non-3-channel outputs — it **cannot** detect silent colour corruption (channel swap, wrong white balance, incorrect demosaic for exotic CFA patterns) on an untested format. This is distinct from DN-014 (which tracks untested RAW formats in the ingest pipeline; neither trigger subsumes the other).
+- **Why it matters**: A user running `watermark --allow-untested-raw` on a Sony ARW or Nikon NEF file may receive a JPEG that is visually correct for geometry but colour-shifted or channel-swapped without any error or warning. There is no decode regression test for non-CR3 formats.
+- **Owner**: Next session that adds a second decode-tested RAW format to the watermark pipeline.
+- **Binding trigger**: First CI fixture commit for a non-CR3 RAW format (e.g. NEF or ARW under `tests/fixtures/`), or first user report of colour corruption on a gated format, or before v0.2 if any gated format is promoted to non-gated.
+- **Scope estimate**: ~50 LoC per format (fixture + integration test + decode verification) / low risk.
+- **Consequence of inaction**: Users of gated RAW formats receive unverified JPEG output; colour corruption is silent.

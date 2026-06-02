@@ -538,10 +538,14 @@ pub fn load_source_image(
             })
         }
         Some(SourceKind::Raster) => decode_raster(path),
-        Some(SourceKind::Cr3) | Some(SourceKind::UntestedRaw) => decode_raw_srgb8(
-            path,
-            matches!(SourceKind::classify(path), Some(SourceKind::UntestedRaw)),
-        ),
+        Some(SourceKind::Cr3) | Some(SourceKind::UntestedRaw) => {
+            // TD-027: untested-raw decode unverified (colour/demosaic) for non-CR3 formats.
+            // Sanity guard checks dims+channels only; colour correctness not tested.
+            decode_raw_srgb8(
+                path,
+                matches!(SourceKind::classify(path), Some(SourceKind::UntestedRaw)),
+            )
+        }
     }
 }
 

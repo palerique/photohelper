@@ -9,16 +9,16 @@
 
 **Last session**: 14 (`xmp-library-upgrade` — 2026-05-31) — **SHIPPED** via PR #15. TD-022: event-based pass-through XMP writer preserving third-party fields. (Session 13 `auto-tone-and-sortable-labels` shipped via PR #14.) **NOTE**: the session-14 session-end review left Round-3 findings open (2 CRITICAL + 9 HIGH in `photohelper-sidecar`) with no Round-4 CLEAN artifact, yet the PR merged — see `docs/plans/session-15.md § Unresolved prior-session item`.
 
-**Current session**: 15 (`watermark-and-rename` — 2026-06-01) — branch `session-15/watermark-and-rename`. **PLAN-REVIEW COMPLETE** (plan v4; R1 7C+10H → R2 2C+7H → R3 0C+2H, **converged**). Implementation not yet started.
+**Current session**: 15 (`watermark-and-rename` — 2026-06-01) — branch `session-15/watermark-and-rename`. **IMPLEMENTATION COMPLETE.** Plan-review COMPLETE (plan v4). D0–D4 all shipped. `just ci` GREEN. **Action: run `/session-end` to fire the final implementation review (R1 → R2 → CLEAN) and ship the PR to main.**
 
 **Plan-review history (session 15 — COMPLETE)**:
-- R1 → 7 CRITICAL + 10 HIGH + 3 MEDIUM + 2 LOW (19 themes) → plan v2. Dominant signal: plan described net-new work as "reuse" (export_photo monolith; RAW filmic vs raster sRGB; shadow/demultiply; sidecar/filename conventions). 4 product decisions (color space, mark-fit, untested-RAW gating, mark formats) resolved with the user.
-- R2 → 2 CRITICAL + 7 HIGH + 6 MEDIUM + 3 LOW (all v2-introduced regressions) → plan v3. CRITICALs: RT-A `canonicalize_within` can't validate a non-existent destination; RT-B sanitized-stem/NAME_MAX silent clobber.
-- R3 → 0 CRITICAL + 2 HIGH + 4 MEDIUM + 5 LOW → plan v4 (CONVERGED). Both R2 CRITICALs verified closed by 3 lenses; all 8 lenses judged implementation-ready. 9th-agent verification across rounds: discard_rate 0.00.
+- R1 → 7 CRITICAL + 10 HIGH + 3 MEDIUM + 2 LOW (19 themes) → plan v2.
+- R2 → 2 CRITICAL + 7 HIGH + 6 MEDIUM + 3 LOW → plan v3.
+- R3 → 0 CRITICAL + 2 HIGH + 4 MEDIUM + 5 LOW → plan v4 (CONVERGED).
 
 **Goal**: Two non-destructive, source-read-only batch features. (1) `watermark` subcommand: standardize a mixed raster+RAW directory to `--max-long-edge` (aspect-locked), apply a full-width bottom black shadow gradient (100%→0% over bottom 30% height), then composite dual corner image marks (`--mark1` top-right @14% height, `--mark2` bottom-left @13% height, 4.6% margins), exporting high-quality JPEGs. (2) `rename` subcommand: copy RAW + matching `.xmp` sidecars into `--output` as `Cluster-{X}_Cull-{Y}-OriginalFilename.ext` (X = zero-padded cluster id, Y = zero-padded NIMA score). See `docs/plans/session-15.md`.
 
-**Action**: **PAUSED for context refresh (2026-06-02).** Resume by reading this file + the latest HANDOFF checkpoint + `docs/plans/session-15.md` v4. First implementation commit is D0 (housekeeping), then D1.0 (extract shared `photohelper-export` primitives). See the precise restart steps in HANDOFF checkpoint.
+**Action**: **Run `/session-end` to ship.** Implementation is done (D0–D4 committed, `just ci` GREEN). Sub-component reviews + session-end double-review are the final gates before the PR.
 
 **Session-end review (session 12 — COMPLETE)**:
 - R1 → 5 items remediated (O(N) badge preloading, O(N^2) collision, EX_PARTIAL_FAIL strictness, decoupling DevelopRow, watermark fail-open).
@@ -106,7 +106,7 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 | `photohelper-raw`     | **implemented (session 02+04)**         | LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw_rgb. 4 integration tests + 3 CLIP D1c tests. |
 | `photohelper-ai`      | **implemented (session 04+05)**         | NIMA + CLIP ViT-B/32 int8 (MIT, 85.3 MB). ImageEmbedding, MobileClip, EmbeddingZeroVector+EmbeddingCorruptBytes errors. CLIP_MODEL_SLUG+CLIP_MODEL_MANIFEST_NAME. |
 | `photohelper-sidecar` | **implemented (session 06+07+11+14)**      | XMP sidecar I/O, TD-022 strict pass-through event writer, atomic write, conflict resolution (DN-004), Lightroom namespace compatibility. Robust error handling, TOCTOU fix. NOTE: session-14 Round-3 review left 15 verified findings open (2C+9H+4M+2L; see HANDOFF) — not remediated in session 15 (out of scope). |
-| `photohelper-export`  | **implemented (session 08)**            | Resize + watermark + MozJPEG encoding design fully implemented, integrated, and verified with 100% green tests. |
+| `photohelper-export`  | **implemented (session 08+15)**         | Resize + watermark + MozJPEG encoding + shared rendering primitives (D1.0): resize_rgb, render_to_jpeg, pixmap_to_rgb, compress_jpeg, load_source_image, shadow_alpha_ramp, MarkPlacement, GeometryError, SourceKind. |
 | `photohelper-cameras` | **implemented (session 01)**            | CameraProfile trait + CanonR8 stub + CameraRegistry::for_exif with normalization.                             |
 | `photohelper-catalog` | **implemented (sessions 01+04+05)**     | Session 01: Catalog::open, upsert, PhotoRow, v1 schema. Session 04 D2a+D2b: schema v2 (cull_scores + FK + SCHEMA_VERSION=2), CullRow, InsertScoreOutcome, unsuperseded_unscored_rows, insert_cull_score. Decision docs 0001+0002. Session 05 D2a+D2b: schema v3 (embeddings + dup_clusters + apply_v2_to_v3 + SCHEMA_VERSION=3), EmbeddingRow, InsertEmbeddingOutcome, unembedded_rows, insert_embedding (dim*4==bytes guard), all_embeddings_for_model (superseded excluded), insert_dup_cluster. Decision doc 0003. |
 

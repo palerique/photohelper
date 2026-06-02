@@ -71,6 +71,54 @@ Read-only against the SQLite catalog at `<ingest-dir>/.photohelper/catalog.db`.
 Pass `--catalog <db-path>` instead of a directory for a custom location.
 Run `just list-catalog --help` for the full flag list.
 
+### Apply shadow + dual corner marks (`watermark`)
+
+Apply a bottom shadow gradient and two corner image marks (PNG badges) to every
+JPEG/PNG/CR3 in a directory, exporting high-quality JPEGs to `--output`:
+
+```bash
+just watermark \
+  --source ~/Pictures/shoots/session-01 \
+  --mark1 ~/assets/logo-top.png \
+  --mark2 ~/assets/logo-bottom.png \
+  --output ~/exports/watermarked \
+  --max-long-edge 2048
+```
+
+Or directly:
+
+```bash
+photohelper watermark \
+  --source <SRC_DIR> --mark1 <PNG> --mark2 <PNG> \
+  --output <OUT_DIR> [--max-long-edge N] [--force] [--strict]
+```
+
+The output directory must not be inside the source directory. Marks must be PNG
+files. Non-CR3 RAW formats require `--allow-untested-raw`.
+
+### Rename with catalog metadata (`rename`)
+
+Copy RAW files (and their `.xmp` sidecars) into `--output` under prefixed filenames
+derived from the catalog's NIMA score and dedup cluster id:
+
+```bash
+just rename \
+  --source ~/Pictures/shoots/session-01 \
+  --output ~/exports/renamed
+```
+
+Or directly:
+
+```bash
+photohelper rename \
+  --source <SRC_DIR> --output <OUT_DIR> [--force] [--strict]
+```
+
+Output filenames follow the pattern `Cluster-{X}_Cull-{Y}-OriginalFilename.ext`
+(e.g. `Cluster-007_Cull-07.85-IMG_1234.CR3`). Rows without a score use `Cull-NONE`;
+rows without a cluster use `Cluster-NONE`. XMP sidecars are copied verbatim alongside
+each RAW file.
+
 ### Avoiding the two-shell PATH drift footgun
 
 If you use Claude Code in one terminal and a separate shell in another, remember
@@ -90,6 +138,8 @@ get `zsh: no such file or directory` when trying to run them.
 | `dedup` | **Shipped** | MobileCLIP-based image embeddings & duplicate clustering |
 | `develop` | **Shipped** | Write Lightroom-compatible XMP sidecars with ratings, labels, and keywords |
 | `export` | **Shipped** | Batch JPEG export with long-edge resize, watermarks, and MozJPEG encoding |
+| `watermark` | **Shipped** | Shadow gradient + dual corner marks on JPEG/PNG/CR3 → JPEG batch |
+| `rename` | **Shipped** | Copy RAW+XMP into `--output` under `Cluster-X_Cull-Y-Name.ext` prefixes |
 | `run` | Planned (session 10+) | Orchestrate ingest → cull → develop → export |
 | `models` | Planned (session 10+) | Manage AI model bundles |
 | `camera` | Planned (session 10+) | Inspect camera profiles |

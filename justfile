@@ -188,6 +188,14 @@ dedup *ARGS:
 develop *ARGS:
     @./scripts/photohelper-develop.sh {{ARGS}}
 
+# Apply shadow gradient + dual corner marks to a directory of images → JPEG.
+watermark *ARGS:
+    @./scripts/photohelper-watermark.sh {{ARGS}}
+
+# Copy RAW+XMP into --output under catalog-driven Cluster-X_Cull-Y-Name filenames.
+rename *ARGS:
+    @./scripts/photohelper-rename.sh {{ARGS}}
+
 # Defense-in-depth: `crates/photohelper-raw` is the only crate allowed to
 # contain `unsafe` code, and only `ffi.rs` inside it. The crate Cargo.toml
 # allows `unsafe_code` for the FFI module; every other source file carries

@@ -440,6 +440,18 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Consequence of inaction**: Domain boundaries and constraints are pushed to the edges of the application (e.g. CLI argument parsing), making it possible to construct a `SidecarSettings` instance in-code with invalid physical values (like a negative temperature or out-of-bounds exposure).
 - **Related**: `docs/code-reviews/session-11-round2.md § Theme J`.
 
+### TD-027 — Non-CR3 RAW decode verification fixtures absent for `watermark --allow-untested-raw` (2026-06-02, session 15)
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 15 D4)
+- **Stop-gap location**: `crates/photohelper-export/src/lib.rs:load_source_image` — non-CR3 RAW (UntestedRaw arm) passes through only a dimension+channel sanity guard; colour/demosaic correctness is unverified. `crates/photohelper-cli/src/commands/watermark.rs` — `--allow-untested-raw` flag gates access without decode tests. In-source label: `// TD-027: untested-raw decode unverified`.
+- **Fundamental fix**: For each promoted RAW format (nef/arw/cr2/raf/orf/rw2/dng), commit a CC0-licensed fixture under `tests/fixtures/<ext>/`, run it through `load_source_image(path, true)`, and assert: (a) decoded dims match expected W×H, (b) 3 channels confirmed by `RgbImage::new` guard, (c) sample-pixel within a known physical range (not saturated, not zero). One integration test per format. Remove the format from the `UntestedRaw` classification once its test lands.
+- **Binding trigger**: First session that commits a non-CR3 RAW fixture, OR first user report of colour corruption under `--allow-untested-raw`, OR before v0.2 if any gated format is promoted to non-gated.
+- **Scope estimate**: ~50 LoC per format (fixture pipeline + test assertions) / low risk.
+- **Consequence of inaction**: Silent colour corruption (channel swap, wrong WB, exotic CFA pattern) on gated RAW formats goes undetected. Users who pass `--allow-untested-raw` may receive visually incorrect JPEG output. See DN-040.
+
+---
+
 ### TD-040 — DevelopArgs violates struct_excessive_bools lint
 
 - **Status**: Open
