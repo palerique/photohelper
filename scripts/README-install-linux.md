@@ -12,26 +12,28 @@
 tar xzf photohelper-VERSION-x86_64-unknown-linux-gnu.tar.gz
 cd photohelper-VERSION-x86_64-unknown-linux-gnu
 
-# 2. Copy binary and ORT runtime
-sudo cp photohelper /usr/local/bin/
-sudo cp libonnxruntime.so* /usr/local/lib/
-sudo ldconfig
+# 2. Copy directory to a permanent location
+mkdir -p ~/opt/photohelper
+cp -R . ~/opt/photohelper/
+chmod +x ~/opt/photohelper/photohelper.sh
 
-# 3. Place models in a permanent location
-mkdir -p ~/photohelper/models
-cp models/*.onnx        ~/photohelper/models/
-cp models/manifest.toml ~/photohelper/models/
+# 3. Symlink the wrapper script to PATH
+sudo ln -sf ~/opt/photohelper/photohelper.sh /usr/local/bin/photohelper
 
-# 4. Add to your shell profile (~/.bashrc or ~/.zshrc)
-echo 'export PHOTOHELPER_MODEL_DIR="$HOME/photohelper/models"' >> ~/.bashrc
-source ~/.bashrc
+# OR: run directly from the archive directory
+./photohelper.sh --help
 ```
+
+## Why the wrapper script?
+
+The archive includes `photohelper.sh` which sets `LD_LIBRARY_PATH` so the OS finds
+`libonnxruntime.so` (the AI runtime) next to the binary. Use `photohelper.sh`
+instead of `photohelper` directly.
 
 ## Verify
 
 ```bash
 photohelper --help
-photohelper --version
 ```
 
 ## Uninstall
