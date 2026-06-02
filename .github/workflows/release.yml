@@ -74,18 +74,14 @@ jobs:
           # Binary
           cp "target/${TARGET}/release/photohelper" "${DIR}/"
 
-          # ORT shared library — search the Cargo build output
-          ORT_LIB=""
-          for pattern in \
-              "target/${TARGET}/release/build/ort-*/out/onnxruntime/lib/libonnxruntime.dylib" \
-              "target/release/build/ort-*/out/onnxruntime/lib/libonnxruntime.dylib" \
-              "target/${TARGET}/release/build/ort-sys-*/out/onnxruntime/lib/libonnxruntime.dylib"; do
-              ORT_LIB=$(find . -path "${pattern}" | head -1 2>/dev/null || true)
-              [[ -n "${ORT_LIB}" ]] && break
-          done
+          # ORT shared library — ort crate downloads to ort-downloaded-libs/ (sibling
+          # of target/) when using download-binaries feature. Search the whole workspace.
+          echo "Locating libonnxruntime.dylib..."
+          ORT_LIB=$(find . -name 'libonnxruntime.dylib' 2>/dev/null | grep -v '.bak' | head -1 || true)
           if [[ -z "${ORT_LIB}" ]]; then
-              echo "ERROR: libonnxruntime.dylib not found in build output" >&2
-              find target -name 'libonnxruntime*' 2>/dev/null | head -20
+              echo "All .dylib files in workspace:" >&2
+              find . -name '*.dylib' 2>/dev/null | head -30
+              echo "ERROR: libonnxruntime.dylib not found anywhere in workspace" >&2
               exit 1
           fi
           echo "Found ORT library: ${ORT_LIB}"
@@ -154,19 +150,15 @@ jobs:
 
           cp "target/${TARGET}/release/photohelper" "${DIR}/"
 
-          ORT_LIB=""
-          for pattern in \
-              "target/${TARGET}/release/build/ort-*/out/onnxruntime/lib/libonnxruntime.dylib" \
-              "target/release/build/ort-*/out/onnxruntime/lib/libonnxruntime.dylib" \
-              "target/${TARGET}/release/build/ort-sys-*/out/onnxruntime/lib/libonnxruntime.dylib"; do
-              ORT_LIB=$(find . -path "${pattern}" | head -1 2>/dev/null || true)
-              [[ -n "${ORT_LIB}" ]] && break
-          done
+          echo "Locating libonnxruntime.dylib..."
+          ORT_LIB=$(find . -name 'libonnxruntime.dylib' 2>/dev/null | grep -v '.bak' | head -1 || true)
           if [[ -z "${ORT_LIB}" ]]; then
+              echo "All .dylib files in workspace:" >&2
+              find . -name '*.dylib' 2>/dev/null | head -30
               echo "ERROR: libonnxruntime.dylib not found" >&2
-              find target -name 'libonnxruntime*' 2>/dev/null | head -20
               exit 1
           fi
+          echo "Found ORT library: ${ORT_LIB}"
           cp "${ORT_LIB}" "${DIR}/"
           install_name_tool -add_rpath @loader_path "${DIR}/photohelper"
 
@@ -228,28 +220,19 @@ jobs:
 
           cp "target/${TARGET}/release/photohelper" "${DIR}/"
 
-          # Find ORT shared library (.so)
-          ORT_LIB=""
-          for pattern in \
-              "target/${TARGET}/release/build/ort-*/out/onnxruntime/lib/libonnxruntime.so" \
-              "target/release/build/ort-*/out/onnxruntime/lib/libonnxruntime.so" \
-              "target/${TARGET}/release/build/ort-sys-*/out/onnxruntime/lib/libonnxruntime.so"; do
-              ORT_LIB=$(find . -path "${pattern}" | head -1 2>/dev/null || true)
-              [[ -n "${ORT_LIB}" ]] && break
-          done
+          # ORT library — ort crate downloads to ort-downloaded-libs/ (workspace root)
+          echo "Locating libonnxruntime.so..."
+          ORT_LIB=$(find . -name 'libonnxruntime.so' 2>/dev/null | grep -v '.bak' | head -1 || true)
           if [[ -z "${ORT_LIB}" ]]; then
-              # Fallback: any libonnxruntime.so in build output
-              ORT_LIB=$(find target -name 'libonnxruntime.so' | head -1 || true)
-          fi
-          if [[ -z "${ORT_LIB}" ]]; then
-              echo "ERROR: libonnxruntime.so not found" >&2
-              find target -name 'libonnxruntime*' 2>/dev/null | head -20
+              echo "All .so files matching ort:" >&2
+              find . -name 'libonnxruntime*' 2>/dev/null | head -30
+              echo "ERROR: libonnxruntime.so not found anywhere in workspace" >&2
               exit 1
           fi
           echo "Found ORT library: ${ORT_LIB}"
           cp "${ORT_LIB}" "${DIR}/"
 
-          # Also copy any versioned symlink targets
+          # Also copy any versioned variants in the same directory
           ORT_DIR=$(dirname "${ORT_LIB}")
           find "${ORT_DIR}" -name 'libonnxruntime.so*' -exec cp -n {} "${DIR}/" \; || true
 
@@ -295,7 +278,7 @@ jobs:
           (Get-Content Cargo.toml) -replace '^version = "0\.0\.0"', "version = `"$version`"" | Set-Content Cargo.toml
           Add-Content $env:GITHUB_ENV "RELEASE_VERSION=$version"
 
-      - uses: msys2/setup-msys2@648c8d3d3d8554833d64123949594327799cdcc2  # HEAD 2026-06-02
+      - uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c  # v2.31.1
         with:
           msystem: MINGW64
           update: true
@@ -337,18 +320,13 @@ jobs:
 
           cp "target/${TARGET}/release/photohelper.exe" "${DIR}/"
 
-          # Find ORT DLL — downloaded by ort crate's download-binaries feature
-          ORT_DLL=""
-          for pattern in \
-              "target/${TARGET}/release/build/ort-*/out/onnxruntime/lib/onnxruntime.dll" \
-              "target/release/build/ort-*/out/onnxruntime/lib/onnxruntime.dll" \
-              "target/${TARGET}/release/build/ort-sys-*/out/onnxruntime/lib/onnxruntime.dll"; do
-              ORT_DLL=$(find . -path "${pattern}" | head -1 2>/dev/null || true)
-              [[ -n "${ORT_DLL}" ]] && break
-          done
+          # Find ORT DLL — ort crate downloads to ort-downloaded-libs/ (workspace root)
+          echo "Locating onnxruntime.dll..."
+          ORT_DLL=$(find . -name 'onnxruntime.dll' 2>/dev/null | head -1 || true)
           if [[ -z "${ORT_DLL}" ]]; then
-              echo "ERROR: onnxruntime.dll not found in build output" >&2
-              find target -name 'onnxruntime*.dll' 2>/dev/null | head -20
+              echo "All DLLs matching ort:" >&2
+              find . -name 'onnxruntime*.dll' 2>/dev/null | head -30
+              echo "ERROR: onnxruntime.dll not found anywhere in workspace" >&2
               exit 1
           fi
           echo "Found ORT DLL: ${ORT_DLL}"
