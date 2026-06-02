@@ -12,8 +12,9 @@
 #                  cached in ~/.cache/ort.pyke.io/). Binary is self-contained;
 #                  no libonnxruntime.so to bundle.
 #
-#   Windows      — ort-sys has no x86_64-pc-windows-gnu prebuilt on pyke CDN.
-#                  Windows support deferred to v0.2 (TD-029).
+#   Windows x86_64 — ort-sys statically links libonnxruntime.a (Pyke CDN MSVC
+#                    prebuilt, ANL-004). LibRaw via vcpkg x64-windows-static-md.
+#                    Binary is self-contained; no onnxruntime.dll to bundle.
 #
 # Each archive contains only: binary + models + README-install.md.
 # PHOTOHELPER_MODEL_DIR env var must point to the models/ directory at runtime.
@@ -210,8 +211,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $env:PHOTOHELPER_MODEL_DIR = "crates/photohelper-ai/models"
-          & "target/${{ env.TARGET }}/release/photohelper.exe" --help
+          & "target/${{ env.TARGET }}/release/photohelper.exe" --version
 
       - name: Bundle archive
         shell: pwsh
@@ -252,8 +252,11 @@ jobs:
           $zipPath = "photohelper-${VERSION}-${TARGET}.zip"
           if (-not (Test-Path $zipPath)) { throw "Expected archive not found: $zipPath" }
           $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
-          $entries = $zip.Entries | Select-Object -ExpandProperty FullName
-          $zip.Dispose()
+          $entries = try {
+            $zip.Entries | Select-Object -ExpandProperty FullName
+          } finally {
+            $zip.Dispose()
+          }
           Write-Output "Archive contents:"
           $entries | ForEach-Object { Write-Output "  $_" }
           # Assert required files

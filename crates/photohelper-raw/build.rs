@@ -60,6 +60,11 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/libraw-0.22.1.tar.gz");
     println!("cargo:rerun-if-changed=vendor/libraw-0.22.1.tar.gz.sha256");
     println!("cargo:rerun-if-changed=build.rs");
+    // Re-run if vcpkg env vars change so the Windows MSVC path relinks correctly.
+    println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+    println!("cargo:rerun-if-env-changed=VCPKGRS_TRIPLET");
+    println!("cargo:rerun-if-env-changed=VCPKGRS_DYNAMIC");
+    println!("cargo:rerun-if-env-changed=VCPKGRS_DISABLE");
 
     if let Err(e) = run() {
         eprintln!("photohelper-raw build.rs: {e}");
@@ -131,7 +136,7 @@ fn run() -> Result<(), String> {
 /// Windows MSVC build path: use vcpkg-installed LibRaw.
 ///
 /// The Rust `vcpkg` crate defaults to the `x64-windows-static-md` triplet for
-/// `x86_64-pc-windows-msvc` (confirmed: `vcpkg-0.2.15/src/lib.rs:35`).
+/// `x86_64-pc-windows-msvc` (see vcpkg crate docs; overridable via `VCPKGRS_TRIPLET`).
 /// That triplet links libraries statically with DLL-linked CRT (UCRT, ships
 /// with Windows 10+). `VCPKG_ROOT` must be set; on GHA `windows-latest`,
 /// `VCPKG_INSTALLATION_ROOT` provides the canonical path.
@@ -173,14 +178,25 @@ fn run_windows_msvc(manifest_dir: &Path) -> Result<(), String> {
     compile_shim(manifest_dir, include_dir)
 }
 
-/// Compile the C ABI shim against LibRaw headers from `include_dir`.
-///
-/// Called from both Unix (passing the extracted tarball root, which contains
-/// `libraw/libraw.h` as a subdirectory) and Windows MSVC (passing the vcpkg
-/// installed include directory, which also contains `libraw/libraw.h`).
-/// The MSVC linker performs multi-pass symbol resolution, so the ordering
-/// of vcpkg-emitted directives before the shim emit is safe.
+// Compile the C ABI shim against LibRaw headers from `include_dir`.
+//
+// Called from both Unix (passing the extracted tarball root, which contains
+// `libraw/libraw.h` as a subdirectory) and Windows MSVC (passing the vcpkg
+// installed include directory, which also contains `libraw/libraw.h`).
+// Cargo collects all `cargo:rustc-link-lib` directives before invoking the linker,
+// so the order of println! calls within build.rs does not affect link ordering.
 fn compile_shim(manifest_dir: &Path, include_dir: &Path) -> Result<(), String> {
+    // Fail early with an actionable message if the expected header is missing,
+    // rather than letting the compiler emit a confusing "No such file" diagnostic.
+    let expected_header = include_dir.join("libraw").join("libraw.h");
+    if !expected_header.exists() {
+        return Err(format!(
+            "LibRaw header not found at {}. \
+             Windows: re-run `vcpkg install libraw:x64-windows-static-md`. \
+             Unix: delete OUT_DIR and rebuild to re-extract the tarball.",
+            expected_header.display()
+        ));
+    }
     let shim_src = manifest_dir.join("cpp").join("photohelper_libraw_shim.c");
     println!("cargo:rerun-if-changed={}", shim_src.display());
     cc::Build::new()

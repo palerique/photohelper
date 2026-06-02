@@ -188,6 +188,8 @@ impl RawPath {
             path: owned.clone(),
             reason: "non-utf8-path",
         })?;
+        // TD-043 (stop-gap): no \\?\ prefix for Windows long paths (>260 chars).
+        // See TECH-DEBT.md for the fundamental fix.
         let cstr = CString::new(path_str).map_err(|_| Error::RawPath {
             path: owned.clone(),
             reason: "interior-nul-byte",

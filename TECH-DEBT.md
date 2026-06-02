@@ -507,7 +507,7 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Status**: Open
 - **Opened**: 2026-06-02 (session 16, D1 vcpkg path)
 - **Stop-gap location**: `crates/photohelper-raw/build.rs::run_windows_msvc`
-  (added in session-16 commit `d80f9abf`). In-source label: `// TD-042 (stop-gap)`.
+  (added in session-16 commit `d80f9abf`). In-source label: `/// # TD-042 (stop-gap)` (doc-comment heading in function doc).
 - **Fundamental fix**: Remove the vcpkg dependency. Enumerate LibRaw 0.22.1 source
   files in `build.rs` (`lib/libraw_c_api.cpp`, `lib/libraw_cxx.cpp`,
   `lib/libraw_datastream.cpp`) and compile them via `cc::Build` directly with
@@ -538,6 +538,22 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Scope estimate**: ~30 LoC (helper + conditional application) / low risk.
 - **Consequence of inaction**: Users with photos in deep directory trees (> 260
   chars total path) cannot ingest/process files on Windows; error is non-obvious.
+
+---
+
+### TD-044 — No Windows CI gate on PRs (2026-06-02, session 16)
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 16 implementation review finding IR1-J)
+- **Stop-gap**: The Windows MSVC build is exercised only in `release.yml` (on `v*.*.*` tag push).
+  A PR that breaks `run_windows_msvc` or the Windows CI job is invisible until release.
+- **Fundamental fix**: Add a `build-windows` job to `.github/workflows/ci.yml` that runs
+  `cargo build -p photohelper-cli --target x86_64-pc-windows-msvc` on `windows-latest`
+  (with vcpkg). Full integration tests are deferred (cost); a build-only gate catches
+  compile and link failures before they reach the release pipeline.
+- **Binding trigger**: Before the next Windows release tag OR when a Windows-specific PR is opened.
+- **Scope estimate**: ~50 LoC (ci.yml job) / low risk.
+- **Consequence of inaction**: Windows build breakage is invisible on PRs; discovered only when a release tag is pushed.
 
 ## Closed
 
