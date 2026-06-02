@@ -34,7 +34,9 @@ photohelper --help
 
 ### macOS (Intel — x86_64)
 
-Same steps as above but use `photohelper-VERSION-x86_64-apple-darwin.tar.gz`.
+No Intel-native binary is provided (the ORT runtime library has no x86_64-apple-darwin
+prebuilt). Use the **arm64 binary via Rosetta 2** — Apple Silicon binaries run transparently
+on Intel Macs: `xattr -dr com.apple.quarantine photohelper && ./photohelper --help`.
 
 ### Linux (x86_64)
 

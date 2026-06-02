@@ -97,7 +97,7 @@ quick-xml = { version = "0.36", features = ["serialize"] }
 # ort's default CPU execution provider.
 # features: "std" required for non-no_std targets; "ndarray" enables array I/O.
 # TD-014: ort RC pin =2.0.0-rc.12; upgrade to stable 2.0.0 when released.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native"] }
 
 # Image resizing, watermarking, and JPEG encoding
 tiny-skia = "0.12.0"
