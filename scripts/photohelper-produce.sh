@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/photohelper-produce.sh
 #
-# All-in-one production script: ingest → cull → cluster → develop → export → watermark.
+# All-in-one production script: ingest → cull → cluster → develop → export+watermark (single-pass).
 # Output is a single folder of final watermarked JPEGs, resized and AI-selected.
 #
 # Usage:
@@ -110,7 +110,7 @@ if [[ $RAW_PIPELINE -eq 1 ]]; then
     if [[ "$RASTER_BANNER_COUNT" -gt 0 ]]; then
         info "Pipeline:"   "RAW + raster — $CR3_COUNT CR3s (catalog) + $RASTER_BANNER_COUNT JPEG/PNG (direct)"
     else
-        info "Pipeline:"   "RAW — ingest→cull→cluster→develop→export→watermark ($CR3_COUNT CR3s)"
+        info "Pipeline:"   "RAW — ingest→cull→cluster→develop→export+watermark single-pass ($CR3_COUNT CR3s)"
     fi
     info "Min rating:" "$MIN_RATING / 5 (AI curation threshold)"
 else
@@ -193,7 +193,7 @@ if [[ $RAW_PIPELINE -eq 1 ]]; then
         done
         step "Watermark raster sources ($RASTER_SOURCE_COUNT JPEG/PNG from source — ${MAX_LONG_EDGE}px)"
         T=$(ts)
-        # Allow exit 2 (partial failure / mark-doesnt-fit) — don't abort the whole run.
+        # Allow exit 2 (partial failure / mark-doesnt-fit); abort on other non-zero codes.
         WM_EXIT=0
         "$BINARY" watermark \
             --source "$RASTER_TEMP" \
@@ -203,6 +203,10 @@ if [[ $RAW_PIPELINE -eq 1 ]]; then
             --max-long-edge "$MAX_LONG_EDGE" \
             ${FORCE} || WM_EXIT=$?
         rm -rf "$RASTER_TEMP"
+        if [[ $WM_EXIT -ne 0 && $WM_EXIT -ne 2 ]]; then
+            echo "Raster watermark failed (exit $WM_EXIT). Aborting." >&2
+            exit $WM_EXIT
+        fi
         WATERMARKED=$(find "$WATERMARK_DIR" -name "*.jpg" | wc -l | tr -d ' ')
         WM_SIZE=$(du -sh "$WATERMARK_DIR" 2>/dev/null | awk '{print $1}')
         if [[ $WM_EXIT -eq 2 ]]; then
@@ -226,13 +230,23 @@ else
     RASTER_COUNT=$(find "$SOURCE_DIR" -maxdepth 2 \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | wc -l | tr -d ' ')
     step "Watermark ($RASTER_COUNT raster files — shadow + marks at ${MAX_LONG_EDGE}px)"
     T=$(ts)
+    # Allow exit 2 (partial failure / mark-doesnt-fit); abort on other non-zero codes.
+    WM_EXIT=0
     "$BINARY" watermark \
         --source "$SOURCE_DIR" \
         --mark1  "$MARK1" \
         --mark2  "$MARK2" \
         --output "$WATERMARK_DIR" \
         --max-long-edge "$MAX_LONG_EDGE" \
-        ${FORCE}
+        ${FORCE} || WM_EXIT=$?
+    if [[ $WM_EXIT -ne 0 && $WM_EXIT -ne 2 ]]; then
+        echo "Watermark failed (exit $WM_EXIT). Aborting." >&2
+        exit $WM_EXIT
+    fi
+    if [[ $WM_EXIT -eq 2 ]]; then
+        warn "Some files could not be watermarked (mark-doesnt-fit for narrow images)."
+        warn "Those images are too narrow for the current mark sizes. See warnings above."
+    fi
     WATERMARKED=$(find "$WATERMARK_DIR" -name "*.jpg" | wc -l | tr -d ' ')
     WM_SIZE=$(du -sh "$WATERMARK_DIR" 2>/dev/null | awk '{print $1}')
     ok "Done in $(hms $(elapsed $T)) — $WATERMARKED JPEG(s) watermarked ($WM_SIZE)"

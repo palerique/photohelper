@@ -495,6 +495,19 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 - **Consequence of inaction**: The struct remains difficult to parse mentally and violates the project's strict linting policies via an inline `#[allow]`.
 - **Related**: `docs/code-reviews/session-11-round3.md` (Theme I).
 
+---
+
+### TD-041 — `MarkSpec.margin_y` dead in `Height` compositing path; margin fields should live in `BadgeSizeBasis` variants
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 15, Round 3 review, Theme R3-C)
+- **Stop-gap location**: `crates/photohelper-export/src/lib.rs:239` (`pub margin_y: f32`) and `:1205` (Height branch ignores `margin_y`)
+- **Stop-gap commit**: session-15 R3 remediation — docstrings updated but field kept as-is to avoid churn
+- **Fundamental fix**: Move margin fields into `BadgeSizeBasis` variants: `Height { frac: f32, margin_frac: f32 }` (single equal-margin fraction applied to short edge) and `LongEdge { scale: Scale, margin_x: f32, margin_y: f32 }`. This makes the dead-field state structurally unrepresentable. Update `composite_mark_on_pixmap`, `MarkSpec` construction in `export.rs` and `watermark.rs`, and all unit tests referencing margin fields.
+- **Binding trigger**: Next session that adds a new `BadgeSizeBasis` variant or modifies `MarkSpec` construction.
+- **Scope estimate**: ~60 LoC / low risk.
+- **Consequence of inaction**: Future callers who set `margin_y` on a `Height`-based `MarkSpec` observe no visual change — a silent logic error.
+
 ## Closed
 
 - **TD-003** (heartbeat join) — closed 2026-05-28 in session 2 (see entry above for the remediation).

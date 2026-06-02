@@ -326,7 +326,8 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             margin_y: MARK_MARGIN_FRAC,
         });
     }
-    let single_pass_marks = Arc::new(single_pass_marks);
+    // Owned Vec — MarkSpec::clone is cheap (Arc<Pixmap> + a few Copy scalars).
+    let single_pass_marks: Vec<_> = single_pass_marks;
 
     // 4. Spawn Heartbeat progress thread
     let stop = Arc::new(HeartbeatStop::new());
@@ -463,7 +464,7 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
             watermarks,
             force: args.force,
             tone_mapping,
-            render_marks: single_pass_marks.as_ref().clone(),
+            render_marks: single_pass_marks.clone(),
             render_shadow,
         };
 

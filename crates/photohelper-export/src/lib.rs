@@ -196,11 +196,12 @@ pub struct ExportOptions {
     pub force: bool,
     /// Tone-mapping settings.
     pub tone_mapping: ToneMappingOptions,
-    /// Height-based corner marks applied via render_to_jpeg (single-pass with filmic ISP).
-    /// When non-empty, these are composited AFTER the filmic tone-map, saving a second
-    /// JPEG encode/decode cycle compared to running the `watermark` subcommand separately.
+    /// Height-based corner marks composited after filmic tone-mapping inside the same
+    /// encode pass — avoids a second JPEG decode/encode cycle versus a separate
+    /// `watermark` subcommand invocation.
     pub render_marks: Vec<MarkSpec>,
-    /// Shadow gradient to apply when `render_marks` is non-empty.
+    /// Optional shadow gradient. Callers should set this alongside `render_marks`; the
+    /// shadow is applied independently of whether marks are present.
     pub render_shadow: Option<ShadowSpec>,
 }
 
@@ -233,9 +234,16 @@ pub struct MarkSpec {
     pub basis: BadgeSizeBasis,
     /// Which corner slot to place the badge.
     pub slot: MarkSlot,
-    /// Left/right margin as a fraction of the post-resize image width (0.0–1.0).
+    /// Margin fraction used to compute the pixel distance from adjacent edges.
+    ///
+    /// Interpretation depends on [`BadgeSizeBasis`]:
+    /// - `Height` path: applied to `min(W, H)` (the image short edge) to produce
+    ///   equal-pixel margins from both adjacent borders. `margin_y` is **ignored**.
+    /// - `LongEdge` path: applied to post-resize image **width** for the x-axis margin.
     pub margin_x: f32,
-    /// Top/bottom margin as a fraction of the post-resize image height (0.0–1.0).
+    /// Top/bottom margin as a fraction of post-resize image **height** (LongEdge path only).
+    ///
+    /// **Not used** in the `Height` compositing path — `margin_x` controls both axes there.
     pub margin_y: f32,
 }
 
@@ -394,10 +402,9 @@ impl MarkPlacement {
 
     /// Like [`fit`] but uses a **single absolute pixel margin** on every adjacent side.
     ///
-    /// The recommended value is `round(min(W, H) × MARK_MARGIN_FRAC)`, which
-    /// produces the same physical distance from both the right edge and the top
-    /// edge (for Mark1) and both the left edge and the bottom edge (for Mark2),
-    /// regardless of the image aspect ratio.
+    /// Callers pass `round(min(W, H) × MARK_MARGIN_FRAC)`, which produces the same
+    /// physical distance from both the right edge and the top edge (for Mark1) and
+    /// both the left edge and the bottom edge (for Mark2), regardless of aspect ratio.
     ///
     /// # Errors
     ///
@@ -1184,21 +1191,6 @@ fn composite_mark_on_pixmap(
 
     match &mark.basis {
         BadgeSizeBasis::Height(frac) => {
-            // Readability guard: warn if mark will be too small to read.
-            let mark_h_preview = ((ph as f32 * frac).round() as u32).max(1);
-            if mark_h_preview < MARK_MIN_READABLE_PX {
-                tracing::warn!(
-                    slot = ?mark.slot,
-                    mark_h_px = mark_h_preview,
-                    min_readable_px = MARK_MIN_READABLE_PX,
-                    image_h_px = ph,
-                    "Mark rendered at only {mark_h_preview}px height \
-                     (< {MARK_MIN_READABLE_PX}px minimum readable). \
-                     Consider a larger --max-long-edge. The mark will still be \
-                     composited — check the output and decide."
-                );
-            }
-
             // Equal-margin compositing: margin_px is based on the SHORT edge so
             // the mark is equidistant from both its adjacent borders on any
             // aspect ratio (fixes asymmetric placement on 16:9 / 3:2 images).
@@ -1212,6 +1204,22 @@ fn composite_mark_on_pixmap(
                 mark.slot,
             )
             .map_err(ExportError::Geometry)?;
+
+            // Readability guard: warn after placement so we use the resolved height.
+            if placement.h() < MARK_MIN_READABLE_PX {
+                tracing::warn!(
+                    slot = ?mark.slot,
+                    mark_h_px = placement.h(),
+                    min_readable_px = MARK_MIN_READABLE_PX,
+                    image_h_px = ph,
+                    "Mark rendered at only {}px height \
+                     (< {MARK_MIN_READABLE_PX}px minimum readable). \
+                     Consider a larger output resolution. The mark will still be \
+                     composited — check the output and decide.",
+                    placement.h(),
+                );
+            }
+
             let sf = placement.h() as f32 / bh.max(1.0);
             blit_badge_at(
                 pixmap,
@@ -1292,26 +1300,12 @@ fn blit_badge_at(
     let final_w = (badge.width() as f32 * scale_factor).max(1.0).round() as u32;
     let final_h = (badge.height() as f32 * scale_factor).max(1.0).round() as u32;
 
-    // Demultiply tiny-skia's premultiplied RGBA → straight RGBA for the image crate.
-    let badge_data = badge.data();
-    let mut straight: Vec<u8> = Vec::with_capacity(badge_data.len());
-    for px in badge_data.chunks_exact(4) {
-        let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
-        match a {
-            0 => straight.extend_from_slice(&[0, 0, 0, 0]),
-            255 => straight.extend_from_slice(&[r, g, b, 255]),
-            _ => {
-                let af = a as f32;
-                straight.push(((r as f32 / af) * 255.0).round().clamp(0.0, 255.0) as u8);
-                straight.push(((g as f32 / af) * 255.0).round().clamp(0.0, 255.0) as u8);
-                straight.push(((b as f32 / af) * 255.0).round().clamp(0.0, 255.0) as u8);
-                straight.push(a);
-            }
-        }
-    }
-
-    // High-quality anti-aliased downscaling (Lanczos3 = best quality for large downscales).
-    let src_img = image::RgbaImage::from_raw(badge.width(), badge.height(), straight)
+    // High-quality anti-aliased downscaling in premultiplied space (Lanczos3).
+    // tiny-skia stores pixels as premultiplied RGBA; the image crate's resize
+    // operates on premultiplied data correctly — filtering in straight-alpha space
+    // would produce dark halos at semi-transparent badge edges because the Lanczos3
+    // kernel's negative lobes pull colors toward the zero-RGB transparent pixels.
+    let src_img = image::RgbaImage::from_raw(badge.width(), badge.height(), badge.data().to_vec())
         .ok_or(ExportError::AllocationFailed)?;
     let resized = image::imageops::resize(
         &src_img,
@@ -1321,7 +1315,8 @@ fn blit_badge_at(
     );
     let resized_raw = resized.as_raw();
 
-    // Alpha-composite into the destination (straight-alpha source → premultiplied dst).
+    // Alpha-composite into the destination (premultiplied source over premultiplied dst).
+    // resized_raw is premultiplied: dst = src_premult + dst_premult × (1 − src_alpha/255).
     let dst_w = pixmap.width() as i32;
     let dst_h = pixmap.height() as i32;
     let base_x = x.round() as i32;
@@ -1341,15 +1336,12 @@ fn blit_badge_at(
                 continue;
             }
             let di = ((dy * dst_w + dx) * 4) as usize;
-            let alpha = sa as f32 / 255.0;
-            let inv_a = 1.0 - alpha;
-            // Premultiply straight source on the fly before blending into premult dst.
-            dst[di] =
-                (resized_raw[si] as f32 * alpha + dst[di] as f32 * inv_a).clamp(0.0, 255.0) as u8;
-            dst[di + 1] = (resized_raw[si + 1] as f32 * alpha + dst[di + 1] as f32 * inv_a)
-                .clamp(0.0, 255.0) as u8;
-            dst[di + 2] = (resized_raw[si + 2] as f32 * alpha + dst[di + 2] as f32 * inv_a)
-                .clamp(0.0, 255.0) as u8;
+            let inv_a = 1.0 - sa as f32 / 255.0;
+            dst[di] = (resized_raw[si] as f32 + dst[di] as f32 * inv_a).clamp(0.0, 255.0) as u8;
+            dst[di + 1] =
+                (resized_raw[si + 1] as f32 + dst[di + 1] as f32 * inv_a).clamp(0.0, 255.0) as u8;
+            dst[di + 2] =
+                (resized_raw[si + 2] as f32 + dst[di + 2] as f32 * inv_a).clamp(0.0, 255.0) as u8;
             // dst[di + 3] stays 255.
         }
     }
@@ -2343,5 +2335,133 @@ mod tests {
         let decoded = load_source_image(&path, false).unwrap();
         let pix = decoded.pixel_rgb(0, 0).unwrap();
         assert_eq!(pix, [77, 88, 99], "PNG pixel must survive exactly");
+    }
+
+    // ----- blit_badge_at alpha-compositing tests (R3-F) -----
+
+    /// Helper: create a 1×1 tiny_skia Pixmap with the given premultiplied RGBA bytes.
+    fn make_1x1_pixmap(r: u8, g: u8, b: u8, a: u8) -> tiny_skia::Pixmap {
+        let mut p = tiny_skia::Pixmap::new(1, 1).unwrap();
+        let d = p.data_mut();
+        d[0] = r;
+        d[1] = g;
+        d[2] = b;
+        d[3] = a;
+        p
+    }
+
+    /// blit_badge_at: fully transparent badge pixel leaves destination unchanged.
+    #[test]
+    fn test_blit_badge_at_fully_transparent_leaves_dst() {
+        let badge = make_1x1_pixmap(0, 0, 0, 0); // a=0 → skip
+        let mut dst = make_1x1_pixmap(0, 0, 255, 255); // solid blue
+        blit_badge_at(&mut dst, &badge, 0.0, 0.0, 1.0).unwrap();
+        let d = dst.data();
+        assert_eq!(d[0], 0, "R must stay 0 (blue)");
+        assert_eq!(d[1], 0, "G must stay 0 (blue)");
+        assert_eq!(d[2], 255, "B must stay 255 (blue)");
+    }
+
+    /// blit_badge_at: fully opaque badge replaces destination pixel.
+    #[test]
+    fn test_blit_badge_at_fully_opaque_replaces_dst() {
+        let badge = make_1x1_pixmap(255, 0, 0, 255); // opaque red (premultiplied)
+        let mut dst = make_1x1_pixmap(0, 0, 255, 255); // solid blue
+        blit_badge_at(&mut dst, &badge, 0.0, 0.0, 1.0).unwrap();
+        let d = dst.data();
+        assert!(
+            (d[0] as i32 - 255).abs() <= 2,
+            "R must be near 255 (red badge), got {}",
+            d[0]
+        );
+        assert!(d[1] <= 2, "G must be near 0, got {}", d[1]);
+        assert!(d[2] <= 2, "B must be near 0, got {}", d[2]);
+    }
+
+    /// blit_badge_at: half-transparent premultiplied green badge over solid blue.
+    /// Premultiplied blend: dst = src_premult + dst_premult × (1 − alpha/255).
+    /// src = (0, 128, 0, 128); dst = (0, 0, 255, 255); alpha = 128/255 ≈ 0.502.
+    /// R: 0 + 0 × 0.498 = 0; G: 128 + 0 × 0.498 = 128; B: 0 + 255 × 0.498 ≈ 127.
+    #[test]
+    fn test_blit_badge_at_semi_transparent_blend() {
+        // Premultiplied green at half-alpha: straight (0,255,0) × (128/255) = (0,128,0,128).
+        let badge = make_1x1_pixmap(0, 128, 0, 128);
+        let mut dst = make_1x1_pixmap(0, 0, 255, 255); // solid blue
+        blit_badge_at(&mut dst, &badge, 0.0, 0.0, 1.0).unwrap();
+        let d = dst.data();
+        // Lanczos3 on a 1×1 image is identity; allow ±4 for rounding.
+        assert!(d[0] <= 4, "R must be near 0, got {}", d[0]);
+        assert!(
+            (d[1] as i32 - 128).abs() <= 4,
+            "G must be near 128, got {}",
+            d[1]
+        );
+        assert!(
+            (d[2] as i32 - 127).abs() <= 4,
+            "B must be near 127 (blue × inv_alpha), got {}",
+            d[2]
+        );
+    }
+
+    // ----- render_to_jpeg with marks + shadow (R3-A) -----
+
+    /// render_to_jpeg non-trivial path: shadow + height-based mark are composited
+    /// without error, and the output is a valid JPEG with correct dimensions.
+    #[test]
+    fn test_render_to_jpeg_with_shadow_and_mark() {
+        let w = 32u32;
+        let h = 32u32;
+        // Gray background.
+        let rgb = vec![160u8; (w * h * 3) as usize];
+
+        // Small solid-white badge (premultiplied white = straight white at a=255).
+        let mut badge_pixmap = tiny_skia::Pixmap::new(4, 4).unwrap();
+        {
+            let d = badge_pixmap.data_mut();
+            for chunk in d.chunks_exact_mut(4) {
+                chunk[0] = 255; // R
+                chunk[1] = 255; // G
+                chunk[2] = 255; // B
+                chunk[3] = 255; // A
+            }
+        }
+        let mark = MarkSpec {
+            badge: Arc::new(badge_pixmap),
+            basis: BadgeSizeBasis::Height(0.25),
+            slot: MarkSlot::Mark1,
+            margin_x: MARK_MARGIN_FRAC,
+            margin_y: MARK_MARGIN_FRAC,
+        };
+
+        let opts = RenderOptions {
+            long_edge: None,
+            downscale_only: false,
+            quality: 90,
+            shadow: Some(ShadowSpec { band_frac: 0.3 }),
+            marks: vec![mark],
+        };
+
+        let bytes = render_to_jpeg(&rgb, w, h, &opts).unwrap();
+        assert!(!bytes.is_empty(), "JPEG output must not be empty");
+        assert_eq!(bytes[0], 0xFF, "must start with JPEG SOI 0xFF");
+        assert_eq!(bytes[1], 0xD8, "must start with JPEG SOI 0xD8");
+
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        assert_eq!(decoded.width(), w, "output width must match input");
+        assert_eq!(decoded.height(), h, "output height must match input");
+
+        // Shadow: bottom row must be darker than top row.
+        let top_lum: u32 = {
+            let [r, g, b] = decoded.get_pixel(0, 0).0;
+            r as u32 + g as u32 + b as u32
+        };
+        let bot_lum: u32 = {
+            let [r, g, b] = decoded.get_pixel(0, h - 1).0;
+            r as u32 + g as u32 + b as u32
+        };
+        assert!(
+            bot_lum < top_lum,
+            "bottom lum={bot_lum} must be < top lum={top_lum} (shadow applied)"
+        );
     }
 }

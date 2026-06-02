@@ -3137,3 +3137,109 @@ fn rename_sidecar_copy_fail_no_final_raw_committed() {
         expected_raw.display()
     );
 }
+
+// =====================================================================
+// D2 — watermark: unsupported format (JXL/HEIC) counted as skipped (R3-H)
+// =====================================================================
+
+/// A file with .jxl extension is not supported by the image crate;
+/// the watermark subcommand must warn and count it as skipped-unsupported, exit 0.
+#[test]
+fn watermark_jxl_file_counted_as_skipped_unsupported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("source");
+    let out = tmp.path().join("out");
+    let mark = tmp.path().join("mark.png");
+    std::fs::create_dir_all(&src).unwrap();
+
+    // A dummy .jxl file — SourceKind::classify checks extension, not content.
+    std::fs::write(src.join("photo.jxl"), b"not-jxl-content").unwrap();
+    write_synthetic_png(&mark, 50, 50);
+
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "watermark",
+            "--source",
+            src.to_str().unwrap(),
+            "--mark1",
+            mark.to_str().unwrap(),
+            "--mark2",
+            mark.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0)
+        .stderr(predicates::str::contains("skipped-unsupported: 1"))
+        .stderr(predicates::str::contains("unsupported format"));
+}
+
+// =====================================================================
+// D1 — export: single-pass --mark1-png path (R3-A)
+// =====================================================================
+
+/// export --mark1-png applies the mark via the single-pass render path (no second JPEG cycle).
+/// Skipped if LFS fixtures are not present.
+#[test]
+fn export_single_pass_mark1_png_writes_jpeg() {
+    let fixture_dir = cr3_fixture_dir();
+    if !fixture_dir.join("CRAW_FULL_FRAME.CR3").exists() {
+        return; // LFS fixtures not pulled; skip.
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cat_path = tmp.path().join("catalog.db");
+    let out_dir = tmp.path().join("export_out");
+    let mark = tmp.path().join("mark.png");
+
+    // Small PNG mark (50×50 white square).
+    write_synthetic_png(&mark, 50, 50);
+
+    let test_cr3_src = fixture_dir.join("CRAW_FULL_FRAME.CR3");
+    let test_cr3_dest = tmp.path().join("CRAW_FULL_FRAME.CR3");
+    std::fs::copy(&test_cr3_src, &test_cr3_dest).unwrap();
+
+    // Ingest the CR3.
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "ingest",
+            tmp.path().to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
+
+    // Export with --mark1-png and --with-shadow (single-pass path).
+    Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "export",
+            "--output",
+            out_dir.to_str().unwrap(),
+            "--min-rating",
+            "0",
+            "--long-edge",
+            "600",
+            "--mark1-png",
+            mark.to_str().unwrap(),
+            "--with-shadow",
+        ])
+        .assert()
+        .code(0)
+        .stderr(predicates::str::contains("written: 1"));
+
+    let expected_jpg = out_dir.join("CRAW_FULL_FRAME.jpg");
+    assert!(expected_jpg.exists(), "Output JPEG must exist");
+    assert!(
+        std::fs::metadata(&expected_jpg).unwrap().len() > 0,
+        "Output JPEG must not be empty"
+    );
+}
