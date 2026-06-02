@@ -18,7 +18,7 @@ use photohelper_catalog::Catalog;
 use rayon::prelude::*;
 
 use crate::Cli;
-use crate::commands::util::{TempFileGuard, resolve_collisions};
+use crate::commands::util::{TempFileGuard, format_nima_score_label, resolve_collisions};
 use crate::exit_code;
 use crate::heartbeat::{HeartbeatStop, heartbeat_interval, run_heartbeat_loop};
 
@@ -133,7 +133,9 @@ impl RenamedFilename {
             _ => "Cluster-NONE".to_string(),
         };
         let cull_part = match nima_score {
-            Some(s) if s.is_finite() && !s.is_nan() => format!("Cull-{s:05.2}"),
+            Some(s) if s.is_finite() && !s.is_nan() => {
+                format!("Cull-{}", format_nima_score_label(s))
+            }
             _ => "Cull-NONE".to_string(),
         };
         let prefix = format!("{cluster_part}_{cull_part}-");
@@ -275,8 +277,13 @@ pub fn run_rename(cli: &Cli, args: &RenameArgs) -> anyhow::Result<u8> {
         };
         match RenamedFilename::build(row.dedup_cluster_id(), row.nima_score(), src) {
             Ok(rf) => rf.as_str().to_string(),
-            Err(_) => {
-                // Fallback to plain filename if sanitization fails.
+            Err(e) => {
+                // Stem had a forbidden character; fall back to the plain filename.
+                tracing::warn!(
+                    path = %src.display(),
+                    error = %e,
+                    "stem sanitization failed; falling back to plain filename (Cluster/Cull prefix lost)"
+                );
                 src.file_name()
                     .map_or_else(|| "photo".to_string(), |n| n.to_string_lossy().into_owned())
             }
@@ -432,8 +439,6 @@ pub fn run_rename(cli: &Cli, args: &RenameArgs) -> anyhow::Result<u8> {
             return;
         }
 
-        raw_guard.commit();
-
         if let Err(e) = std::fs::rename(&raw_tmp, final_raw_path) {
             tracing::warn!(
                 from = %raw_tmp.display(),
@@ -442,12 +447,13 @@ pub fn run_rename(cli: &Cli, args: &RenameArgs) -> anyhow::Result<u8> {
                 "rename RAW tmp → final failed"
             );
             stats.errored.fetch_add(1, Ordering::Relaxed);
-            let _ = std::fs::remove_file(&raw_tmp);
+            // raw_guard.drop() cleans up raw_tmp automatically.
             if args.strict {
                 cancelled.store(true, Ordering::Relaxed);
             }
             return;
         }
+        raw_guard.commit(); // Disarm cleanup only after rename succeeds.
 
         // Commit sidecar if we had one.
         match sidecar_result {
@@ -456,12 +462,12 @@ pub fn run_rename(cli: &Cli, args: &RenameArgs) -> anyhow::Result<u8> {
                     tracing::warn!(
                         from = %xmp_tmp.display(),
                         to = %final_xmp_path.display(),
+                        raw_path = %final_raw_path.display(),
                         error = %e,
-                        "rename XMP tmp → final failed"
+                        "XMP sidecar rename failed; RAW is present but sidecar is missing — copy manually"
                     );
                     stats.sidecar_copy_failed.fetch_add(1, Ordering::Relaxed);
-                    let _ = std::fs::remove_file(&xmp_tmp);
-                    // RAW already renamed; we leave it but count sidecar failure.
+                    // xmp_guard cleanup handled by Drop.
                     if args.strict {
                         cancelled.store(true, Ordering::Relaxed);
                     }
@@ -475,8 +481,13 @@ pub fn run_rename(cli: &Cli, args: &RenameArgs) -> anyhow::Result<u8> {
                 stats.renamed.fetch_add(1, Ordering::Relaxed);
             }
             Some(Err(())) => {
-                // Already handled above (sidecar_copy_failed path returns early).
-                unreachable!();
+                // Structurally unreachable: the sidecar_copy_failed early-return
+                // at line 433 guards this arm. Defensive non-panic fallback.
+                tracing::error!("BUG: Some(Err(())) arm reached in rename sidecar match");
+                stats.errored.fetch_add(1, Ordering::Relaxed);
+                if args.strict {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
             }
         }
     });

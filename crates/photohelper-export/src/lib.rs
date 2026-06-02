@@ -217,9 +217,9 @@ pub struct MarkSpec {
     pub basis: BadgeSizeBasis,
     /// Which corner slot to place the badge.
     pub slot: MarkSlot,
-    /// Left/right margin in pixels (pre-computed by caller).
+    /// Left/right margin as a fraction of the post-resize image width (0.0–1.0).
     pub margin_x: f32,
-    /// Top/bottom margin in pixels (pre-computed by caller).
+    /// Top/bottom margin as a fraction of the post-resize image height (0.0–1.0).
     pub margin_y: f32,
 }
 
@@ -800,17 +800,17 @@ pub fn resize_rgb(
     Ok(pixmap)
 }
 
-/// D1c — Compute the shadow gradient ramp for a given image height.
+/// D1c — Compute the shadow gradient ramp for a given image height and band fraction.
 ///
-/// Returns a `Vec<u8>` of length `round(0.30 × H)` (using [`SHADOW_BAND_FRAC`]),
+/// Returns a `Vec<u8>` of length `round(band_frac × H)`,
 /// where `ramp[0] == 0` (transparent, top of band) and
 /// `ramp[band_h − 1] == 255` (fully opaque, bottom row).
 /// Returns an empty vec for tiny images where the band would be zero pixels.
 ///
 /// The pinned denominator `(band_h − 1).max(1)` keeps the formula well-defined
-/// for one-pixel bands.
-pub fn shadow_alpha_ramp(image_h: u32) -> Vec<u8> {
-    let band_h = (image_h as f32 * SHADOW_BAND_FRAC).round() as usize;
+/// for one-pixel bands. Use [`SHADOW_BAND_FRAC`] for the standard 30 % band.
+pub fn shadow_alpha_ramp(image_h: u32, band_frac: f32) -> Vec<u8> {
+    let band_h = (image_h as f32 * band_frac).round() as usize;
     if band_h == 0 {
         return vec![];
     }
@@ -856,8 +856,8 @@ pub fn render_to_jpeg(
     let ph = pixmap.height();
 
     // Step 2: Shadow gradient (D1c).
-    if let Some(ref _shadow) = opts.shadow {
-        apply_shadow_gradient(&mut pixmap);
+    if let Some(ref shadow) = opts.shadow {
+        apply_shadow_gradient(&mut pixmap, shadow.band_frac);
     }
 
     // Step 3: Mark compositing in caller-specified order.
@@ -1036,13 +1036,13 @@ fn rgba_fill(dst: &mut [u8], rgb: &[u8]) {
 
 /// Apply the shadow gradient to the bottom band of `pixmap` in-place.
 ///
-/// The shadow band covers the bottom `round(H × SHADOW_BAND_FRAC)` rows.
+/// The shadow band covers the bottom `round(H × band_frac)` rows.
 /// Each row is darkened by `out = base × (1 − t)` where `t = ramp[row] / 255`.
 /// The alpha channel (byte 3) is not modified.
-fn apply_shadow_gradient(pixmap: &mut tiny_skia::Pixmap) {
+fn apply_shadow_gradient(pixmap: &mut tiny_skia::Pixmap, band_frac: f32) {
     let ph = pixmap.height() as usize;
     let pw = pixmap.width() as usize;
-    let ramp = shadow_alpha_ramp(pixmap.height());
+    let ramp = shadow_alpha_ramp(pixmap.height(), band_frac);
     if ramp.is_empty() {
         return;
     }
@@ -1063,6 +1063,11 @@ fn apply_shadow_gradient(pixmap: &mut tiny_skia::Pixmap) {
 }
 
 /// Composite one [`MarkSpec`] onto `pixmap` using the new slot-based geometry.
+///
+/// For `BadgeSizeBasis::Height` marks the validated `MarkPlacement::fit` path
+/// is used, ensuring the production path exercises the same guards as the tests.
+/// Margins are **fractions** (stored in `MarkSpec.margin_x/margin_y`), computed
+/// into pixels against the post-resize `pw`/`ph`.
 fn composite_mark_on_pixmap(
     pixmap: &mut tiny_skia::Pixmap,
     mark: &MarkSpec,
@@ -1072,70 +1077,78 @@ fn composite_mark_on_pixmap(
     let bw = mark.badge.width() as f32;
     let bh = mark.badge.height() as f32;
 
-    // Compute target mark dimensions from sizing basis.
-    let (mark_w, mark_h) = match &mark.basis {
+    match &mark.basis {
         BadgeSizeBasis::Height(frac) => {
-            let mh = ((ph as f32 * frac).round() as u32).max(1);
-            let scale = mh as f32 / bh.max(1.0);
-            let mw = ((bw * scale).round() as u32).max(1);
-            (mw, mh)
+            // Route through validated MarkPlacement so the production path
+            // exercises the same guards as the unit tests.
+            let placement = MarkPlacement::fit(
+                (pw, ph),
+                (mark.badge.width(), mark.badge.height()),
+                *frac,
+                mark.margin_x, // margin_x is a fraction (0..1)
+                mark.slot,
+            )
+            .map_err(ExportError::Geometry)?;
+            let sf = placement.h() as f32 / bh.max(1.0);
+            blit_badge_at(
+                pixmap,
+                &mark.badge,
+                placement.x() as f32,
+                placement.y() as f32,
+                sf,
+            )
         }
         BadgeSizeBasis::LongEdge(scale_pct) => {
+            // Legacy path used by export_photo re-point.
+            // Margins are fractions of post-resize dimensions.
             let long_e = pw.max(ph) as f32;
             let target_long = (long_e * (scale_pct.value() / 100.0)).max(1.0);
             let badge_long = bw.max(bh);
             let sf = target_long / badge_long.max(1.0);
-            let mw = ((bw * sf).round() as u32).max(1);
-            let mh = ((bh * sf).round() as u32).max(1);
-            (mw, mh)
-        }
-    };
+            let mark_w = ((bw * sf).round() as u32).max(1);
+            let mark_h = ((bh * sf).round() as u32).max(1);
 
-    // Compute position from slot and pre-computed pixel margins.
-    let mx = mark.margin_x.round() as u32;
-    let my = mark.margin_y.round() as u32;
-    let (x, y) = match mark.slot {
-        MarkSlot::Mark1 => {
-            let x = pw
-                .checked_sub(mx)
-                .and_then(|v| v.checked_sub(mark_w))
-                .ok_or(ExportError::Geometry(GeometryError::MarkDoesNotFit {
-                    which: MarkSlot::Mark1,
+            let mx = (pw as f32 * mark.margin_x).round() as u32;
+            let my = (ph as f32 * mark.margin_y).round() as u32;
+            let (x, y) = match mark.slot {
+                MarkSlot::Mark1 => {
+                    let x = pw
+                        .checked_sub(mx)
+                        .and_then(|v| v.checked_sub(mark_w))
+                        .ok_or(ExportError::Geometry(GeometryError::MarkDoesNotFit {
+                            which: MarkSlot::Mark1,
+                            mark_dims: (mark_w, mark_h),
+                            target_dims: (pw, ph),
+                        }))?;
+                    (x, my)
+                }
+                MarkSlot::Mark2 => {
+                    let y = ph
+                        .checked_sub(my)
+                        .and_then(|v| v.checked_sub(mark_h))
+                        .ok_or(ExportError::Geometry(GeometryError::MarkDoesNotFit {
+                            which: MarkSlot::Mark2,
+                            mark_dims: (mark_w, mark_h),
+                            target_dims: (pw, ph),
+                        }))?;
+                    (mx, y)
+                }
+            };
+
+            if x.checked_add(mark_w).is_none_or(|e| e > pw)
+                || y.checked_add(mark_h).is_none_or(|e| e > ph)
+            {
+                let which = mark.slot;
+                return Err(ExportError::Geometry(GeometryError::MarkDoesNotFit {
+                    which,
                     mark_dims: (mark_w, mark_h),
                     target_dims: (pw, ph),
-                }))?;
-            (x, my)
-        }
-        MarkSlot::Mark2 => {
-            let y = ph
-                .checked_sub(my)
-                .and_then(|v| v.checked_sub(mark_h))
-                .ok_or(ExportError::Geometry(GeometryError::MarkDoesNotFit {
-                    which: MarkSlot::Mark2,
-                    mark_dims: (mark_w, mark_h),
-                    target_dims: (pw, ph),
-                }))?;
-            (mx, y)
-        }
-    };
+                }));
+            }
 
-    // Right/bottom overflow check.
-    if x.checked_add(mark_w).is_none_or(|e| e > pw) || y.checked_add(mark_h).is_none_or(|e| e > ph)
-    {
-        let which = mark.slot;
-        return Err(ExportError::Geometry(GeometryError::MarkDoesNotFit {
-            which,
-            mark_dims: (mark_w, mark_h),
-            target_dims: (pw, ph),
-        }));
+            blit_badge_at(pixmap, &mark.badge, x as f32, y as f32, sf)
+        }
     }
-
-    // Scale badge and blit.
-    let sf_w = mark_w as f32 / bw.max(1.0);
-    let sf_h = mark_h as f32 / bh.max(1.0);
-    // Use the smaller of the two scale factors to preserve aspect ratio.
-    let sf = sf_w.min(sf_h);
-    blit_badge_at(pixmap, &mark.badge, x as f32, y as f32, sf)
 }
 
 /// Alpha-blend a badge (scaled by `scale_factor`) into `pixmap` at pixel `(x, y)`.
@@ -1444,8 +1457,8 @@ pub fn export_photo(
     }
 
     // 4. New path: translate image badges at TopRight/BottomLeft to MarkSpec.
-    let long_edge_val = width.max(height) as f32;
-    let padding = (long_edge_val * 0.015).round().max(8.0);
+    // margin_x/margin_y are fractions (0..1); 0.015 ≈ export's (long_edge × 0.015) / long_edge.
+    const EXPORT_MARK_MARGIN_FRAC: f32 = 0.015;
     let marks: Vec<MarkSpec> = options
         .watermarks
         .iter()
@@ -1460,8 +1473,8 @@ pub fn export_photo(
                     badge: badge.pixmap.clone(),
                     basis: BadgeSizeBasis::LongEdge(badge.scale.unwrap_or(Scale::new(5.0))),
                     slot,
-                    margin_x: padding,
-                    margin_y: padding,
+                    margin_x: EXPORT_MARK_MARGIN_FRAC,
+                    margin_y: EXPORT_MARK_MARGIN_FRAC,
                 })
             } else {
                 None
@@ -1669,7 +1682,7 @@ mod tests {
     /// `shadow_alpha_ramp` endpoints and monotonicity.
     #[test]
     fn test_shadow_alpha_ramp_endpoints() {
-        let ramp = shadow_alpha_ramp(100);
+        let ramp = shadow_alpha_ramp(100, SHADOW_BAND_FRAC);
         let band_h = (100.0_f32 * SHADOW_BAND_FRAC).round() as usize;
         assert_eq!(ramp.len(), band_h, "ramp length == round(0.30 * H)");
         assert_eq!(ramp[0], 0, "top of band is transparent");
@@ -1684,11 +1697,14 @@ mod tests {
     #[test]
     fn test_shadow_alpha_ramp_tiny_image() {
         // H = 2: band_h = round(0.30 * 2) = 1 → valid ramp of len 1
-        let ramp = shadow_alpha_ramp(2);
+        let ramp = shadow_alpha_ramp(2, SHADOW_BAND_FRAC);
         assert_eq!(ramp.len(), 1);
-        assert_eq!(ramp[0], 0, "single-element band: top = transparent");
+        assert_eq!(
+            ramp[0], 0,
+            "single-element band: row 0 of band = ramp[0] = 0 (no darkening)"
+        );
         // H = 1: band_h = round(0.30 * 1) = 0 → empty
-        let ramp0 = shadow_alpha_ramp(1);
+        let ramp0 = shadow_alpha_ramp(1, SHADOW_BAND_FRAC);
         assert!(ramp0.is_empty(), "band_h==0 → empty ramp");
     }
 
@@ -1712,7 +1728,7 @@ mod tests {
                 chunk[3] = 255;
             }
         }
-        apply_shadow_gradient(&mut pixmap);
+        apply_shadow_gradient(&mut pixmap, SHADOW_BAND_FRAC);
         // Band starts at row 10 - 3 = 7. Mid-band row = 7 + 1 = 8.
         let data = pixmap.data();
         let mid_band_row = 8usize;
@@ -1741,7 +1757,7 @@ mod tests {
                 chunk[3] = 255;
             }
         }
-        apply_shadow_gradient(&mut pixmap);
+        apply_shadow_gradient(&mut pixmap, SHADOW_BAND_FRAC);
         // band_h = round(0.30 * 10) = 3 → starts at row 7.
         // Row 6 (one above band) must be unchanged.
         let data = pixmap.data();
@@ -1823,19 +1839,243 @@ mod tests {
 
     // ----- D1.0 — render_to_jpeg RT-C regression -----
 
-    /// RT-C: `render_to_jpeg` with default options on a known RGB input:
-    /// (a) result is not empty, (b) no shadow band (top row survives).
+    /// RT-C: `render_to_jpeg` with default options — not upscaled, no shadow,
+    /// decoded output pixel close to input (128 ± JPEG tolerance).
     #[test]
     fn test_render_to_jpeg_default_no_shadow_no_marks() {
-        // 8×8 solid-gray image.
         let w = 8u32;
         let h = 8u32;
         let rgb = vec![128u8; (w * h * 3) as usize];
         let opts = RenderOptions::default();
         let bytes = render_to_jpeg(&rgb, w, h, &opts).unwrap();
         assert!(!bytes.is_empty(), "JPEG bytes must not be empty");
-        // Fast-path: no resize, no shadow, no marks — must start with JPEG magic FF D8.
-        assert_eq!(bytes[0], 0xFF);
-        assert_eq!(bytes[1], 0xD8);
+        assert_eq!(bytes[0], 0xFF, "must start with JPEG SOI FF");
+        assert_eq!(bytes[1], 0xD8, "must start with JPEG SOI D8");
+
+        // Decode back: dimensions must match and pixel must be near 128.
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        assert_eq!(
+            decoded.width(),
+            w,
+            "output width must equal input (no upscale)"
+        );
+        assert_eq!(
+            decoded.height(),
+            h,
+            "output height must equal input (no upscale)"
+        );
+        let [r, g, b] = decoded.get_pixel(0, 0).0;
+        assert!(
+            (r as i32 - 128).abs() <= 8,
+            "top-left R={r} must be near 128 (no shadow)"
+        );
+        assert!(
+            (g as i32 - 128).abs() <= 8,
+            "top-left G={g} must be near 128"
+        );
+        assert!(
+            (b as i32 - 128).abs() <= 8,
+            "top-left B={b} must be near 128"
+        );
+    }
+
+    /// Portrait geometry: mark1 (top-right) in a portrait image.
+    #[test]
+    fn test_mark_placement_mark1_portrait() {
+        // 600×1000 portrait image, badge 100×200
+        // mark_h = round(1000 * 0.14) = 140; scale = 140/200 = 0.7
+        // mark_w = round(100 * 0.7) = 70
+        // margin_x = round(600 * 0.046) = 28; margin_y = round(1000 * 0.046) = 46
+        // x = 600 - 28 - 70 = 502; y = 46
+        let p = MarkPlacement::fit(
+            (600, 1000),
+            (100, 200),
+            MARK1_HEIGHT_FRAC,
+            MARK_MARGIN_FRAC,
+            MarkSlot::Mark1,
+        )
+        .unwrap();
+        assert_eq!(p.h(), 140, "mark_h");
+        assert_eq!(p.w(), 70, "mark_w");
+        assert_eq!(p.x(), 502, "x");
+        assert_eq!(p.y(), 46, "y");
+    }
+
+    /// Square geometry: mark2 (bottom-left) in a square image.
+    #[test]
+    fn test_mark_placement_mark2_square() {
+        // 800×800 square image, badge 200×100
+        // mark_h = round(800 * 0.13) = round(104) = 104; scale = 104/100 = 1.04
+        // mark_w = round(200 * 1.04) = round(208) = 208
+        // margin_x = round(800 * 0.046) = round(36.8) = 37
+        // margin_y = round(800 * 0.046) = 37
+        // y = 800 - 37 - 104 = 659; x = 37
+        let p = MarkPlacement::fit(
+            (800, 800),
+            (200, 100),
+            MARK2_HEIGHT_FRAC,
+            MARK_MARGIN_FRAC,
+            MarkSlot::Mark2,
+        )
+        .unwrap();
+        assert_eq!(p.h(), 104, "mark_h");
+        assert_eq!(p.w(), 208, "mark_w");
+        assert_eq!(p.x(), 37, "x");
+        assert_eq!(p.y(), 659, "y");
+    }
+
+    // ----- D1a raster decode tests (RT-J) -----
+
+    /// Truncated JPEG → `RasterDecodeFailed`.
+    #[test]
+    fn test_load_source_image_truncated_jpeg_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("truncated.jpg");
+        // Write only the JPEG SOI header (2 bytes) — not a valid JPEG.
+        std::fs::write(&path, [0xFF_u8, 0xD8]).unwrap();
+        let result = load_source_image(&path, false);
+        assert!(
+            matches!(result, Err(ExportError::RasterDecodeFailed { .. })),
+            "truncated JPEG must produce RasterDecodeFailed, got: {result:?}"
+        );
+    }
+
+    /// JPEG with EXIF Orientation=6 (90° CW rotation) → width/height swapped.
+    #[test]
+    fn test_load_source_image_exif_orientation_6_portrait() {
+        // Build a 4×8 JPEG (width=4, height=8) with Orientation=6.
+        // After applying orientation=6 (rotate 90° CW), the result should be 8×4 (w=8, h=4).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("portrait.jpg");
+
+        // Create a 4×8 image and save with EXIF orientation=6 embedded in the APP1 marker.
+        // We'll create the image using the `image` crate, then manually patch the EXIF bytes.
+        let img = image::RgbImage::from_pixel(4, 8, image::Rgb([100u8, 150u8, 200u8]));
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .unwrap();
+        let base_bytes = buf.into_inner();
+
+        // Build a minimal EXIF APP1 marker with Orientation=6.
+        // TIFF LE: II + magic(42) + IFD offset(8)
+        // IFD: 1 entry + tag(0x0112) + type(3=SHORT) + count(1) + value(6)
+        let mut exif_tiff = vec![
+            0x49, 0x49, // "II" — little-endian
+            0x2A, 0x00, // TIFF magic 42
+            0x08, 0x00, 0x00, 0x00, // IFD offset = 8
+            0x01, 0x00, // 1 IFD entry
+            0x12, 0x01, // Tag 0x0112 (Orientation)
+            0x03, 0x00, // Type SHORT
+            0x01, 0x00, 0x00, 0x00, // Count 1
+            0x06, 0x00, 0x00, 0x00, // Value 6 (90° CW rotation)
+        ];
+        let exif_header = b"Exif\x00\x00";
+        let mut app1_data: Vec<u8> = exif_header.to_vec();
+        app1_data.append(&mut exif_tiff);
+
+        // Compute APP1 segment length (includes the 2 length bytes itself).
+        let seg_len = (app1_data.len() + 2) as u16;
+        let mut patched: Vec<u8> = vec![0xFF, 0xD8]; // SOI
+        patched.push(0xFF);
+        patched.push(0xE1); // APP1 marker
+        patched.extend_from_slice(&seg_len.to_be_bytes());
+        patched.extend_from_slice(&app1_data);
+        // Append the rest of the JPEG (skip original SOI).
+        patched.extend_from_slice(&base_bytes[2..]);
+        std::fs::write(&path, &patched).unwrap();
+
+        let img = load_source_image(&path, false).unwrap();
+        // Orientation=6 rotates 90° CW: 4×8 → 8×4 (w=8, h=4).
+        assert_eq!(
+            img.width().get(),
+            8,
+            "after orientation=6: width should be original height"
+        );
+        assert_eq!(
+            img.height().get(),
+            4,
+            "after orientation=6: height should be original width"
+        );
+    }
+
+    /// JPEG with unknown EXIF orientation tag → identity (no rotation, no error).
+    #[test]
+    fn test_load_source_image_unknown_exif_orientation_defaults_to_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("odd_orientation.jpg");
+
+        let img_4x8 = image::RgbImage::from_pixel(4, 8, image::Rgb([50u8, 60u8, 70u8]));
+        let dyn_img = image::DynamicImage::ImageRgb8(img_4x8);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .unwrap();
+        let base_bytes = buf.into_inner();
+
+        // Orientation tag = 99 (unknown).
+        let exif_header = b"Exif\x00\x00";
+        let mut exif_tiff = vec![
+            0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x12, 0x01, 0x03, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x63, 0x00, 0x00, 0x00, // Value=99 (unknown)
+        ];
+        let mut app1_data: Vec<u8> = exif_header.to_vec();
+        app1_data.append(&mut exif_tiff);
+        let seg_len = (app1_data.len() + 2) as u16;
+        let mut patched = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        patched.extend_from_slice(&seg_len.to_be_bytes());
+        patched.extend_from_slice(&app1_data);
+        patched.extend_from_slice(&base_bytes[2..]);
+        std::fs::write(&path, &patched).unwrap();
+
+        let result = load_source_image(&path, false);
+        assert!(result.is_ok(), "unknown orientation must not error");
+        let img = result.unwrap();
+        // No rotation applied: 4×8 stays 4×8.
+        assert_eq!(img.width().get(), 4);
+        assert_eq!(img.height().get(), 8);
+    }
+
+    /// Sentinel pixel survives JPEG decode (within compression tolerance).
+    /// All pixels are the sentinel color to minimize DCT drift.
+    #[test]
+    fn test_load_source_image_sentinel_pixel_jpeg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sentinel.jpg");
+        // Uniform [180, 90, 45] image — uniform fields compress with minimal drift.
+        let img = image::RgbImage::from_pixel(8, 8, image::Rgb([180u8, 90u8, 45u8]));
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .unwrap();
+        std::fs::write(&path, buf.into_inner()).unwrap();
+
+        let decoded = load_source_image(&path, false).unwrap();
+        assert_eq!(decoded.width().get(), 8);
+        assert_eq!(decoded.height().get(), 8);
+        let pix = decoded.pixel_rgb(0, 0).unwrap();
+        // Uniform fields compress cleanly; tolerance ±8.
+        assert!((pix[0] as i32 - 180).abs() <= 8, "R={} near 180", pix[0]);
+        assert!((pix[1] as i32 - 90).abs() <= 8, "G={} near 90", pix[1]);
+        assert!((pix[2] as i32 - 45).abs() <= 8, "B={} near 45", pix[2]);
+    }
+
+    /// Sentinel pixel survives PNG decode (exact).
+    #[test]
+    fn test_load_source_image_sentinel_pixel_png() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sentinel.png");
+        let mut img = image::RgbImage::from_pixel(4, 4, image::Rgb([0u8, 0u8, 0u8]));
+        img.put_pixel(0, 0, image::Rgb([77u8, 88u8, 99u8]));
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        dyn_img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        std::fs::write(&path, buf.into_inner()).unwrap();
+
+        let decoded = load_source_image(&path, false).unwrap();
+        let pix = decoded.pixel_rgb(0, 0).unwrap();
+        assert_eq!(pix, [77, 88, 99], "PNG pixel must survive exactly");
     }
 }

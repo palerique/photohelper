@@ -240,13 +240,10 @@ pub fn run_watermark(_cli: &Cli, args: &WatermarkArgs) -> anyhow::Result<u8> {
 
         let w = img.width().get();
         let h = img.height().get();
-        let long_e = w.max(h) as f32;
-
-        // Compute per-axis margins for height-based marks (MARK_MARGIN_FRAC of each axis).
-        let margin_x = (w as f32 * MARK_MARGIN_FRAC).round().max(1.0);
-        let margin_y = (h as f32 * MARK_MARGIN_FRAC).round().max(1.0);
 
         // Build render options: downscale-only resize, shadow band, mark1+mark2.
+        // margin_x/margin_y are FRACTIONS (0..1); composite_mark_on_pixmap converts
+        // to pixels against the post-resize dimensions — fixes the source-dims bug.
         let render_opts = RenderOptions {
             long_edge: args.max_long_edge,
             downscale_only: true,
@@ -259,19 +256,18 @@ pub fn run_watermark(_cli: &Cli, args: &WatermarkArgs) -> anyhow::Result<u8> {
                     badge: Arc::clone(&mark1_arc),
                     basis: BadgeSizeBasis::Height(MARK1_HEIGHT_FRAC),
                     slot: MarkSlot::Mark1,
-                    margin_x,
-                    margin_y,
+                    margin_x: MARK_MARGIN_FRAC,
+                    margin_y: MARK_MARGIN_FRAC,
                 },
                 MarkSpec {
                     badge: Arc::clone(&mark2_arc),
                     basis: BadgeSizeBasis::Height(MARK2_HEIGHT_FRAC),
                     slot: MarkSlot::Mark2,
-                    margin_x,
-                    margin_y,
+                    margin_x: MARK_MARGIN_FRAC,
+                    margin_y: MARK_MARGIN_FRAC,
                 },
             ],
         };
-        let _ = long_e; // used indirectly via margin computation above
 
         // Render to JPEG bytes.
         let jpeg_bytes = match render_to_jpeg(img.pixels(), w, h, &render_opts) {
@@ -308,7 +304,6 @@ pub fn run_watermark(_cli: &Cli, args: &WatermarkArgs) -> anyhow::Result<u8> {
             }
             return;
         }
-        guard.commit();
         if let Err(e) = std::fs::rename(&tmp_path, &out_path) {
             tracing::warn!(
                 from = %tmp_path.display(),
@@ -317,11 +312,12 @@ pub fn run_watermark(_cli: &Cli, args: &WatermarkArgs) -> anyhow::Result<u8> {
                 "rename tmp → final failed"
             );
             stats.errored.fetch_add(1, Ordering::Relaxed);
-            let _ = std::fs::remove_file(&tmp_path);
+            // guard.drop() cleans up tmp_path automatically.
             if args.strict {
                 cancelled.store(true, Ordering::Relaxed);
             }
         } else {
+            guard.commit(); // Disarm cleanup only after rename succeeds.
             stats.written.fetch_add(1, Ordering::Relaxed);
         }
     });
@@ -363,19 +359,39 @@ fn load_mark_png(path: &Path, label: &str) -> anyhow::Result<PreloadedBadge> {
 }
 
 /// Walk `source_canonical`, exclude `output_canonical` subtree, return sorted file list.
+///
+/// Walk errors (e.g. permission-denied subdirectories) are logged as warnings so
+/// the user is informed of any files that could not be reached.
 fn collect_source_files(source: &Path, output: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = WalkDir::new(source)
         .follow_links(false)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(|e| match e {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                tracing::warn!(error = %err, "directory walk error; entry skipped");
+                None
+            }
+        })
         .filter(|e| e.file_type().is_file())
         .filter_map(|e| {
-            let p = dunce::canonicalize(e.path()).ok()?;
-            // Prune anything inside the output subtree.
-            if p.starts_with(output) {
-                return None;
+            match dunce::canonicalize(e.path()) {
+                Ok(p) => {
+                    if p.starts_with(output) {
+                        None // Defense-in-depth: prune output subtree.
+                    } else {
+                        Some(p)
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        path = %e.path().display(),
+                        error = %err,
+                        "could not canonicalize path; entry skipped"
+                    );
+                    None
+                }
             }
-            Some(p)
         })
         .collect();
     files.sort();

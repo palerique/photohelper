@@ -1450,10 +1450,12 @@ name = "photohelper-export"
 version = "0.0.0"
 dependencies = [
  "cosmic-text",
+ "image",
  "mozjpeg",
  "photohelper-catalog",
  "photohelper-core",
  "photohelper-raw",
+ "tempfile",
  "thiserror",
  "tiny-skia",
  "tracing",

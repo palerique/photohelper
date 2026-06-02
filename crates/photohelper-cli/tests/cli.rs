@@ -3088,3 +3088,52 @@ fn rename_missing_source_file_exits_2() {
         .code(2)
         .stderr(contains("file-missing: 1"));
 }
+
+/// D3 — sidecar-copy failure → NO final renamed RAW, sidecar-copy-failed: 1.
+#[test]
+#[cfg(unix)]
+fn rename_sidecar_copy_fail_no_final_raw_committed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    let (cat_path, cr3) = seed_renamed_catalog(&tmp, 5.0, 3);
+
+    // Place an XMP sidecar and make it unreadable.
+    let xmp = cr3.with_extension("xmp");
+    std::fs::write(&xmp, b"<x:xmpmeta/>").unwrap();
+    std::fs::set_permissions(&xmp, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let result = Command::cargo_bin("photohelper")
+        .unwrap()
+        .env("PHOTOHELPER_HEARTBEAT_INTERVAL_MS", "50000")
+        .args([
+            "--catalog",
+            cat_path.to_str().unwrap(),
+            "rename",
+            "--source",
+            tmp.path().to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    // Restore permissions for cleanup.
+    let _ = std::fs::set_permissions(&xmp, std::fs::Permissions::from_mode(0o644));
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    // Should report sidecar-copy-failed.
+    assert!(
+        stderr.contains("sidecar-copy-failed: 1"),
+        "expected sidecar-copy-failed: 1, got: {stderr}"
+    );
+
+    // No renamed RAW should have been committed to the output directory.
+    let expected_raw = out.join("Cluster-003_Cull-05.00-photo.CR3");
+    assert!(
+        !expected_raw.exists(),
+        "no output RAW should exist when sidecar copy failed: {}",
+        expected_raw.display()
+    );
+}
