@@ -423,7 +423,6 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
 
         match export_photo(&options, source_path, &metadata) {
             Ok(()) => {
-                guard.commit();
                 if let Err(e) = std::fs::rename(&tmp_path, final_target_path) {
                     tracing::warn!(
                         from = %tmp_path.display(),
@@ -432,12 +431,12 @@ pub fn run_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<u8> {
                         "failed to rename temporary file to final target"
                     );
                     stats.errored.fetch_add(1, Ordering::Relaxed);
-                    // Best-effort cleanup; ignore if not found or already deleted
-                    let _ = std::fs::remove_file(&tmp_path);
+                    // guard.drop() cleans up tmp_path automatically.
                     if args.strict {
                         cancelled.store(true, Ordering::Relaxed);
                     }
                 } else {
+                    guard.commit(); // Disarm cleanup only after rename succeeds.
                     stats.written.fetch_add(1, Ordering::Relaxed);
                 }
             }

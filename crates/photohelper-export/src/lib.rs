@@ -305,12 +305,21 @@ impl MarkPlacement {
         target: (u32, u32),
         mark_dims: (u32, u32),
         height_frac: f32,
-        margin_frac: f32,
+        margin_x_frac: f32,
+        margin_y_frac: f32,
         slot: MarkSlot,
     ) -> Result<Self, GeometryError> {
         debug_assert!(
             height_frac.is_finite() && height_frac > 0.0 && height_frac <= 1.0,
             "height_frac must be in (0, 1]"
+        );
+        debug_assert!(
+            margin_x_frac.is_finite() && (0.0..1.0).contains(&margin_x_frac),
+            "margin_x_frac must be in [0, 1)"
+        );
+        debug_assert!(
+            margin_y_frac.is_finite() && (0.0..1.0).contains(&margin_y_frac),
+            "margin_y_frac must be in [0, 1)"
         );
         let (tw, th) = target;
         let (mw, mh) = mark_dims;
@@ -318,8 +327,8 @@ impl MarkPlacement {
         let mark_h = ((th as f32 * height_frac).round() as u32).max(1);
         let scale = mark_h as f32 / (mh as f32).max(1.0);
         let mark_w = ((mw as f32 * scale).round() as u32).max(1);
-        let margin_x = (tw as f32 * margin_frac).round() as u32;
-        let margin_y = (th as f32 * margin_frac).round() as u32;
+        let margin_x = (tw as f32 * margin_x_frac).round() as u32;
+        let margin_y = (th as f32 * margin_y_frac).round() as u32;
 
         let (x, y) = match slot {
             MarkSlot::Mark1 => {
@@ -810,6 +819,10 @@ pub fn resize_rgb(
 /// The pinned denominator `(band_h − 1).max(1)` keeps the formula well-defined
 /// for one-pixel bands. Use [`SHADOW_BAND_FRAC`] for the standard 30 % band.
 pub fn shadow_alpha_ramp(image_h: u32, band_frac: f32) -> Vec<u8> {
+    // Guard: invalid band_frac produces no shadow rather than OOM or out-of-bounds access.
+    if !band_frac.is_finite() || band_frac <= 0.0 || band_frac > 1.0 {
+        return vec![];
+    }
     let band_h = (image_h as f32 * band_frac).round() as usize;
     if band_h == 0 {
         return vec![];
@@ -920,7 +933,7 @@ pub fn compress_jpeg(
     height: u32,
     quality: u8,
 ) -> Result<Vec<u8>, ExportError> {
-    // SAFETY: MozJPEG FFI bindings may panic; catch_unwind contains any panic.
+    // MozJPEG FFI bindings may panic; catch_unwind contains any panic.
     let res = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<Vec<u8>, String> {
         let mut comp = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
         comp.set_size(width as usize, height as usize);
@@ -1085,7 +1098,8 @@ fn composite_mark_on_pixmap(
                 (pw, ph),
                 (mark.badge.width(), mark.badge.height()),
                 *frac,
-                mark.margin_x, // margin_x is a fraction (0..1)
+                mark.margin_x, // margin_x: fraction of post-resize width
+                mark.margin_y, // margin_y: fraction of post-resize height
                 mark.slot,
             )
             .map_err(ExportError::Geometry)?;
@@ -1099,6 +1113,7 @@ fn composite_mark_on_pixmap(
             )
         }
         BadgeSizeBasis::LongEdge(scale_pct) => {
+            // TD-028: LongEdge path duplicates MarkPlacement slot-position logic.
             // Legacy path used by export_photo re-point.
             // Margins are fractions of post-resize dimensions.
             let long_e = pw.max(ph) as f32;
@@ -1605,6 +1620,7 @@ mod tests {
             (200, 100),
             MARK1_HEIGHT_FRAC,
             MARK_MARGIN_FRAC,
+            MARK_MARGIN_FRAC,
             MarkSlot::Mark1,
         )
         .unwrap();
@@ -1630,6 +1646,7 @@ mod tests {
             (200, 100),
             MARK2_HEIGHT_FRAC,
             MARK_MARGIN_FRAC,
+            MARK_MARGIN_FRAC,
             MarkSlot::Mark2,
         )
         .unwrap();
@@ -1647,6 +1664,7 @@ mod tests {
             (tw, th),
             (200, 100),
             MARK2_HEIGHT_FRAC,
+            MARK_MARGIN_FRAC,
             MARK_MARGIN_FRAC,
             MarkSlot::Mark2,
         )
@@ -1667,8 +1685,14 @@ mod tests {
         // mark_h = round(50 * 0.50) = 25; scale = 25/20 = 1.25
         // mark_w = round(500 * 1.25) = 625 → far exceeds image width 50
         // → checked_sub underflows → MarkDoesNotFit
-        let result =
-            MarkPlacement::fit((50, 50), (500, 20), 0.50, MARK_MARGIN_FRAC, MarkSlot::Mark1);
+        let result = MarkPlacement::fit(
+            (50, 50),
+            (500, 20),
+            0.50,
+            MARK_MARGIN_FRAC,
+            MARK_MARGIN_FRAC,
+            MarkSlot::Mark1,
+        );
         assert!(
             result.is_err(),
             "Expected MarkDoesNotFit for oversized wide badge"
@@ -1892,6 +1916,7 @@ mod tests {
             (100, 200),
             MARK1_HEIGHT_FRAC,
             MARK_MARGIN_FRAC,
+            MARK_MARGIN_FRAC,
             MarkSlot::Mark1,
         )
         .unwrap();
@@ -1914,6 +1939,7 @@ mod tests {
             (800, 800),
             (200, 100),
             MARK2_HEIGHT_FRAC,
+            MARK_MARGIN_FRAC,
             MARK_MARGIN_FRAC,
             MarkSlot::Mark2,
         )

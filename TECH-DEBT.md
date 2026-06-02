@@ -452,6 +452,18 @@ Each TD has a stable ID (`TD-NNN`) and these fields:
 
 ---
 
+### TD-028 — LongEdge path in `composite_mark_on_pixmap` duplicates `MarkPlacement` slot-position logic (2026-06-02, session 15)
+
+- **Status**: Open
+- **Opened**: 2026-06-02 (session 15, implementation-review Round 2 R2-F)
+- **Stop-gap location**: `crates/photohelper-export/src/lib.rs` — `composite_mark_on_pixmap` `BadgeSizeBasis::LongEdge` arm (lines ~1101-1155) duplicates ~35 lines of slot-based position computation (`MarkSlot` match, `checked_sub`, right/bottom overflow guard) from `MarkPlacement::fit`. In-source label: `// TD-028: LongEdge path duplicates MarkPlacement slot-position logic`.
+- **Fundamental fix**: Add `MarkPlacement::fit_with_dims(target, mark_w, mark_h, margin_x_frac, margin_y_frac, slot) -> Result<Self, GeometryError>` that accepts pre-computed mark dimensions (bypassing the height-frac sizing step but reusing all position/bounds logic). Rewrite both `Height` and `LongEdge` arms of `composite_mark_on_pixmap` to call it.
+- **Binding trigger**: Next session that modifies `composite_mark_on_pixmap` or `MarkPlacement`; OR when the LongEdge path is promoted from legacy-export-only to a first-class use case.
+- **Scope estimate**: ~60 LoC (new constructor + rewrite of LongEdge arm + test update) / low risk.
+- **Consequence of inaction**: A future bug fix to slot-position logic (e.g. margin semantics, overflow handling) must be applied in two places; divergence between the two copies is a silent correctness risk.
+
+---
+
 ### TD-040 — DevelopArgs violates struct_excessive_bools lint
 
 - **Status**: Open

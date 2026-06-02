@@ -400,8 +400,12 @@ pub fn run_rename(cli: &Cli, args: &RenameArgs) -> anyhow::Result<u8> {
         }
 
         // Phase 2: copy XMP sidecar → xmp.tmp (if present).
+        // xmp_guard is declared here (outside the if-block) so its lifetime
+        // extends past Phase 3's rename attempt — ensuring Drop cleans up on
+        // rename failure rather than leaking the .tmp file.
+        let mut xmp_guard: Option<TempFileGuard> = None;
         let sidecar_result = if src_xmp.exists() {
-            let mut xmp_guard = TempFileGuard::new(xmp_tmp.clone());
+            let guard = TempFileGuard::new(xmp_tmp.clone());
             match std::fs::copy(&src_xmp, &xmp_tmp) {
                 Ok(_) => {
                     #[cfg(unix)]
@@ -412,10 +416,12 @@ pub fn run_rename(cli: &Cli, args: &RenameArgs) -> anyhow::Result<u8> {
                             std::fs::Permissions::from_mode(0o644),
                         );
                     }
-                    xmp_guard.commit();
+                    // Do NOT commit yet; keep guard armed until after xmp rename.
+                    xmp_guard = Some(guard);
                     Some(Ok(()))
                 }
                 Err(e) => {
+                    // guard drops uncommitted here, cleaning up xmp_tmp.
                     tracing::warn!(
                         src = %src_xmp.display(),
                         dst = %xmp_tmp.display(),
@@ -448,12 +454,13 @@ pub fn run_rename(cli: &Cli, args: &RenameArgs) -> anyhow::Result<u8> {
             );
             stats.errored.fetch_add(1, Ordering::Relaxed);
             // raw_guard.drop() cleans up raw_tmp automatically.
+            // xmp_guard.drop() (if Some) cleans up xmp_tmp automatically.
             if args.strict {
                 cancelled.store(true, Ordering::Relaxed);
             }
             return;
         }
-        raw_guard.commit(); // Disarm cleanup only after rename succeeds.
+        raw_guard.commit(); // Disarm RAW cleanup only after rename succeeds.
 
         // Commit sidecar if we had one.
         match sidecar_result {
@@ -467,11 +474,16 @@ pub fn run_rename(cli: &Cli, args: &RenameArgs) -> anyhow::Result<u8> {
                         "XMP sidecar rename failed; RAW is present but sidecar is missing — copy manually"
                     );
                     stats.sidecar_copy_failed.fetch_add(1, Ordering::Relaxed);
-                    // xmp_guard cleanup handled by Drop.
+                    // RAW was renamed successfully; count it in renamed.
+                    stats.renamed.fetch_add(1, Ordering::Relaxed);
+                    // xmp_guard.drop() cleans up xmp_tmp automatically.
                     if args.strict {
                         cancelled.store(true, Ordering::Relaxed);
                     }
                 } else {
+                    if let Some(mut g) = xmp_guard.take() {
+                        g.commit(); // Disarm XMP cleanup only after rename succeeds.
+                    }
                     stats.sidecar_copied.fetch_add(1, Ordering::Relaxed);
                     stats.renamed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -482,7 +494,7 @@ pub fn run_rename(cli: &Cli, args: &RenameArgs) -> anyhow::Result<u8> {
             }
             Some(Err(())) => {
                 // Structurally unreachable: the sidecar_copy_failed early-return
-                // at line 433 guards this arm. Defensive non-panic fallback.
+                // above guards this arm. Defensive non-panic fallback.
                 tracing::error!("BUG: Some(Err(())) arm reached in rename sidecar match");
                 stats.errored.fetch_add(1, Ordering::Relaxed);
                 if args.strict {
