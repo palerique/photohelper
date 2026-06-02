@@ -1,9 +1,9 @@
 # Session 15 — Dual-Mark Watermarking & Metadata-Driven RAW Rename
 
-> **Top block = the session contract.** Hardened to **v3** via plan-review
-> Round 1 (7C+10H+3M+2L, 19 themes) + Round 2 (2C+7H+6M+3L, all v2-introduced
-> regressions) + four user decisions. Round 3 fires next (R2 surfaced
-> CRITICAL-class regressions). Artifacts: `docs/code-reviews/session-15-plan-round{1,2}.md`.
+> **Top block = the session contract.** Hardened to **v4** via plan-review
+> Round 1 (7C+10H+3M+2L) → Round 2 (2C+7H+6M+3L) → Round 3 (0C+2H+4M+5L,
+> **CONVERGED**) + four user decisions. **Plan-review COMPLETE; implementation may
+> begin.** Artifacts: `docs/code-reviews/session-15-plan-round{1,2,3}.md`.
 
 ---
 
@@ -48,8 +48,8 @@ emitting all artifacts into a designated `--output` directory:
   decode-unverified** (RT-K). Only CR3 is decode-tested; gated formats get a
   DN + TD with binding triggers.
 - **D-Q3 (rename `Cull-[Y]` / `Cluster-[X]`)**: `Y` = NIMA score formatted
-  **`{:05.2}`** via the existing `format_nima_score_label` (`util.rs:15`), e.g.
-  `Cull-07.85`. `X` = zero-padded dedup cluster id, e.g. `Cluster-003`. The
+  **`{:05.2}`** via the existing `format_nima_score_label` (`commands/util.rs:15`),
+  e.g. `Cull-07.85`. `X` = zero-padded dedup cluster id, e.g. `Cluster-003`. The
   capitalized `Cluster-…_Cull-…` form (user's literal spec) deliberately differs
   from `export`'s lowercase `cluster-…-cull-…`; the divergence is recorded in a
   `docs/decisions/` note and BOTH commands route through ONE shared prefix
@@ -68,11 +68,10 @@ emitting all artifacts into a designated `--output` directory:
   loop (mirroring `export.rs:320-331`).
 - **D-Q7 (rename metric source)**: cull score + cluster id come from the
   **catalog** (`DevelopRow`); `.xmp` files are copied **verbatim** (never
-  parsed). Reading metrics out of sidecars is **forbidden this session** (it would
-  invoke the `photohelper-sidecar` reader that still carries open session-14
-  findings). **`rename` MUST NOT reuse `run_export`'s per-photo body**, which
-  calls `read_xmp` for rating (`export.rs:374-401`) — that would drag the sidecar
-  reader back in (RT-O); `rename` is an independent driver.
+  parsed). Reading metrics out of sidecars is **forbidden this session**.
+  **`rename` MUST NOT reuse `run_export`'s per-photo body**, which calls `read_xmp`
+  for rating (`export.rs:374-401`) — that would drag the session-14 sidecar reader
+  back in (RT-O); `rename` is an independent driver.
 
 ### Core invariants (from the spec; non-negotiable, enforced by tests)
 
@@ -109,44 +108,47 @@ stats struct:
   failed/malformed EXIF-orientation apply), `mark_doesnt_fit`, `errored`.
   `total_failures = decode_failed + mark_doesnt_fit + errored`.
 - **`RenameStats`**: `matched`, `renamed`, `sidecar_copied`, `sidecar_absent`,
-  `sidecar_copy_failed`, `file_missing`, `errored` (the catch-all; its one distinct
-  source here is a destination-containment rejection — RT-O).
-  `total_failures = sidecar_copy_failed + file_missing + errored`.
-- **Exit (RT-F, restated cleanly)**: `skipped_unsupported` and `skipped_existing`
-  **never** contribute to the exit code, even under `--strict` (they are deliberate
-  gate-skips). The **failure** counters (`decode_failed` / `mark_doesnt_fit` /
-  `sidecar_copy_failed` / `file_missing` / `errored`) drive `EX_PARTIAL_FAIL` (2)
-  whenever `total_failures > 0`; under `--strict`, the FIRST such failure is
-  immediately fatal → `EX_STRICT_FAIL` (1).
+  `sidecar_copy_failed`, `file_missing`, `errored` (a defensive catch-all — e.g. an
+  unclassified `fs::copy` IO error; the destination-containment rejection it
+  nominally covers is unreachable while the sanitizer guarantees single-component
+  names — RT-O/R3-K). `total_failures = sidecar_copy_failed + file_missing + errored`.
+- **Exit (RT-F)**: `skipped_unsupported` and `skipped_existing` **never** contribute
+  to the exit code, even under `--strict` (deliberate gate-skips). The **failure**
+  counters (`decode_failed` / `mark_doesnt_fit` / `sidecar_copy_failed` /
+  `file_missing` / `errored`) drive `EX_PARTIAL_FAIL` (2) whenever
+  `total_failures > 0`; under `--strict`, the FIRST such failure is immediately
+  fatal → `EX_STRICT_FAIL` (1).
 
 ### How each deliverable is tested (meaningful assertions only)
 
 - **Dual-mark geometry** (pure fn, unit): EXACT integer `mark_w/mark_h/x/y` for
   landscape, portrait, square, a **wide-logo** asset, and a **tiny pass-through**
-  image; the fit-guard returns `Err(GeometryError::MarkDoesNotFit{…})` (→ skip
-  under non-strict but still `EX_PARTIAL_FAIL`; fatal under strict) when a mark
-  cannot fit; `.max(1)` floors prevent any zero-size mark; assert
-  `mark2_y >= H - shadow_band_height` (mark2 sits inside the shadow band).
-- **Shadow gradient**: `shadow_alpha_ramp(H)` len == `round(0.30*H)`, monotonic
-  with pinned denominator, exact endpoints (`[H-1]==255`, `[H-band]==0`); the row
-  above the band is bit-identical to source; the **final demultiplied 3-channel
-  buffer** at a mid-band row is partially darkened (catches the premultiply/cliff
-  bug); base alpha stays 255; band-zero guard for tiny `H`.
+  image; the fit-guard returns `Err(GeometryError::MarkDoesNotFit{ which, .. })`
+  asserting the correct `which` (`Mark1`/`Mark2`) (→ skip under non-strict but still
+  `EX_PARTIAL_FAIL`; fatal under strict) when a mark cannot fit; `.max(1)` floors
+  prevent any zero-size mark; assert `mark2_y >= H - shadow_band_height` (mark2 sits
+  inside the shadow band).
+- **Shadow gradient**: `shadow_alpha_ramp(H)` len == `round(0.30*H)`, monotonic with
+  pinned denominator, exact endpoints (`[H-1]==255`, `[H-band]==0`); the row above
+  the band is bit-identical to source; the **final demultiplied 3-channel buffer**
+  at a mid-band row equals an EXACT expected value (e.g. `t=0.5` over base 200 → 100,
+  not merely "darker" — catches the premultiply/cliff bug); base alpha stays 255;
+  band-zero guard for tiny `H`.
 - **Color uniformity**: composite a mid-gray patch via the RAW(`Srgb8`) and raster
   paths; post-composite values match within tolerance.
 - **Raster decode**: runtime-generate JPEG + PNG with a known **sentinel pixel
-  block**; assert decoded dims + sentinel survival (distinguishes decoded from
-  blank); truncated JPEG → `decode_failed`; a **non-3-channel decode → `decode_failed`,
-  not rendered** (RT-D); a portrait JPEG `Orientation=6` → mark at the visual
-  top-right; a **malformed orientation tag → the defined outcome** (RT-J).
+  block**; assert decoded dims + sentinel survival; truncated JPEG → `decode_failed`;
+  a **non-3-channel decode → `decode_failed`, not rendered** (RT-D); a portrait JPEG
+  `Orientation=6` → mark at the visual top-right; a **malformed orientation tag →
+  the defined outcome** (RT-J).
 - **Zero distortion / downscale-only**: `out_w/out_h ≈ in_w/in_h` within ±1px;
   long edge == max for larger inputs; a **sub-limit** image emitted at native size
   (NOT upscaled).
-- **Extraction regression (RT-C)**: `render_to_jpeg(rgb,w,h,&RenderOptions::default())`
+- **Extraction regression (RT-C)**: `render_to_jpeg(rgb, w, h, &RenderOptions::default())`
   on a known input is decoded back and asserted to (a) NOT upscale, (b) have NO
   shadow band, (c) match a sample pixel — guarding export's fast-path bypass and
-  defaults against silent drift (the existing `exists()+len>0` export test cannot).
-  Add `test_watermark_position_calculation` (`lib.rs:792-798`) to the regression set.
+  defaults against silent drift. **Migrate** `test_watermark_position_calculation`
+  (`lib.rs:792-798`) to the 2-axis signature and keep it in the regression set.
 - **Non-destructive / idempotency**: source entry-set + bytes/mtime unchanged;
   `--output` rejected when nested in `--source`; run `watermark` twice → stable
   output count + assert `skipped-existing: N` on the 2nd run; a symlink in
@@ -155,6 +157,13 @@ stats struct:
   empty-source `watermark` run and an empty-catalog `rename` run (every counter
   label present); `sidecar_absent: 1` + exit 0 for a no-`.xmp` row; `errored: 0`
   on a happy path.
+- **Mark-fit exit contract (R3-B)**: a valid raster + a `--mark1` that cannot fit
+  (tiny target), no `--strict` → exit **2** with `mark-doesnt-fit: 1` + `written: 0`
+  + the output JPEG absent; re-run `--strict` → exit **1** (calibrate against
+  `export_strict_cancellation_on_missing_file`, `cli.rs:1944-1946`).
+- **Happy-path `written: N` (R3-F)**: a `--source` with a JPEG + PNG (+ CR3 if LFS
+  present) → exit 0, `written: 2` (or 3), each output file exists + non-empty
+  (calibrate against `export_runs_successfully_for_ingested_photos`, `cli.rs:1829`).
 - **Best-effort RAW dispatch**: corrupt RAW → `decode_failed`, exit 2; `--strict`
   → exit 1; non-CR3 RAW without `--allow-untested-raw` → `skipped_unsupported`,
   exit 0; `--max-long-edge < 16` → clap rejection (exit 2); non-PNG/unreadable
@@ -171,12 +180,12 @@ stats struct:
 - **Rename integration**: seed a catalog with known cull+cluster; exact new RAW
   names, each `.xmp` copied + renamed to `new_raw.with_extension("xmp")`, source
   untouched; deleted-source row → `file_missing`; **sidecar-copy failure → NO final
-  renamed RAW exists** (not a half-write) + `sidecar_copy_failed` distinct from
-  `sidecar_absent`.
+  renamed RAW exists** + `sidecar_copy_failed` distinct from `sidecar_absent`.
 
 ### Checkpoints that fire
 
-1. **Plan-review** (in progress): R1 ✓ → R2 ✓ → remediate (this v3) → **Round 3**.
+1. **Plan-review** COMPLETE: R1 (7C) → R2 (2C) → R3 (0C, converged); implementation
+   unblocked. Artifacts `docs/code-reviews/session-15-plan-round{1,2,3}.md`.
 2. **Sub-component review** at the D1.0 extraction + `photohelper-export`
    geometry/shadow boundary (re-pointed `export` must stay green).
 3. **Sub-component review** at the `rename` subcommand boundary.
@@ -185,19 +194,19 @@ stats struct:
 ### Unresolved prior-session item surfaced (NOT planned on top of)
 
 - **Session-14 session-end review** (`session-14-implementation-round3.md`) retained
-  **15 verified findings** (2 CRITICAL + 9 HIGH + 4 MEDIUM + 2 LOW raw; 3
-  hallucinations discarded, `discard_rate 0.16`) in `photohelper-sidecar`, with **no
-  Round-4 CLEAN artifact**, yet PR #15 (merge `d4575fca`,
-  `session-14/xmp-library-upgrade`) merged. Note: two "Merge pull request #15"
-  commits exist (the other is `17da1eb9`, session-12) — the SHA disambiguates.
-  Session 15 does not touch that code (D-Q7: catalog metrics + verbatim `.xmp`
-  copy; `rename` is its own driver, never calling `read_xmp`/`write_xmp`/`merge_and_write`).
+  **15 verified findings** (3 hallucinations discarded, `discard_rate 0.16`) in
+  `photohelper-sidecar`, with **no Round-4 CLEAN artifact**, yet PR #15 (merge
+  `d4575fca`, `session-14/xmp-library-upgrade`) merged. Note: two "Merge pull
+  request #15" commits exist (the other is `17da1eb9`, session-12) — the SHA
+  disambiguates. Session 15 does not touch that code (D-Q7: catalog metrics +
+  verbatim `.xmp` copy; `rename` is its own driver, never calling
+  `read_xmp`/`write_xmp`/`merge_and_write`).
 - **Ledger desync** corrected at session-start.
 
 ### Open ambiguities — resolved
 
-- **O1**: shadow is **full-bleed** (no horizontal margin, flush to bottom); the
-  4.6% margin applies to the **marks only**.
+- **O1**: shadow is **full-bleed** (no horizontal margin); the 4.6% margin applies to
+  the **marks only**.
 - **O2**: `image_b781b9.jpg` not provided; follow the textual spec; the named
   geometry constants are the single adjustment point.
 - **O3**: resolved as **D-Q7** (catalog only; sidecars copied verbatim).
@@ -218,17 +227,17 @@ stats struct:
 monolith; the "reuse" the rest of D1 needs does not exist yet.
 
 - Extract, in `photohelper-export`:
-  - `pub fn resize_rgb(rgb, w, h, long_edge: Option<u32>, downscale_only: bool) -> Result<Pixmap, ExportError>` (lifts `lib.rs:235-297`; `downscale_only` adds `scale = min(1.0, …)`).
-  - `pub fn render_to_jpeg(rgb, w, h, opts: &RenderOptions) -> Result<Vec<u8>, ExportError>`. **`RenderOptions` is a decode-output-only subset** (RT-L) — `long_edge`, `downscale_only`, `quality`, `shadow: Option<ShadowSpec>`, and the generalized mark list with `BadgeSizeBasis` + per-axis margins; it **excludes** `output_path`/`force` (caller concerns). It ships its FINAL field set at D1.0 (shadow/height-marks impls land in D1c/D1d behind already-present fields — no cross-step signature churn, no dead-code allow).
-  - **`render_to_jpeg` MUST preserve export's three paths** (RT-C): (a) fast-path bypass — direct `compress_jpeg` from the input buffer when no resize/shadow/marks (`lib.rs:222-232`); (b) resize branch (`lib.rs:256-284`); (c) no-resize-but-composited branch (`lib.rs:285-296`). Defaults reproduce export's current behavior exactly (long-edge badge basis, no shadow, upscale-allowed).
+  - `pub fn resize_rgb(rgb: &[u8], w, h, long_edge: Option<u32>, downscale_only: bool) -> Result<Pixmap, ExportError>` (lifts `lib.rs:235-297`; `downscale_only` adds `scale = min(1.0, …)`).
+  - `pub fn render_to_jpeg(rgb: &[u8], w, h, opts: &RenderOptions) -> Result<Vec<u8>, ExportError>` — `rgb` is a **borrow** (call `render_to_jpeg(img.pixels(), img.width().get(), img.height().get(), &opts)`: zero-copy at the `RgbImage` seam, which has no `into_pixels`; `export_photo` passes `&rgb_pixels`) — R3-D. **`RenderOptions` is a decode-output-only subset** (RT-L) — `long_edge`, `downscale_only`, `quality`, `shadow: Option<ShadowSpec>`, the generalized mark list with `BadgeSizeBasis` + per-axis margins; it **excludes** `output_path`/`force` (caller concerns). It ships its FINAL field set at D1.0 (shadow/height-marks impls land in D1c/D1d behind already-present, already-read fields — no signature churn, no dead-code allow).
+  - **`render_to_jpeg` MUST preserve export's three paths** (RT-C): (a) fast-path bypass — direct `compress_jpeg` from the input buffer when no resize/shadow/marks (`lib.rs:222-232`); (b) resize branch (`lib.rs:256-284`); (c) no-resize-but-composited branch (`lib.rs:285-296`). Defaults reproduce export's current behavior exactly.
   - `pub fn pixmap_to_rgb(pixmap) -> Vec<u8>` (lifts demultiply `lib.rs:311-335`).
   - Make `compress_jpeg` (`:664`), `draw_image_watermark` (`:478`), `calculate_watermark_position` (`:349`) `pub`.
 - **Re-point `export_photo`** at `render_to_jpeg` (after its existing
   `decode_image(Linear16)` + `ToneMappingLut` step — export keeps its filmic look).
 - Move `TempFileGuard` (`export.rs:186-219`) + a generic `resolve_collisions<F: Fn(&str)->String>` (from `export.rs:271-314`, keeping the macOS/Windows case-fold) into `cli/util.rs`.
 - **Regression guard**: existing `export` integration tests stay green; ADD the
-  stronger `RenderOptions::default()` decode-back assertion (RT-C/RT-I) +
-  `test_watermark_position_calculation`. Keep `test_pixel_demultiplication`
+  stronger `RenderOptions::default()` decode-back assertion (RT-C/RT-I) + the
+  migrated `test_watermark_position_calculation`. Keep `test_pixel_demultiplication`
   (`lib.rs:722-781`) with its hand-computed expected values, now calling the
   extracted `pixmap_to_rgb` (do NOT replace the asserts with a self-call). Sub-component review fires here.
 
@@ -238,16 +247,15 @@ monolith; the "reuse" the rest of D1 needs does not exist yet.
   (`default-features=false, features=["jpeg","png"]`; currently only a dev-dep of
   `photohelper-cli`), verify MSRV-1.88 + `cargo audit`.
   `pub fn load_source_image(path, allow_untested_raw) -> Result<RgbImage, ExportError>`:
-  - dispatch via an exhaustive **`enum SourceKind`** with `classify(path) -> Option<SourceKind>` (`eq_ignore_ascii_case`); `None` = unsupported extension, a **distinct** outcome from decode-failure (drives `skipped_unsupported` vs `decode_failed`). It is an enum (3 arms: `Raster`, `Cr3`, `UntestedRaw`) **not** an inline 2-arm match, so the `--allow-untested-raw` gate is decided once, before decode (RT-O).
+  - dispatch via an exhaustive **`enum SourceKind`** with `classify(path) -> Option<SourceKind>` (`eq_ignore_ascii_case`); `None` = unsupported extension, a **distinct** outcome from decode-failure (`skipped_unsupported` vs `decode_failed`). It is an enum (3 arms: `Raster`, `Cr3`, `UntestedRaw`) **not** an inline 2-arm match, so the `--allow-untested-raw` gate is decided once, before decode (RT-O).
   - raster: `image` decode → `to_rgb8`; **apply EXIF orientation**, and a
     malformed/unsupported orientation tag is a **defined outcome** — `decode_failed`
-    (treat as undecodable) OR a documented default-to-Identity with `tracing::warn!`
-    (pick one, test it — RT-J).
+    OR a documented default-to-Identity with `tracing::warn!` (pick one, test it — RT-J).
   - RAW: `decode_image(ProcessOptions::Srgb8)`; CR3 always; `UntestedRaw` only if
     `allow_untested_raw`, then the **post-decode sanity guard**: reject absurd dims
-    AND assert **3 channels** (`len == w*h*3`; the FFI does not assert `colors==3`,
-    `ffi.rs:758-764`) — route through `RgbImage::new` (`model.rs:670-689`) so the
-    channel guard isn't dropped (RT-D). Failures → `decode_failed`.
+    AND assert **3 channels** — route through `RgbImage::new` (`model.rs:670-689`)
+    so the `len==w*h*3` guard isn't dropped (the FFI does not assert `colors==3`,
+    `ffi.rs:758-764`) — RT-D. Failures → `decode_failed`.
 - **D1b — Geometry module**: named validated consts `MARK1_HEIGHT_FRAC=0.14`,
   `MARK2_HEIGHT_FRAC=0.13`, `MARK_MARGIN_FRAC=0.046`, `SHADOW_BAND_FRAC=0.30`.
   `MarkPlacement` has **private `u32` fields** + accessors; sole constructor
@@ -255,18 +263,20 @@ monolith; the "reuse" the rest of D1 needs does not exist yet.
   `mark_w=round(mw*scale).max(1)`, margins `round(W*0.046)`/`round(H*0.046)`,
   origins via **`checked_sub`** so an underflow maps to the error (negatives
   unrepresentable; the blit can then drop its bounds clip — RT-M).
-  **`enum GeometryError { MarkDoesNotFit { which: MarkSlot, mark_dims: (u32,u32), target_dims: (u32,u32) } }`** (defined, not stringly — RT-H).
+  **`enum GeometryError { MarkDoesNotFit { which: MarkSlot, mark_dims: (u32,u32), target_dims: (u32,u32) } }`** and **`enum MarkSlot { Mark1, Mark2 }`** (both defined, not stringly — RT-H/R3-A; the geometry tests assert `which`).
 - **D1c — Shadow gradient**: `shadow_alpha_ramp(H) -> Vec<u8>` (len `round(0.30*H)`,
   pinned denominator, monotonic 255→0; `None`/empty for tiny `H`). Composite as a
   color op keeping destination alpha 255: `out_rgb = base_rgb*(1 - t)`,
   `t = ramp[row]/255` — NOT a pixmap-alpha write. Full-bleed.
 - **D1d — Composite**: parametrize the existing draw path with
-  `BadgeSizeBasis { LongEdge(Scale) | Height(HeightFrac) }` — the `Height` arm
-  carries a **validated `HeightFrac`** newtype (finite, `0<f<=1`), not a bare f32
-  (RT-M) — plus **per-axis `(margin_x, margin_y)`** (RT-E). `calculate_watermark_position`
-  becomes 2-axis; export's re-point passes `margin_x==margin_y==(long_edge*0.015).round().max(8.0)`
-  to preserve its placement exactly. Enforce resize→shadow→mark1→mark2; a
-  `MarkDoesNotFit` is propagated (D-Q5), not clipped.
+  `BadgeSizeBasis { LongEdge(Scale) | Height(f32) }` plus **per-axis
+  `(margin_x, margin_y)`** (RT-E). No `HeightFrac` newtype (R3-E — only the vetted
+  consts produce it; `fit` already floors via `.max(1)`); add a
+  `debug_assert!(f.is_finite() && f > 0.0 && f <= 1.0)` at `fit` entry.
+  `calculate_watermark_position` becomes 2-axis; export's re-point passes
+  `margin_x==margin_y==(long_edge*0.015).round().max(8.0)` to preserve its placement
+  exactly. Enforce resize→shadow→mark1→mark2; a `MarkDoesNotFit` is propagated
+  (D-Q5), not clipped.
 - **D1e — Unit tests** per the geometry + shadow rows above.
 - **Sub-component review** (folded with D1.0).
 
@@ -294,19 +304,23 @@ monolith; the "reuse" the rest of D1 needs does not exist yet.
 - **D3a — `RenameArgs`**: `--source <DIR>`, `--output <DIR>`, `--force`, `--strict`;
   catalog via the global flag.
 - **D3b — Selection + names**: query `all_photos_with_cull_scores(MODEL_SLUG, CLIP_MODEL_SLUG)`
-  → `DevelopRow`; **sort rows by `(ingested_at, photo_id)`** (or add `, p.id` to the
-  query) so collision-suffix assignment is deterministic (the query's `ORDER BY` has
-  no tie-breaker, `catalog.rs:881` — RT-B). Canonicalize `--source`; filter rows by
-  **canonical path-component prefix**; per row, **existence precheck** (`file_missing`
-  if gone — Theme N). Build the name via a shared, sanitizing **`RenamedFilename`**
-  **`Result`-returning constructor** (RT-M) that OWNS: prefix shape (via the shared
-  formatter, `{:05.2}` score + named `None` sentinels), stem sanitization (reject
-  separators/NUL/control), and a **composed-name** length cap (truncate the STEM so
-  prefix + `_N` suffix + ext always survive `NAME_MAX` — RT-B). Pipeline order:
-  sanitize → compose → cap-stem → `resolve_collisions` (key on final bytes; same
-  suffix for RAW + sidecar). Destination validated by **lexical containment** under
-  canonical `--output` (RT-A); a containment rejection → `errored`.
-  **`rename` is an independent driver — it must NOT call `read_xmp`** (D-Q7/RT-O).
+  → `DevelopRow`; **add `, p.id` as a secondary `ORDER BY` key** to the query
+  (total order `(ingested_at_unix_seconds, id)`) so collision-suffix assignment is
+  deterministic — do NOT Rust-sort (`PhotoId` has no `Ord`; `ingested_at` is not
+  projected onto `DevelopRow`, `catalog.rs:866-881` — RT-B/R3-C). This shared query
+  also feeds `export.rs:259` + `develop.rs:236`; the re-order is benign (both build
+  deterministic upfront maps) — note for the D1.0 regression reviewer. Canonicalize
+  `--source`; filter rows by **canonical path-component prefix**; per row,
+  **existence precheck** (`file_missing` if gone). Build the name via a shared,
+  sanitizing **`RenamedFilename` `Result`-returning constructor** (RT-M) that OWNS:
+  prefix shape (via the shared formatter, `{:05.2}` score + named `None` sentinels),
+  stem sanitization (reject separators/NUL/control), and a **composed-name** length
+  cap (truncate the STEM so prefix + `_N` suffix + ext always survive `NAME_MAX` —
+  RT-B; reserve `_N` width for the max collision count). Pipeline order: sanitize →
+  compose → cap-stem → `resolve_collisions` (key on final bytes; same suffix for RAW
+  + sidecar). Destination validated by **lexical containment** under canonical
+  `--output` (RT-A); a containment rejection → `errored`. **`rename` is an
+  independent driver — it must NOT call `read_xmp`** (D-Q7/RT-O).
 - **D3c — Atomic unit copy (numbered, RT-N)**: (1) `fs::copy` RAW → `raw.tmp` under
   `--output`; (2) if a `<stem>.xmp` sidecar exists, copy → `xmp.tmp` under `--output`;
   (3) **only after both temps exist**, `rename(raw.tmp→final)` then `rename(xmp.tmp→final)`;
@@ -326,7 +340,7 @@ monolith; the "reuse" the rest of D1 needs does not exist yet.
   `Cluster-…_Cull-…` divergence from `export`'s lowercase scheme + the shared
   formatter; ALSO record that `develop.rs`'s collision key uses NFC+lowercase
   (`develop.rs:240-264`) while the shared `resolve_collisions` is lowercase-only
-  (`export.rs:300-303`) — intentional; `develop` is out of scope (RT-O).
+  (`export.rs:300-303`) — intentional; `develop` is out of scope.
 - Ledgers: SESSION-STATE (component progress), HANDOFF checkpoint. **discovery-notes**:
   FIRST reconcile the pre-existing duplicate IDs (DN-029 @`:241`/`:329`; DN-033
   @`:284`/`:305` — renumber the later collisions; current highest distinct is
@@ -337,5 +351,7 @@ monolith; the "reuse" the rest of D1 needs does not exist yet.
   its trigger *fired* this session (D1.0 touches `export_photo`) — capability
   delivered in `watermark`; `export`-pipeline integration of dynamic badges remains
   deferred (do NOT hard-close); cross-ref DN-002. **TECH-DEBT**: file the NEF/ARW
-  fixtures+verification TD with an in-source `TD-N` label + binding trigger (next
-  free TD id at filing; ledger tail ≈ TD-040 — confirm, don't assume).
+  fixtures+verification TD with an in-source `TD-N` label + binding trigger at the
+  **lowest free TD id — the ledger is non-contiguous: TD-024 and TD-027..039 are
+  free, TD-040 is taken (session 11), so the new id is TD-024; confirm against
+  `TECH-DEBT.md` at filing** (R3-H).

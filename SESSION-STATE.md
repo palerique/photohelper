@@ -9,11 +9,16 @@
 
 **Last session**: 14 (`xmp-library-upgrade` — 2026-05-31) — **SHIPPED** via PR #15. TD-022: event-based pass-through XMP writer preserving third-party fields. (Session 13 `auto-tone-and-sortable-labels` shipped via PR #14.) **NOTE**: the session-14 session-end review left Round-3 findings open (2 CRITICAL + 9 HIGH in `photohelper-sidecar`) with no Round-4 CLEAN artifact, yet the PR merged — see `docs/plans/session-15.md § Unresolved prior-session item`.
 
-**Current session**: 15 (`watermark-and-rename` — 2026-06-01) — branch `session-15/watermark-and-rename`. **PLAN AUTHORED** (contract committed; awaiting plan-review Round 1).
+**Current session**: 15 (`watermark-and-rename` — 2026-06-01) — branch `session-15/watermark-and-rename`. **PLAN-REVIEW COMPLETE** (plan v4; R1 7C+10H → R2 2C+7H → R3 0C+2H, **converged**). Implementation not yet started.
+
+**Plan-review history (session 15 — COMPLETE)**:
+- R1 → 7 CRITICAL + 10 HIGH + 3 MEDIUM + 2 LOW (19 themes) → plan v2. Dominant signal: plan described net-new work as "reuse" (export_photo monolith; RAW filmic vs raster sRGB; shadow/demultiply; sidecar/filename conventions). 4 product decisions (color space, mark-fit, untested-RAW gating, mark formats) resolved with the user.
+- R2 → 2 CRITICAL + 7 HIGH + 6 MEDIUM + 3 LOW (all v2-introduced regressions) → plan v3. CRITICALs: RT-A `canonicalize_within` can't validate a non-existent destination; RT-B sanitized-stem/NAME_MAX silent clobber.
+- R3 → 0 CRITICAL + 2 HIGH + 4 MEDIUM + 5 LOW → plan v4 (CONVERGED). Both R2 CRITICALs verified closed by 3 lenses; all 8 lenses judged implementation-ready. 9th-agent verification across rounds: discard_rate 0.00.
 
 **Goal**: Two non-destructive, source-read-only batch features. (1) `watermark` subcommand: standardize a mixed raster+RAW directory to `--max-long-edge` (aspect-locked), apply a full-width bottom black shadow gradient (100%→0% over bottom 30% height), then composite dual corner image marks (`--mark1` top-right @14% height, `--mark2` bottom-left @13% height, 4.6% margins), exporting high-quality JPEGs. (2) `rename` subcommand: copy RAW + matching `.xmp` sidecars into `--output` as `Cluster-{X}_Cull-{Y}-OriginalFilename.ext` (X = zero-padded cluster id, Y = zero-padded NIMA score). See `docs/plans/session-15.md`.
 
-**Action**: Run plan-review (Round 1 → remediate → Round 2) on `docs/plans/session-15.md` before any implementation code.
+**Action**: Begin implementation per `docs/plans/session-15.md` v4 — D0 (housekeeping) → D1.0 (extract shared `photohelper-export` primitives: `resize_rgb`/`render_to_jpeg`/`pixmap_to_rgb`; re-point `export`, keep its integration tests green) → D1 → D2 → D3 → D4.
 
 **Session-end review (session 12 — COMPLETE)**:
 - R1 → 5 items remediated (O(N) badge preloading, O(N^2) collision, EX_PARTIAL_FAIL strictness, decoupling DevelopRow, watermark fail-open).
