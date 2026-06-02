@@ -201,16 +201,22 @@ if [[ $RAW_PIPELINE -eq 1 ]]; then
         done
         step "Watermark raster sources ($RASTER_SOURCE_COUNT JPEG/PNG from source — ${MAX_LONG_EDGE}px)"
         T=$(ts)
+        # Allow exit 2 (partial failure / mark-doesnt-fit) — don't abort the whole run.
+        WM_EXIT=0
         "$BINARY" watermark \
             --source "$RASTER_TEMP" \
             --mark1  "$MARK1" \
             --mark2  "$MARK2" \
             --output "$WATERMARK_DIR" \
             --max-long-edge "$MAX_LONG_EDGE" \
-            ${FORCE}
+            ${FORCE} || WM_EXIT=$?
         rm -rf "$RASTER_TEMP"
         WATERMARKED=$(find "$WATERMARK_DIR" -name "*.jpg" | wc -l | tr -d ' ')
         WM_SIZE=$(du -sh "$WATERMARK_DIR" 2>/dev/null | awk '{print $1}')
+        if [[ $WM_EXIT -eq 2 ]]; then
+            warn "Some raster files could not be watermarked (mark-doesnt-fit for narrow images)."
+            warn "Those images are too narrow for the current mark sizes. See warnings above."
+        fi
         ok "Done in $(hms $(elapsed $T)) — $WATERMARKED total JPEG(s) in output ($WM_SIZE)"
     fi
 
