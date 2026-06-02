@@ -28,11 +28,21 @@ pub const MARK1_HEIGHT_FRAC: f32 = 0.14;
 /// Fraction of image height for Mark2 (bottom-left watermark).
 pub const MARK2_HEIGHT_FRAC: f32 = 0.13;
 
-/// Fraction of image dimension (width for x-margin, height for y-margin) for mark placement.
+/// Fraction of the image SHORT edge used as the uniform margin on all four sides.
+///
+/// Applying this to `min(W, H)` gives the same absolute pixel distance from
+/// every adjacent border, regardless of image aspect ratio.
 pub const MARK_MARGIN_FRAC: f32 = 0.046;
 
 /// Fraction of image height covered by the shadow gradient band.
 pub const SHADOW_BAND_FRAC: f32 = 0.30;
+
+/// Minimum mark height in pixels below which a complex logo may be illegible.
+///
+/// [`composite_mark_on_pixmap`] emits a `tracing::warn!` when the computed
+/// mark height is smaller than this threshold. The mark is still rendered —
+/// the user decides whether the result is acceptable.
+pub const MARK_MIN_READABLE_PX: u32 = 80;
 
 // ===== Existing types (unchanged) =====
 
@@ -358,6 +368,79 @@ impl MarkPlacement {
         };
 
         // Bounds check: mark must not extend past the image edge.
+        if x.checked_add(mark_w).is_none_or(|e| e > tw)
+            || y.checked_add(mark_h).is_none_or(|e| e > th)
+        {
+            return Err(GeometryError::MarkDoesNotFit {
+                which: slot,
+                mark_dims: (mark_w, mark_h),
+                target_dims: target,
+            });
+        }
+
+        Ok(Self {
+            x,
+            y,
+            w: mark_w,
+            h: mark_h,
+        })
+    }
+
+    /// Like [`fit`] but uses a **single absolute pixel margin** on every adjacent side.
+    ///
+    /// The recommended value is `round(min(W, H) × MARK_MARGIN_FRAC)`, which
+    /// produces the same physical distance from both the right edge and the top
+    /// edge (for Mark1) and both the left edge and the bottom edge (for Mark2),
+    /// regardless of the image aspect ratio.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the mark cannot fit at its computed size.
+    pub fn fit_equal_margin(
+        target: (u32, u32),
+        mark_dims: (u32, u32),
+        height_frac: f32,
+        margin_px: u32,
+        slot: MarkSlot,
+    ) -> Result<Self, GeometryError> {
+        debug_assert!(
+            height_frac.is_finite() && height_frac > 0.0 && height_frac <= 1.0,
+            "height_frac must be in (0, 1]"
+        );
+        let (tw, th) = target;
+        let (mw, mh) = mark_dims;
+
+        let mark_h = ((th as f32 * height_frac).round() as u32).max(1);
+        let scale = mark_h as f32 / (mh as f32).max(1.0);
+        let mark_w = ((mw as f32 * scale).round() as u32).max(1);
+
+        let (x, y) = match slot {
+            MarkSlot::Mark1 => {
+                // top-right: right_gap = margin_px, top_gap = margin_px
+                let x = tw
+                    .checked_sub(margin_px)
+                    .and_then(|v| v.checked_sub(mark_w))
+                    .ok_or(GeometryError::MarkDoesNotFit {
+                        which: MarkSlot::Mark1,
+                        mark_dims: (mark_w, mark_h),
+                        target_dims: target,
+                    })?;
+                (x, margin_px)
+            }
+            MarkSlot::Mark2 => {
+                // bottom-left: left_gap = margin_px, bottom_gap = margin_px
+                let y = th
+                    .checked_sub(margin_px)
+                    .and_then(|v| v.checked_sub(mark_h))
+                    .ok_or(GeometryError::MarkDoesNotFit {
+                        which: MarkSlot::Mark2,
+                        mark_dims: (mark_w, mark_h),
+                        target_dims: target,
+                    })?;
+                (margin_px, y)
+            }
+        };
+
         if x.checked_add(mark_w).is_none_or(|e| e > tw)
             || y.checked_add(mark_h).is_none_or(|e| e > th)
         {
@@ -1077,10 +1160,13 @@ fn apply_shadow_gradient(pixmap: &mut tiny_skia::Pixmap, band_frac: f32) {
 
 /// Composite one [`MarkSpec`] onto `pixmap` using the new slot-based geometry.
 ///
-/// For `BadgeSizeBasis::Height` marks the validated `MarkPlacement::fit` path
-/// is used, ensuring the production path exercises the same guards as the tests.
-/// Margins are **fractions** (stored in `MarkSpec.margin_x/margin_y`), computed
-/// into pixels against the post-resize `pw`/`ph`.
+/// For `BadgeSizeBasis::Height` marks [`MarkPlacement::fit_equal_margin`] is
+/// used: the margin pixel value is derived from `min(pw, ph) × mark.margin_x`
+/// so that the mark has the same physical distance from BOTH its adjacent edges
+/// (right + top for Mark1; left + bottom for Mark2), regardless of aspect ratio.
+///
+/// If the computed mark height is below [`MARK_MIN_READABLE_PX`], a
+/// `tracing::warn!` is emitted — the mark still renders, but may be illegible.
 fn composite_mark_on_pixmap(
     pixmap: &mut tiny_skia::Pixmap,
     mark: &MarkSpec,
@@ -1092,14 +1178,31 @@ fn composite_mark_on_pixmap(
 
     match &mark.basis {
         BadgeSizeBasis::Height(frac) => {
-            // Route through validated MarkPlacement so the production path
-            // exercises the same guards as the unit tests.
-            let placement = MarkPlacement::fit(
+            // Readability guard: warn if mark will be too small to read.
+            let mark_h_preview = ((ph as f32 * frac).round() as u32).max(1);
+            if mark_h_preview < MARK_MIN_READABLE_PX {
+                tracing::warn!(
+                    slot = ?mark.slot,
+                    mark_h_px = mark_h_preview,
+                    min_readable_px = MARK_MIN_READABLE_PX,
+                    image_h_px = ph,
+                    "Mark rendered at only {mark_h_preview}px height \
+                     (< {MARK_MIN_READABLE_PX}px minimum readable). \
+                     Consider a larger --max-long-edge. The mark will still be \
+                     composited — check the output and decide."
+                );
+            }
+
+            // Equal-margin compositing: margin_px is based on the SHORT edge so
+            // the mark is equidistant from both its adjacent borders on any
+            // aspect ratio (fixes asymmetric placement on 16:9 / 3:2 images).
+            let margin_px = (pw.min(ph) as f32 * mark.margin_x).round() as u32;
+
+            let placement = MarkPlacement::fit_equal_margin(
                 (pw, ph),
                 (mark.badge.width(), mark.badge.height()),
                 *frac,
-                mark.margin_x, // margin_x: fraction of post-resize width
-                mark.margin_y, // margin_y: fraction of post-resize height
+                margin_px,
                 mark.slot,
             )
             .map_err(ExportError::Geometry)?;
@@ -1948,6 +2051,105 @@ mod tests {
         assert_eq!(p.w(), 208, "mark_w");
         assert_eq!(p.x(), 37, "x");
         assert_eq!(p.y(), 659, "y");
+    }
+
+    // ----- Equal-margin + readability tests -----
+
+    /// Bug-2 fix: Mark1 top-right on a landscape image must be equidistant
+    /// from the right edge AND the top edge after `fit_equal_margin`.
+    #[test]
+    fn test_mark_placement_equal_margin_landscape_mark1() {
+        // 1920×1080, badge 500×300, Mark1 (top-right)
+        // margin_px = round(min(1920, 1080) × 0.046) = round(1080 × 0.046) = round(49.68) = 50
+        // mark_h = round(1080 × 0.14) = round(151.2) = 151
+        // scale = 151/300 ≈ 0.5033; mark_w = round(500 × 0.5033) = round(251.67) = 252
+        // x = 1920 - 50 - 252 = 1618; y = 50
+        // right_gap = 1920 - 1618 - 252 = 50 = top_gap ✓
+        let margin_px = (1080_f32 * MARK_MARGIN_FRAC).round() as u32; // min(1920, 1080) = 1080
+        let p = MarkPlacement::fit_equal_margin(
+            (1920, 1080),
+            (500, 300),
+            MARK1_HEIGHT_FRAC,
+            margin_px,
+            MarkSlot::Mark1,
+        )
+        .unwrap();
+        let right_gap = 1920 - p.x() - p.w();
+        let top_gap = p.y();
+        assert_eq!(
+            right_gap, top_gap,
+            "right_gap={right_gap} must equal top_gap={top_gap}"
+        );
+        assert_eq!(right_gap, margin_px, "gap must equal margin_px={margin_px}");
+    }
+
+    /// Bug-2 fix: Mark2 bottom-left on a landscape image must be equidistant
+    /// from the left edge AND the bottom edge after `fit_equal_margin`.
+    #[test]
+    fn test_mark_placement_equal_margin_landscape_mark2() {
+        let margin_px = (1080_f32 * MARK_MARGIN_FRAC).round() as u32; // min(1920, 1080) = 1080
+        let p = MarkPlacement::fit_equal_margin(
+            (1920, 1080),
+            (500, 300),
+            MARK2_HEIGHT_FRAC,
+            margin_px,
+            MarkSlot::Mark2,
+        )
+        .unwrap();
+        let left_gap = p.x();
+        let bottom_gap = 1080 - p.y() - p.h();
+        assert_eq!(
+            left_gap, bottom_gap,
+            "left_gap={left_gap} must equal bottom_gap={bottom_gap}"
+        );
+        assert_eq!(left_gap, margin_px, "gap must equal margin_px={margin_px}");
+    }
+
+    /// Bug-2 fix: portrait image (720×1080) — same invariant.
+    #[test]
+    fn test_mark_placement_equal_margin_portrait_mark1() {
+        // short edge = 720; margin_px = round(720 × 0.046) = round(33.12) = 33
+        let margin_px = (720_f32 * MARK_MARGIN_FRAC).round() as u32; // min(720, 1080) = 720
+        let p = MarkPlacement::fit_equal_margin(
+            (720, 1080),
+            (300, 500),
+            MARK1_HEIGHT_FRAC,
+            margin_px,
+            MarkSlot::Mark1,
+        )
+        .unwrap();
+        let right_gap = 720 - p.x() - p.w();
+        let top_gap = p.y();
+        assert_eq!(
+            right_gap, top_gap,
+            "right={right_gap} must equal top={top_gap}"
+        );
+    }
+
+    /// Bug-1: a very small image produces mark_h < MARK_MIN_READABLE_PX.
+    /// The placement must still succeed (warn-only, no error).
+    #[test]
+    fn test_mark_placement_small_image_succeeds_below_readability_threshold() {
+        // 300×200 image: mark_h = round(200 × 0.14) = 28px < 80px threshold
+        let mark_h = ((200_f32 * MARK1_HEIGHT_FRAC).round() as u32).max(1);
+        assert!(
+            mark_h < MARK_MIN_READABLE_PX,
+            "precondition: mark_h={mark_h} < MARK_MIN_READABLE_PX={MARK_MIN_READABLE_PX}"
+        );
+        // fit_equal_margin must still return Ok (warn is a runtime concern)
+        let margin_px = (200_f32 * MARK_MARGIN_FRAC).round() as u32; // min(300, 200) = 200
+        let result = MarkPlacement::fit_equal_margin(
+            (300, 200),
+            (100, 80),
+            MARK1_HEIGHT_FRAC,
+            margin_px,
+            MarkSlot::Mark1,
+        );
+        assert!(
+            result.is_ok(),
+            "small image must not error, only warn: {result:?}"
+        );
+        assert_eq!(result.unwrap().h(), mark_h);
     }
 
     // ----- D1a raster decode tests (RT-J) -----
