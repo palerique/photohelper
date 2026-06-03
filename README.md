@@ -42,17 +42,20 @@ source ~/.zshrc
 photohelper --version
 ```
 
-> ORT (ONNX Runtime) runs through Apple CoreML on macOS — the binary has no
-> external ORT dependency and is fully self-contained.
+> ORT (ONNX Runtime) is statically linked on macOS — the binary is fully
+> self-contained with no external ORT shared library. Inference uses the CPU
+> execution provider. (CoreML.framework appears as a transitive link dependency
+> of the static archive but is not the active inference backend.)
 
 ### macOS (Intel — x86_64)
 
-No Intel-native binary is provided. Use the **arm64 binary via Rosetta 2** —
-Apple Silicon binaries run transparently on Intel Macs without any configuration:
+No pre-built Intel binary is provided. Intel Macs **cannot** run the arm64
+binary — Rosetta 2 only goes the other direction (Intel→Apple Silicon), not
+arm64→Intel. Intel Mac users must build from source:
 
 ```bash
-xattr -dr com.apple.quarantine photohelper
-./photohelper --version
+# Install rust + toolchain, then:
+cargo build --release --target x86_64-apple-darwin
 ```
 
 ### Linux (x86_64)
@@ -105,8 +108,9 @@ $env:PHOTOHELPER_MODEL_DIR = "$env:LOCALAPPDATA\photohelper\models"
 ```
 
 > ORT is statically linked on Windows MSVC — **no `onnxruntime.dll` or other
-> external DLL is needed**. The binary uses Windows 10+ system DirectML libraries
-> (always present).
+> external DLL is needed**. The static ORT library has a link-time dependency on
+> DirectX 12 system DLLs (DXGI, D3D12, DirectML) which are present on Windows 10
+> version 1903 (May 2019) and later. Inference uses the CPU execution provider.
 
 ---
 
@@ -127,6 +131,7 @@ Pass `--catalog <path>` to use a custom location.
 photohelper ingest ~/Pictures/shoots/session-01
 
 # Step 2: Score every photo with the NIMA aesthetic model (1–5 stars).
+# Requires PHOTOHELPER_MODEL_DIR to be set — see Installation above.
 photohelper cull \
   --catalog ~/Pictures/shoots/session-01/.photohelper/catalog.db
 
@@ -137,7 +142,6 @@ photohelper dedup \
 # Step 4: Write Lightroom-compatible XMP sidecars (ratings, labels, keywords).
 photohelper develop \
   --catalog ~/Pictures/shoots/session-01/.photohelper/catalog.db \
-  --source  ~/Pictures/shoots/session-01 \
   --lr-rating --lr-keywords
 
 # Step 5: Export the best shots (≥3 stars) as watermarked JPEGs —
@@ -176,26 +180,28 @@ the source directory.
 ### Flow 3 — AI cull only (score shots without exporting)
 
 ```bash
-# Ingest + score, then inspect the catalog with any SQLite tool.
+# Requires PHOTOHELPER_MODEL_DIR — see Installation above.
 photohelper ingest ~/Pictures/shoots/session-01
 photohelper cull \
   --catalog ~/Pictures/shoots/session-01/.photohelper/catalog.db
-
-# The catalog at .photohelper/catalog.db has a `cull_scores` table:
-#   SELECT source_path, aesthetic_score FROM cull_scores
-#   JOIN photos ON photos.id = cull_scores.photo_id
-#   ORDER BY aesthetic_score DESC;
 ```
 
-NIMA scores are stored as floats in `[1, 10]`; star ratings are derived
-by mapping to `[1, 5]`.
+Scores are stored in the catalog and automatically used by `develop`,
+`export`, and `rename` — no manual inspection needed. The catalog is a
+plain SQLite file at `.photohelper/catalog.db` if you want to query it
+directly with any SQLite tool.
+
+NIMA scores are floats in `[1, 10]`; star ratings map to `[1, 5]`.
 
 ---
 
 ### Flow 4 — Rename RAW files with score + cluster metadata
 
 Copy RAW files (and their `.xmp` sidecars) into a new directory with
-filenames that encode the AI score and dedup cluster id:
+filenames that encode the AI score and dedup cluster id.
+
+> **Prerequisites**: `ingest` and `cull` must have been run on the source
+> directory first (scores and cluster ids come from the catalog).
 
 ```bash
 photohelper rename \
