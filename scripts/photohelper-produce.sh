@@ -82,6 +82,10 @@ step()    { echo; printf '\033[1;36m>>> %s\033[0m\n' "$*"; }
 sep()     { echo; printf '%0.s─' {1..72}; echo; }
 info()    { printf '  %-28s %s\n' "$1" "$2"; }
 
+# ── timing accumulators ───────────────────────────────────────────────────────
+TOTAL_START=$(ts)
+T_BUILD=0 T_INGEST=0 T_CULL=0 T_CLUSTER=0 T_DEVELOP=0 T_EXPORT=0 T_RASTER=0
+
 # ── detect source type ────────────────────────────────────────────────────────
 CR3_COUNT=$(find "$SOURCE_DIR" -maxdepth 1 -name "*.CR3" | wc -l | tr -d ' ')
 RAW_PIPELINE=0
@@ -125,9 +129,10 @@ mkdir -p "$OUTPUT_DIR"
 
 # ── build ─────────────────────────────────────────────────────────────────────
 step "Build (release)"
-T0=$(ts)
+T=$(ts)
 cargo build --release -p photohelper-cli -q
-ok "Done in $(hms $(elapsed $T0))"
+T_BUILD=$(elapsed $T)
+ok "Done in $(hms $T_BUILD)"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RAW PIPELINE
@@ -143,26 +148,30 @@ if [[ $RAW_PIPELINE -eq 1 ]]; then
     step "Ingest ($CR3_COUNT CR3 files → catalog)"
     T=$(ts)
     "$ROOT_DIR/scripts/photohelper-ingest.sh" "$SOURCE_DIR"
-    ok "Done in $(hms $(elapsed $T))"
+    T_INGEST=$(elapsed $T)
+    ok "Done in $(hms $T_INGEST)"
 
     # ── cull ──────────────────────────────────────────────────────────────────
     step "Cull (NIMA aesthetic scoring)"
     T=$(ts)
     "$ROOT_DIR/scripts/photohelper-cull.sh" --catalog "$CATALOG_DB"
-    ok "Done in $(hms $(elapsed $T))"
+    T_CULL=$(elapsed $T)
+    ok "Done in $(hms $T_CULL)"
 
     # ── cluster ───────────────────────────────────────────────────────────────
     step "Cluster (CLIP dedup — cosine-similarity)"
     T=$(ts)
     "$ROOT_DIR/scripts/photohelper-dedup.sh" --catalog "$CATALOG_DB"
-    ok "Done in $(hms $(elapsed $T))"
+    T_CLUSTER=$(elapsed $T)
+    ok "Done in $(hms $T_CLUSTER)"
 
     # ── develop ───────────────────────────────────────────────────────────────
     step "Develop (write Lightroom XMP sidecars)"
     T=$(ts)
     "$ROOT_DIR/scripts/photohelper-develop.sh" \
         --catalog "$CATALOG_DB" --lr-rating --lr-keywords --force
-    ok "Done in $(hms $(elapsed $T))"
+    T_DEVELOP=$(elapsed $T)
+    ok "Done in $(hms $T_DEVELOP)"
 
     # ── export + marks in one filmic-ISP pass (saves ~30% wall-clock) ─────────
     # --mark1-png/--mark2-png apply shadow+marks inside the same encode step,
@@ -193,7 +202,8 @@ if [[ $RAW_PIPELINE -eq 1 ]]; then
     if [[ "$WATERMARKED" -eq 0 ]]; then
         warn "Export produced 0 JPEGs. Check that the source directory contains CR3 files rated ≥$MIN_RATING."
     fi
-    ok "Done in $(hms $(elapsed $T)) — $WATERMARKED JPEG(s) exported+watermarked ($WM_SIZE)"
+    T_EXPORT=$(elapsed $T)
+    ok "Done in $(hms $T_EXPORT) — $WATERMARKED JPEG(s) exported+watermarked ($WM_SIZE)"
 
     # ── watermark raster files from source (JPEG/PNG alongside the CR3s) ─────────
     RASTER_SOURCE_COUNT=$(find "$SOURCE_DIR" -maxdepth 1 \
@@ -229,7 +239,8 @@ if [[ $RAW_PIPELINE -eq 1 ]]; then
             warn "Some raster files could not be watermarked (mark-doesnt-fit for narrow images)."
             warn "Those images are too narrow for the current mark sizes. See warnings above."
         fi
-        ok "Done in $(hms $(elapsed $T)) — $WATERMARKED total JPEG(s) in output ($WM_SIZE)"
+        T_RASTER=$(elapsed $T)
+        ok "Done in $(hms $T_RASTER) — $WATERMARKED total JPEG(s) in output ($WM_SIZE)"
     fi
 
     FINAL_DIR="$WATERMARK_DIR"
@@ -268,14 +279,49 @@ else
     if [[ "$WATERMARKED" -eq 0 ]]; then
         warn "No files were watermarked. Check that the source directory contains JPEG/PNG images."
     fi
-    ok "Done in $(hms $(elapsed $T)) — $WATERMARKED JPEG(s) watermarked ($WM_SIZE)"
+    T_RASTER=$(elapsed $T)
+    ok "Done in $(hms $T_RASTER) — $WATERMARKED JPEG(s) watermarked ($WM_SIZE)"
 
     FINAL_DIR="$WATERMARK_DIR"
     FINAL_COUNT="$WATERMARKED"
 
 fi
 
-# ── summary ───────────────────────────────────────────────────────────────────
+# ── timing summary ────────────────────────────────────────────────────────────
+T_TOTAL=$(elapsed $TOTAL_START)
+
+timing_row() {
+    local label="$1" secs="$2"
+    [[ "$secs" -eq 0 ]] && return
+    printf '  %-26s %s\n' "$label" "$(hms $secs)"
+}
+
+sep
+bold "⏱  Timing summary"
+echo ""
+timing_row "Build"              $T_BUILD
+timing_row "Ingest"             $T_INGEST
+timing_row "Cull"               $T_CULL
+timing_row "Cluster"            $T_CLUSTER
+timing_row "Develop"            $T_DEVELOP
+timing_row "Export+Watermark"   $T_EXPORT
+timing_row "Raster watermark"   $T_RASTER
+echo "  ──────────────────────────────────"
+printf '  %-26s %s\n' "Total" "$(hms $T_TOTAL)"
+echo ""
+
+# ── benchmark log (tab-separated, appendable for cross-run comparison) ────────
+BENCH_LOG="$OUTPUT_DIR/benchmark.log"
+{
+    printf "timestamp\ttotal\tbuild\tingest\tcull\tcluster\tdevelop\texport\traster\tfiles\tsource\n"
+    printf "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n" \
+        "$TIMESTAMP" "$T_TOTAL" "$T_BUILD" "$T_INGEST" "$T_CULL" \
+        "$T_CLUSTER" "$T_DEVELOP" "$T_EXPORT" "$T_RASTER" \
+        "$FINAL_COUNT" "$SOURCE_DIR"
+} > "$BENCH_LOG"
+info "Benchmark log:" "$BENCH_LOG"
+
+# ── final output summary ──────────────────────────────────────────────────────
 sep
 bold "=== Done ==="
 echo ""
