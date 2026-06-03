@@ -10,12 +10,12 @@
 ```powershell
 # 1. Unzip the archive (Windows 10+ can open .zip natively,
 #    or use 7-Zip / Windows Explorer → Extract All)
-Expand-Archive photohelper-VERSION-x86_64-pc-windows-gnu.zip -DestinationPath .
-cd photohelper-VERSION-x86_64-pc-windows-gnu
+Expand-Archive photohelper-VERSION-x86_64-pc-windows-msvc.zip -DestinationPath .
+cd photohelper-VERSION-x86_64-pc-windows-msvc
 
 # 2. Copy files to a permanent location
 New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\photohelper\models"
-Copy-Item photohelper.exe, onnxruntime.dll -Destination "$env:LOCALAPPDATA\photohelper\"
+Copy-Item photohelper.exe -Destination "$env:LOCALAPPDATA\photohelper\"
 Copy-Item models\* -Destination "$env:LOCALAPPDATA\photohelper\models\" -Recurse
 
 # 3. Add to PATH and set model directory in your PowerShell profile
@@ -51,11 +51,9 @@ Remove-Item -Recurse "$env:LOCALAPPDATA\photohelper"
 
 ## Notes
 
-- `onnxruntime.dll` must be in the same directory as `photohelper.exe`.
-  The bundled copy is placed there by default.
-
 - `PHOTOHELPER_MODEL_DIR` only needs to be set for the `cull` and `dedup`
   subcommands (AI features). All other subcommands work without it.
 
-- This is a MinGW-compiled binary (x86_64-pc-windows-gnu). It works on
-  any Windows 10+ x86_64 system. MSVC-native builds are planned for v0.2.
+- This is an MSVC-compiled native Windows binary; ORT is statically linked
+  (no additional DLLs required). The binary links against standard Windows 10+
+  system DLLs (DirectML, DXGI, D3D12) which are always present.

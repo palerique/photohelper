@@ -115,7 +115,10 @@
 - **Why it matters**: v0.1 ships Linux + macOS binaries only. Windows users have no path until v0.2. Documenting the deferral with a binding trigger prevents "v0.2 silently slips because nobody owns it" failure mode the No-Acceptable-Trade-offs Policy is designed to catch.
 - **Owner**: v0.2 release-planning session OR first Windows-using contributor.
 - **Binding trigger**: by v0.2 cut OR first PR from a contributor with `target = x86_64-pc-windows-msvc` in their CI matrix, whichever first. The audit MUST cover: (a) does LibRaw 0.21+ cross-compile cleanly from macOS arm64 with `cargo build --target x86_64-pc-windows-msvc` + the chosen build mechanism (vendored cmake vs system pkg-config), (b) does the resulting binary statically link LibRaw (verifiable via `objdump`), (c) Windows path-encoding boundary: `open_file_w` with `\\?\` prefix for paths >MAX_PATH (260 chars) (cross-ref to PR1-T20's FFI path encoding finding from `docs/code-reviews/session-02-plan-round1.md`).
-- **Status**: open
+- **Status**: reconciled (2026-06-02, session 16) — item (a) addressed: LibRaw builds
+  via vcpkg `x64-windows-static-md` on `windows-latest`; CI green. Items (b) and (c)
+  deferred: (b) static-link verification via `dumpbin` → TD-042; (c) `\\?\` long-path
+  prefix → TD-043.
 
 ### DN-014 — Other RAW formats (CR2 / NEF / ARW / RAF / ORF / RW2 / DNG) deferred to first non-Canon camera profile (2026-05-28, session 2)
 
@@ -352,6 +355,11 @@ Lightroom native sorting by "Label Text" works lexicographically rather than num
 - **Why it matters**: Release archives only need to include the binary + ONNX model files. No ORT shared library bundling is required for macOS or Linux.
 - **Owner**: Resolved for v0.1 release. Relevant if ort crate is upgraded to stable 2.0.0 (TD-014).
 - **Status**: Resolved — v0.1.0 draft release ships 2 archives (macOS arm64, Linux x86_64) at ~80MB each.
+- **Addendum (2026-06-02, session 16)**: The Windows MSVC prebuilt is also a STATIC archive
+  (`x86_64-pc-windows-msvc.tar.lzma2` containing `libonnxruntime.a`); DN-041's original
+  claim that "The MSVC prebuilt is a `.dll` (dynamic), requiring bundling" was incorrect.
+  ORT is statically linked on all three platforms (confirmed: ANL-004). v0.1.1 ships a
+  third archive: `photohelper-VERSION-x86_64-pc-windows-msvc.zip` (TD-029 closed).
 
 ### DN-042 — Lightroom virtual copies + XMP crops gap (2026-06-02, session 15)
 

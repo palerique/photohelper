@@ -7,9 +7,21 @@
 > the immediately-prior session), demote it to `docs/session-archive/` per the
 > rolling-archive convention. The git log is the full timeline.
 
-**Last session**: 14 (`xmp-library-upgrade` — 2026-05-31) — **SHIPPED** via PR #15. TD-022: event-based pass-through XMP writer preserving third-party fields. (Session 13 `auto-tone-and-sortable-labels` shipped via PR #14.) **NOTE**: the session-14 session-end review left Round-3 findings open (2 CRITICAL + 9 HIGH in `photohelper-sidecar`) with no Round-4 CLEAN artifact, yet the PR merged — see `docs/plans/session-15.md § Unresolved prior-session item`.
+**Last session**: 15 (`watermark-and-rename` — 2026-06-01) — **SHIPPED** via PR #16. watermark + rename subcommands, single-pass export+watermark, Lanczos3 badge scaling, produce.sh, release CI (macOS arm64 + Linux x86_64). 342 tests.
 
-**Current session**: 15 (`watermark-and-rename` — 2026-06-01) — branch `session-15/watermark-and-rename`. **SHIPPED via PR (2026-06-02).** Session-end reviews R3+R4 CLEAN. 342 tests. PR to main pending merge.
+**Current session**: 16 (`windows-release` — 2026-06-02) — branch `session-16/windows-release`. **SHIPPED via PR (2026-06-03).** Implementation reviews R1 (10 themes) + R2 CLEAN. Windows build verified GREEN on GHA. 342 tests (unchanged).
+
+**Plan-review history (session 16 — COMPLETE)**:
+- R1 → 3 CRITICAL + 5 HIGH + 7 MEDIUM + 2 LOW (15 themes) → plan v2.
+- R2 → 1 CRITICAL + 2 MEDIUM → plan v3 (CONVERGED).
+
+**Session-end review history (session 16 — COMPLETE)**:
+- R1 (impl review) → 0 CRITICAL + 4 HIGH + 5 MEDIUM + 2 LOW (10 themes) → remediated (commit c5adb38f). 2 GHA-discovered fixes post-R2 (VCPKG_ROOT env context, version fallback for workflow_dispatch).
+- R2 (verify R1 remediation) → 0 findings → CLEAN.
+
+**Goal**: Windows x86_64 binary release — `x86_64-pc-windows-msvc` + vcpkg LibRaw + static ORT. Closes TD-029, partially reconciles DN-013. Files TD-042 (vcpkg stop-gap), TD-043 (long-path), TD-044 (Windows PR CI gate). See `docs/plans/session-16.md`.
+
+**Action**: **SHIPPED.** PR to main merged (2026-06-03). Next session: session 17 — virtual copy + XMP crop support (DN-042).
 
 **Plan-review history (session 15 — COMPLETE)**:
 - R1 → 7 CRITICAL + 10 HIGH + 3 MEDIUM + 2 LOW (19 themes) → plan v2.
@@ -19,10 +31,6 @@
 **Session-end review history (session 15 — COMPLETE)**:
 - R3 (post-R2 code changes) → 1 CRITICAL + 5 HIGH + 3 MEDIUM + 4 LOW (13 themes) → R3 remediation (commit bda7c38d).
 - R4 (verify R3 remediation) → 0 CRITICAL + 3 HIGH + 2 MEDIUM + 4 LOW (8 themes) → R4 remediation (commit 8e53084d) → CLEAN.
-
-**Goal**: Two non-destructive, source-read-only batch features. (1) `watermark` subcommand: standardize a mixed raster+RAW directory to `--max-long-edge` (aspect-locked), apply a full-width bottom black shadow gradient (100%→0% over bottom 30% height), then composite dual corner image marks (`--mark1` top-right @14% height, `--mark2` bottom-left @13% height, 4.6% margins), exporting high-quality JPEGs. (2) `rename` subcommand: copy RAW + matching `.xmp` sidecars into `--output` as `Cluster-{X}_Cull-{Y}-OriginalFilename.ext` (X = zero-padded cluster id, Y = zero-padded NIMA score). See `docs/plans/session-15.md`.
-
-**Action**: **SHIPPED.** PR to main merged (2026-06-02). Next session: session 16 — virtual copy + XMP crop support (DN-042).
 
 **Session-end review (session 12 — COMPLETE)**:
 - R1 → 5 items remediated (O(N) badge preloading, O(N^2) collision, EX_PARTIAL_FAIL strictness, decoupling DevelopRow, watermark fail-open).
@@ -107,7 +115,7 @@ D3 → D4 → D5 → D7. Sub-component reviews at D1c + D2b boundaries.
 |-----------------------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------|
 | `photohelper-cli`     | **implemented (session 01+04+05+06+07)**| clap v4 + 8 subcommands; `ingest`+`cull`+`dedup`+`develop` real; stubs exit 69. heartbeat.rs shared. |
 | `photohelper-core`    | **implemented (session 01+04)**         | model + RgbImage; error (13 variants); catalog_glue. |
-| `photohelper-raw`     | **implemented (session 02+04)**         | LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw_rgb. 4 integration tests + 3 CLIP D1c tests. |
+| `photohelper-raw`     | **implemented (session 02+04+16)**      | LibRaw 0.22.1 FFI, exif::read_cr3, decode::read_raw_rgb. Windows MSVC path via vcpkg x64-windows-static-md (session 16). compile_shim refactored. TD-042/TD-043 stop-gaps filed. |
 | `photohelper-ai`      | **implemented (session 04+05)**         | NIMA + CLIP ViT-B/32 int8 (MIT, 85.3 MB). ImageEmbedding, MobileClip, EmbeddingZeroVector+EmbeddingCorruptBytes errors. CLIP_MODEL_SLUG+CLIP_MODEL_MANIFEST_NAME. |
 | `photohelper-sidecar` | **implemented (session 06+07+11+14)**      | XMP sidecar I/O, TD-022 strict pass-through event writer, atomic write, conflict resolution (DN-004), Lightroom namespace compatibility. Robust error handling, TOCTOU fix. NOTE: session-14 Round-3 review left 15 verified findings open (2C+9H+4M+2L; see HANDOFF) — not remediated in session 15 (out of scope). |
 | `photohelper-export`  | **implemented (session 08+15)**         | Resize + watermark + MozJPEG encoding + shared rendering primitives (D1.0): resize_rgb, render_to_jpeg, pixmap_to_rgb, compress_jpeg, load_source_image, shadow_alpha_ramp, MarkPlacement, GeometryError, SourceKind. Lanczos3 premultiplied badge scaling. fit_equal_margin. Single-pass export+watermark via ExportOptions.render_marks/render_shadow. |
