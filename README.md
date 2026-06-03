@@ -6,15 +6,17 @@ configurable long-edge resize plus orientation-aware watermarks. Lightroom /
 Aftershoot / DxO PureRAW-class workflow as a single binary on Linux, macOS,
 and Windows.
 
-> **Project status**: v0.1 in progress — `ingest`, `cull` (NIMA-based aesthetic), `dedup` (CLIP grouping), `develop` (XMP-based metadata development), and `export` (batch resizing & watermark exports) are fully implemented and shipped.
+> **Project status**: v0.1.1 shipped — `ingest`, `cull` (NIMA aesthetic),
+> `dedup` (CLIP grouping), `develop` (XMP metadata), `export` (resize + watermark),
+> `watermark`, and `rename` are fully implemented on **macOS arm64, Linux x86_64,
+> and Windows x86_64** (all binaries are self-contained, no external runtimes required).
 >
-> To learn how to synchronize your developed metadata with Adobe Lightroom Classic, please see the [Lightroom Classic Synchronization Guide](file:///Users/ph/area-de-trabalho/pessoal/photohelper/docs/user-guide/lightroom-sync.md).
->
-> This repo follows the **eng-protocol** — a session-based engineering
-> discipline (see `CLAUDE.md` and `docs/quality-assurance.md`). Changes land
-> in bounded sessions via reviewed PRs to `main`.
+> To synchronize developed metadata with Adobe Lightroom Classic, see the
+> [Lightroom Classic Synchronization Guide](docs/user-guide/lightroom-sync.md).
 
-## Installation (pre-built binaries)
+---
+
+## Installation
 
 Download the latest release archive for your platform from the
 [Releases page](https://github.com/palerique/photohelper/releases).
@@ -24,202 +26,282 @@ Download the latest release archive for your platform from the
 ```bash
 tar xzf photohelper-VERSION-aarch64-apple-darwin.tar.gz
 cd photohelper-VERSION-aarch64-apple-darwin
-xattr -dr com.apple.quarantine photohelper  # bypass Gatekeeper (v0.1: unsigned)
+
+# One-time: remove quarantine flag (v0.1: unsigned binary)
+xattr -dr com.apple.quarantine photohelper
+
+# Install binary
 sudo cp photohelper /usr/local/bin/
-sudo cp libonnxruntime.dylib /usr/local/lib/
-mkdir -p ~/photohelper/models && cp models/* ~/photohelper/models/
-echo 'export PHOTOHELPER_MODEL_DIR="$HOME/photohelper/models"' >> ~/.zshrc && source ~/.zshrc
-photohelper --help
+
+# Install ONNX models (required for cull + dedup only)
+mkdir -p ~/photohelper/models
+cp models/* ~/photohelper/models/
+echo 'export PHOTOHELPER_MODEL_DIR="$HOME/photohelper/models"' >> ~/.zshrc
+source ~/.zshrc
+
+photohelper --version
 ```
+
+> ORT (ONNX Runtime) runs through Apple CoreML on macOS — the binary has no
+> external ORT dependency and is fully self-contained.
 
 ### macOS (Intel — x86_64)
 
-No Intel-native binary is provided (the ORT runtime library has no x86_64-apple-darwin
-prebuilt). Use the **arm64 binary via Rosetta 2** — Apple Silicon binaries run transparently
-on Intel Macs: `xattr -dr com.apple.quarantine photohelper && ./photohelper --help`.
+No Intel-native binary is provided. Use the **arm64 binary via Rosetta 2** —
+Apple Silicon binaries run transparently on Intel Macs without any configuration:
+
+```bash
+xattr -dr com.apple.quarantine photohelper
+./photohelper --version
+```
 
 ### Linux (x86_64)
 
 ```bash
 tar xzf photohelper-VERSION-x86_64-unknown-linux-gnu.tar.gz
 cd photohelper-VERSION-x86_64-unknown-linux-gnu
+
+# Install binary
 sudo cp photohelper /usr/local/bin/
-sudo cp libonnxruntime.so* /usr/local/lib/ && sudo ldconfig
-mkdir -p ~/photohelper/models && cp models/* ~/photohelper/models/
-echo 'export PHOTOHELPER_MODEL_DIR="$HOME/photohelper/models"' >> ~/.bashrc && source ~/.bashrc
-photohelper --help
+
+# Install ONNX models (required for cull + dedup only)
+mkdir -p ~/photohelper/models
+cp models/* ~/photohelper/models/
+echo 'export PHOTOHELPER_MODEL_DIR="$HOME/photohelper/models"' >> ~/.bashrc
+source ~/.bashrc
+
+photohelper --version
 ```
 
-### Windows
+> ORT is statically linked on Linux — the binary is self-contained with no
+> shared library dependencies beyond the standard glibc.
 
-Pre-built Windows binaries are planned for v0.2. In the meantime, Windows users
-can build from source using WSL2 (Ubuntu) and follow the Linux install steps.
+### Windows (x86_64)
 
-> **Note on models**: `PHOTOHELPER_MODEL_DIR` only needs to be set if you use
-> the `cull` or `dedup` subcommands (AI features). All other subcommands work
-> without it.
+```powershell
+# 1. Unzip (Windows 10+ Explorer → "Extract All", or PowerShell)
+Expand-Archive photohelper-VERSION-x86_64-pc-windows-msvc.zip -DestinationPath .
+cd photohelper-VERSION-x86_64-pc-windows-msvc
+
+# 2. Install to a permanent location
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\photohelper\models"
+Copy-Item photohelper.exe "$env:LOCALAPPDATA\photohelper\"
+Copy-Item models\* "$env:LOCALAPPDATA\photohelper\models\" -Recurse
+
+# 3. Add to PATH and set model dir (add to $PROFILE for persistence)
+$env:PATH += ";$env:LOCALAPPDATA\photohelper"
+$env:PHOTOHELPER_MODEL_DIR = "$env:LOCALAPPDATA\photohelper\models"
+
+# 4. Verify
+photohelper --version
+```
+
+To persist across sessions, add these lines to your PowerShell profile
+(`notepad $PROFILE`):
+
+```powershell
+$env:PATH += ";$env:LOCALAPPDATA\photohelper"
+$env:PHOTOHELPER_MODEL_DIR = "$env:LOCALAPPDATA\photohelper\models"
+```
+
+> ORT is statically linked on Windows MSVC — **no `onnxruntime.dll` or other
+> external DLL is needed**. The binary uses Windows 10+ system DirectML libraries
+> (always present).
 
 ---
 
-## Quickstart (contributors)
+## Quickstart
+
+> **`PHOTOHELPER_MODEL_DIR`** only needs to be set for `cull` and `dedup`
+> (AI features). All other subcommands work without it.
+
+The catalog lives at `<source-dir>/.photohelper/catalog.db` by default.
+Pass `--catalog <path>` to use a custom location.
+
+---
+
+### Flow 1 — Full RAW pipeline (ingest → AI cull → dedup → develop → export)
 
 ```bash
-# prerequisites: Rust 1.88.0 (rust-toolchain.toml pins this) + just + prek
-#                + system C/C++ toolchain + pkg-config + GNU make
-#                (LibRaw 0.22.1 is vendored under crates/photohelper-raw/vendor/
-#                 and built via autoconf the first time `cargo build` runs)
-#
-# on macOS: brew install rustup just prek pkgconf git-lfs  # pkgconf provides pkg-config
-#           xcode-select --install                          # if you don't have Xcode CLT yet
-#           rustup set profile minimal && rustup install 1.88.0 --component rustfmt --component clippy
-#           cargo install cargo-audit --locked
-#           git lfs install                                 # one-time; required to pull CR3 fixtures
-#
-# on Debian/Ubuntu: sudo apt install build-essential pkg-config git-lfs rustup just prek
-#                   git lfs install
-# on Fedora:        sudo dnf install make gcc-c++ pkgconf-pkg-config git-lfs rustup just prek
-#                   git lfs install
+# Step 1: Walk the directory and catalog every CR3 file.
+photohelper ingest ~/Pictures/shoots/session-01
 
-just install-hooks      # one-time: install pre-commit + pre-push hooks
-just build              # cargo build --release --all-features --workspace
-just test               # cargo test --all-features --workspace --no-fail-fast
-just ci                 # everything CI runs (fmt-check, lint, test, audit, verify-state)
+# Step 2: Score every photo with the NIMA aesthetic model (1–5 stars).
+photohelper cull \
+  --catalog ~/Pictures/shoots/session-01/.photohelper/catalog.db
+
+# Step 3: Group near-duplicate shots using CLIP embeddings.
+photohelper dedup \
+  --catalog ~/Pictures/shoots/session-01/.photohelper/catalog.db
+
+# Step 4: Write Lightroom-compatible XMP sidecars (ratings, labels, keywords).
+photohelper develop \
+  --catalog ~/Pictures/shoots/session-01/.photohelper/catalog.db \
+  --source  ~/Pictures/shoots/session-01 \
+  --lr-rating --lr-keywords
+
+# Step 5: Export the best shots (≥3 stars) as watermarked JPEGs —
+# marks are composited inside the same encode step (single pass, fastest).
+photohelper export \
+  --catalog    ~/Pictures/shoots/session-01/.photohelper/catalog.db \
+  --output     ~/exports/session-01-final \
+  --long-edge  4000 \
+  --min-rating 3 \
+  --mark1-png  ~/assets/logo-top-right.png \
+  --mark2-png  ~/assets/logo-bottom-left.png \
+  --with-shadow
 ```
 
-### Reset a catalog
+---
 
-To wipe the catalog (so the next ingest starts from a clean slate):
+### Flow 2 — Watermark a folder of JPEGs / PNGs directly
 
-```bash
-# Dry-run — shows what would be deleted; safe to run.
-just clean-catalog "$HOME/Pictures/tests"
-
-# Actually delete.
-just clean-catalog "$HOME/Pictures/tests" --yes
-
-# For a custom --catalog path (the file + its -wal / -shm / .lock siblings):
-just clean-catalog --catalog /path/to/your.db --yes
-```
-
-Original photo files are never touched — only the `.photohelper/` derived
-metadata is removed.
-
-### List ingested photos
+Apply a bottom shadow gradient and two corner PNG marks to every image,
+export as resized JPEGs. No catalog needed.
 
 ```bash
-just list-catalog "$HOME/Pictures/tests"               # pretty table, first 50 rows
-just list-catalog "$HOME/Pictures/tests" --count       # just the row count
-just list-catalog "$HOME/Pictures/tests" --by-camera   # aggregate
-just list-catalog "$HOME/Pictures/tests" --paths-only  # pipe-friendly
-just list-catalog "$HOME/Pictures/tests" --limit 0 --sort path
-```
-
-Read-only against the SQLite catalog at `<ingest-dir>/.photohelper/catalog.db`.
-Pass `--catalog <db-path>` instead of a directory for a custom location.
-Run `just list-catalog --help` for the full flag list.
-
-### Apply shadow + dual corner marks (`watermark`)
-
-Apply a bottom shadow gradient and two corner image marks (PNG badges) to every
-JPEG/PNG/CR3 in a directory, exporting high-quality JPEGs to `--output`:
-
-```bash
-just watermark \
-  --source ~/Pictures/shoots/session-01 \
-  --mark1 ~/assets/logo-top.png \
-  --mark2 ~/assets/logo-bottom.png \
+photohelper watermark \
+  --source ~/Pictures/delivery \
+  --mark1  ~/assets/logo-top.png \
+  --mark2  ~/assets/logo-bottom.png \
   --output ~/exports/watermarked \
   --max-long-edge 2048
 ```
 
-Or directly:
+Input can be JPEG, PNG, or CR3. The output directory must not be inside
+the source directory.
+
+---
+
+### Flow 3 — AI cull only (score shots without exporting)
 
 ```bash
-photohelper watermark \
-  --source <SRC_DIR> --mark1 <PNG> --mark2 <PNG> \
-  --output <OUT_DIR> [--max-long-edge N] [--force] [--strict]
+# Ingest + score, then inspect the catalog with any SQLite tool.
+photohelper ingest ~/Pictures/shoots/session-01
+photohelper cull \
+  --catalog ~/Pictures/shoots/session-01/.photohelper/catalog.db
+
+# The catalog at .photohelper/catalog.db has a `cull_scores` table:
+#   SELECT source_path, aesthetic_score FROM cull_scores
+#   JOIN photos ON photos.id = cull_scores.photo_id
+#   ORDER BY aesthetic_score DESC;
 ```
 
-The output directory must not be inside the source directory. Marks must be PNG
-files. Non-CR3 RAW formats require `--allow-untested-raw`.
+NIMA scores are stored as floats in `[1, 10]`; star ratings are derived
+by mapping to `[1, 5]`.
 
-### Rename with catalog metadata (`rename`)
+---
 
-Copy RAW files (and their `.xmp` sidecars) into `--output` under prefixed filenames
-derived from the catalog's NIMA score and dedup cluster id:
+### Flow 4 — Rename RAW files with score + cluster metadata
+
+Copy RAW files (and their `.xmp` sidecars) into a new directory with
+filenames that encode the AI score and dedup cluster id:
 
 ```bash
-just rename \
+photohelper rename \
   --source ~/Pictures/shoots/session-01 \
   --output ~/exports/renamed
 ```
 
-Or directly:
+Output pattern: `Cluster-{X}_Cull-{Y}-OriginalFilename.ext`
+(e.g. `Cluster-007_Cull-07.85-IMG_1234.CR3`).
+Sidecars are copied verbatim alongside each RAW.
+
+---
+
+### Flow 5 — Export without watermarks (plain resize)
 
 ```bash
-photohelper rename \
-  --source <SRC_DIR> --output <OUT_DIR> [--force] [--strict]
+photohelper export \
+  --catalog    ~/Pictures/shoots/session-01/.photohelper/catalog.db \
+  --output     ~/exports/plain \
+  --long-edge  2048 \
+  --min-rating 0        # export everything regardless of score
 ```
 
-Output filenames follow the pattern `Cluster-{X}_Cull-{Y}-OriginalFilename.ext`
-(e.g. `Cluster-007_Cull-07.85-IMG_1234.CR3`). Rows without a score use `Cull-NONE`;
-rows without a cluster use `Cluster-NONE`. XMP sidecars are copied verbatim alongside
-each RAW file.
+---
 
-### Avoiding the two-shell PATH drift footgun
+### Reset a catalog
 
-If you use Claude Code in one terminal and a separate shell in another, remember
-to `git pull --ff-only origin main` in your own shell after every PR merge.
-Scripts and binaries added in a session (e.g. `scripts/photohelper-clean-catalog.sh`)
-live on `main` only after the PR merges, so a shell that hasn't pulled yet will
-get `zsh: no such file or directory` when trying to run them.
+The catalog lives in `<source-dir>/.photohelper/`. To start fresh:
+
+```bash
+# Preview what would be deleted (never touches original photos)
+rm -rI ~/Pictures/shoots/session-01/.photohelper/
+
+# Or just delete it — photo files are always untouched
+rm -rf ~/Pictures/shoots/session-01/.photohelper/
+```
+
+---
+
+## Subcommand reference
+
+| Subcommand | Status | Description |
+|---|---|---|
+| `ingest` | **Shipped** | CR3 via LibRaw 0.22.1, BLAKE3 content IDs, SQLite catalog |
+| `cull` | **Shipped** | NIMA aesthetic culling (1–5 star ratings) |
+| `dedup` | **Shipped** | MobileCLIP embeddings + duplicate clustering |
+| `develop` | **Shipped** | Lightroom-compatible XMP sidecars (ratings, labels, keywords) |
+| `export` | **Shipped** | Batch JPEG: long-edge resize, watermarks, MozJPEG encoding |
+| `watermark` | **Shipped** | Shadow + dual corner marks on JPEG/PNG/CR3 → JPEG batch |
+| `rename` | **Shipped** | Copy RAW+XMP into `Cluster-X_Cull-Y-Name.ext` prefixes |
+| `run` | Planned | Orchestrate ingest → cull → develop → export |
+| `models` | Planned | Manage AI model bundles |
+| `camera` | Planned | Inspect camera profiles |
+
+---
+
+## Build from source
+
+```bash
+# Prerequisites: Rust 1.88.0 + just + prek + system C/C++ toolchain
+#
+# macOS:
+#   brew install rustup just prek pkgconf git-lfs
+#   xcode-select --install
+#   rustup set profile minimal && rustup install 1.88.0 --component rustfmt clippy
+#   cargo install cargo-audit --locked && git lfs install
+#
+# Linux (Debian/Ubuntu):
+#   sudo apt install build-essential pkg-config git-lfs
+#   # install rustup, just, prek separately; git lfs install
+#
+# Windows:
+#   Install vcpkg and run: vcpkg install libraw:x64-windows-static-md
+#   Set VCPKG_ROOT to your vcpkg root
+
+just install-hooks   # one-time: install pre-commit / pre-push hooks
+just build           # cargo build --release
+just test            # cargo test --all-features --workspace
+just ci              # full local CI parity (fmt, lint, test, audit)
+```
+
+---
 
 ## Roadmap
 
-### Shipped subcommands
+- **v0.1.1** — All core subcommands shipped across macOS arm64, Linux x86_64, and Windows x86_64 ✓
+- **v0.5** — Canon R5/R6 II profiles, semantic scene classification, AI sharpen, DirectML/CUDA acceleration
+- **v1.0** — Per-camera Bayer-domain denoise (PMRID/ELD fine-tuned per body), community calibration
 
-| Subcommand | Status | Notes |
-|---|---|---|
-| `ingest` | **Shipped** | CR3 via LibRaw 0.22.1, BLAKE3 content IDs, SQLite catalog |
-| `cull` | **Shipped** | NIMA aesthetic culling (1–5 star ratings based on NIMA range) |
-| `dedup` | **Shipped** | MobileCLIP-based image embeddings & duplicate clustering |
-| `develop` | **Shipped** | Write Lightroom-compatible XMP sidecars with ratings, labels, and keywords |
-| `export` | **Shipped** | Batch JPEG export with long-edge resize, watermarks, and MozJPEG encoding |
-| `watermark` | **Shipped** | Shadow gradient + dual corner marks on JPEG/PNG/CR3 → JPEG batch |
-| `rename` | **Shipped** | Copy RAW+XMP into `--output` under `Cluster-X_Cull-Y-Name.ext` prefixes |
-| `run` | Planned (session 10+) | Orchestrate ingest → cull → develop → export |
-| `models` | Planned (session 10+) | Manage AI model bundles |
-| `camera` | Planned (session 10+) | Inspect camera profiles |
+---
 
-### Planned milestones
+## Engineering process
 
-- **v0.1 (AI-first MVP)** — `ingest` ✓ + AI culling (NIMA aesthetic + ARNIQA
-  technical quality + MobileCLIP dup grouping → auto 1–5 star rating) + classical
-  develop (demosaic, WB, exposure, tone curve) + AI RGB denoise + JPEG export +
-  XMP sidecars (Lightroom-compatible `crs:` + private `ph:`).
-- **v0.5** — Canon R5 / R6 II profiles, semantic scene classification, AI
-  sharpen, DirectML/CUDA acceleration, per-camera noise calibration.
-- **v1.0** — per-camera Bayer-domain denoise (PMRID/ELD fine-tuned per body)
-  with community calibration — the differentiating moat versus DxO PureRAW
-  and Aftershoot.
+Changes land via bounded, reviewed sessions:
 
-## Development
+1. **Branch** — `session-NN/<slug>` off `main`; `just session-start`
+2. **Plan, review** — `docs/plans/session-NN.md`; plan-review (R1 → R2) before code
+3. **Implement, review** — implementation-review (R1 → R2)
+4. **Ship** — `just session-end`, PR to `main`, merge on green CI
 
-The engineering process here is not optional — it is how changes are made:
-
-1. **Start a session** — branch `session-NN/<slug>` off `main`; `just session-start`.
-2. **Plan, then review** — write `docs/plans/session-NN.md`; review it
-   (Round 1 → Round 2) before any code.
-3. **Implement, then review** — code to the plan; review it (Round 1 → Round 2).
-4. **Ship** — `just session-end`, open a PR to `main`, merge on green CI.
-
-Full protocol: `docs/quality-assurance.md`. Tool-specific rules: `CLAUDE.md`.
-The concrete gate commands live in your stack module, `stacks/rust.md`.
+Full protocol: `docs/quality-assurance.md`. Rules: `CLAUDE.md`.
 
 ## Quality gates
 
 | Gate | Command |
-|------|---------|
+|---|---|
 | Format | `just fmt-check` |
 | Lint (zero warnings) | `just lint` |
 | Test | `just test` |
@@ -229,20 +311,16 @@ The concrete gate commands live in your stack module, `stacks/rust.md`.
 ## Layout
 
 | Path | What |
-|------|------|
-| `CLAUDE.md` | session protocol + quality gates + No-Acceptable-Trade-offs policy |
-| `SESSION-STATE.md` | living session-to-session handoff (read first each session) |
-| `TECH-DEBT.md` | tech-debt ledger (every deferral carries a binding trigger) |
-| `HANDOFF_REPORT.md` | accumulated stakeholder handoff |
-| `docs/quality-assurance.md` | the review protocol (8-agent suite, double-review) |
-| `docs/plans/`, `docs/code-reviews/`, `docs/adr/`, … | per-session + decision artifacts |
-| `stacks/rust.md` | the concrete quality-gate commands for the Rust stack |
+|---|---|
+| `CLAUDE.md` | Session protocol + quality gates + No-Acceptable-Trade-offs policy |
+| `SESSION-STATE.md` | Living session-to-session handoff (read first each session) |
+| `TECH-DEBT.md` | Tech-debt ledger (every deferral carries a binding trigger) |
+| `HANDOFF_REPORT.md` | Accumulated stakeholder handoff |
+| `docs/quality-assurance.md` | Review protocol (8-agent suite, double-review) |
+| `docs/plans/`, `docs/code-reviews/` | Per-session plan + review artifacts |
 | `crates/photohelper-*` | Rust workspace member crates |
 
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE), at
-your option. Unless you explicitly state otherwise, any contribution
-intentionally submitted for inclusion in the work by you, as defined in the
-Apache-2.0 license, shall be dual licensed as above, without any additional
-terms or conditions.
+your option.
