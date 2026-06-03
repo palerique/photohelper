@@ -1553,3 +1553,41 @@ git switch main && git pull --ff-only origin main
 git switch -c session-16/<kebab-slug>
 just session-start
 ```
+
+---
+
+## Checkpoint — session 16 SHIPPED (2026-06-03)
+
+**Status**: SHIPPED. Branch: `session-16/windows-release`. `just ci` GREEN. Windows build verified on GitHub Actions (run #26852199572). PR to main.
+
+### What shipped
+
+- **`crates/photohelper-raw/build.rs`**: Windows MSVC branch via `run_windows_msvc()` — vcpkg `libraw:x64-windows-static-md`. `compile_shim(manifest_dir, include_dir)` refactored to accept a generic include path (used by both Unix/tarball and Windows/vcpkg). Header existence validation added. `cargo:rerun-if-env-changed` for VCPKG_ROOT and friends.
+- **`.github/workflows/release.yml`**: `build-windows-x86_64` job — checkout, version-from-tag (with `0.0.0-dev` fallback for non-tag triggers), vcpkg install, `cargo build --release`, smoke test (`--version`), bundle (zip, ONNX count check, `$ErrorActionPreference='Stop'`), zip verification (try/finally). Workflow release job now `needs: [macos, linux, windows]`. `workflow_dispatch` trigger kept for future manual testing.
+- **`scripts/README-install-windows.md`**: Updated for MSVC target, removed all `onnxruntime.dll` references (ORT statically linked).
+- **TECH-DEBT.md**: TD-029 CLOSED; TD-042 (vcpkg stop-gap), TD-043 (long-path), TD-044 (Windows PR CI gate) filed.
+- **docs/discovery-notes.md**: DN-013 reconciled (item a); DN-041 addendum (MSVC is static .a, not DLL).
+- **docs/analysis/ANL-004-windows-release-preflight.md**: Pre-flight findings (static ORT, vcpkg-0.2.15 x64-windows-static-md default, DirectML system deps).
+
+### GHA-discovered fixes (post-implementation-review)
+
+Two bugs found only during actual GitHub Actions runs:
+1. `${{ env.VCPKG_INSTALLATION_ROOT }}` evaluates to empty in GHA expression context (only reads workflow `env:` vars, not runner pre-installed vars). Fixed by setting `$env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT` in the PowerShell shell.
+2. `GITHUB_REF_NAME` during `workflow_dispatch` is a branch name (e.g. `session-16/windows-release`) which breaks `sed` (slash delimiter) and fails semver validation. Fixed with `0.0.0-dev` fallback when the ref name doesn't match `^[0-9]+\.[0-9]+\.[0-9]`.
+
+### Key architectural facts (binding for future sessions)
+
+- ORT is **statically linked** on all platforms (macOS: CoreML; Linux: libonnxruntime.a; Windows: libonnxruntime.a from Pyke CDN MSVC prebuilt). No DLL bundling ever needed.
+- Windows archive format: `.zip` with `photohelper.exe` + `models/` only.
+- vcpkg crate uses `x64-windows-static-md` triplet by default for MSVC (no `VCPKGRS_TRIPLET` needed in CI). Reads `VCPKG_ROOT` from OS env, not from GHA `env:` context — must be set in shell.
+- Two stop-gaps (TD-042 vcpkg, TD-043 long-path) and one future TD (TD-044 Windows PR CI gate) are open.
+
+### Next session
+
+Session 17: virtual copy + XMP crop support (DN-042). Same bootstrap:
+
+```bash
+git switch main && git pull --ff-only origin main
+git switch -c session-17/<kebab-slug>
+just session-start
+```
