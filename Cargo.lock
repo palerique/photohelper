@@ -1472,6 +1472,7 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "thiserror",
+ "vcpkg",
 ]
 
 [[package]]
